@@ -1,6 +1,13 @@
 import {randomUUID} from 'node:crypto';
 import {spawn, type ChildProcess} from 'node:child_process';
-import {mkdir, open, rm, stat} from 'node:fs/promises';
+import {constants as fsConstants} from 'node:fs';
+import {
+  mkdir,
+  open,
+  rm,
+  stat,
+  type FileHandle,
+} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import type {Writable} from 'node:stream';
 import {finished} from 'node:stream/promises';
@@ -13,6 +20,9 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024;
 const FORCE_KILL_DELAY_MS = 2_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const OUTPUT_LOG_CLOSE_TIMEOUT_MS = 250;
+const OUTPUT_LOG_REMOVE_ATTEMPTS = 3;
+const OUTPUT_LOG_REMOVE_RETRY_MS = 25;
 
 export interface RunCommandInput {
   command: string;
@@ -28,6 +38,7 @@ export interface CommandOutput {
   stdout: string;
   stderr: string;
   fullOutputPath?: string;
+  outputLogCleanup?: 'sanitized' | 'failed';
 }
 
 export interface ProcessController {
@@ -73,6 +84,7 @@ export interface RunCommandRuntimeOptions {
   env?: NodeJS.ProcessEnv;
   processController?: ProcessController;
   removeOutputLog?: (path: string) => Promise<void>;
+  sanitizeOutputLog?: (path: string) => Promise<void>;
   timers?: CommandTimerController;
 }
 
@@ -575,6 +587,107 @@ function decode(chunks: Buffer[]): string {
   return decoded.slice(0, endIndex);
 }
 
+async function ensureOutputLogClosed(
+  outputLog: Writable,
+  outputLogFinished: Promise<void>,
+): Promise<boolean> {
+  if (!outputLog.writableEnded && !outputLog.destroyed) outputLog.end();
+  await new Promise<void>((complete) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      complete();
+    };
+    const timeout = setTimeout(finish, OUTPUT_LOG_CLOSE_TIMEOUT_MS);
+    void outputLogFinished.then(finish);
+  });
+  if (outputLog.closed) return true;
+  if (!outputLog.destroyed) outputLog.destroy();
+  if (outputLog.closed) return true;
+
+  return new Promise<boolean>((complete) => {
+    let settled = false;
+    const finish = (closed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      outputLog.removeListener('close', onClose);
+      complete(closed);
+    };
+    const onClose = (): void => finish(true);
+    const timeout = setTimeout(
+      () => finish(outputLog.closed),
+      OUTPUT_LOG_CLOSE_TIMEOUT_MS,
+    );
+    outputLog.once('close', onClose);
+  });
+}
+
+async function sanitizeOutputLogFile(path: string): Promise<void> {
+  const handle = await open(
+    path,
+    fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+  );
+  let failed = false;
+  try {
+    try {
+      await handle.truncate(0);
+    } catch {
+      failed = true;
+    }
+    try {
+      await handle.chmod(0o600);
+    } catch {
+      failed = true;
+    }
+  } finally {
+    await handle.close().catch(() => {
+      failed = true;
+    });
+  }
+  if (failed) throw new Error('output log sanitization failed');
+}
+
+async function cleanupOutputLogFile(
+  path: string,
+  removeOutputLog: (path: string) => Promise<void>,
+  sanitizeOutputLog: (path: string) => Promise<void>,
+): Promise<'removed' | 'sanitized' | 'failed'> {
+  for (let attempt = 1; attempt <= OUTPUT_LOG_REMOVE_ATTEMPTS; attempt += 1) {
+    try {
+      await removeOutputLog(path);
+      return 'removed';
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 'removed';
+      }
+      if (attempt < OUTPUT_LOG_REMOVE_ATTEMPTS) {
+        await delay(OUTPUT_LOG_REMOVE_RETRY_MS);
+      }
+    }
+  }
+
+  try {
+    await sanitizeOutputLog(path);
+    return 'sanitized';
+  } catch {
+    return 'failed';
+  }
+}
+
+function outputLogCleanupData(
+  outputLogCleanup: 'sanitized' | 'failed',
+): CommandOutput {
+  return {
+    exitCode: null,
+    stdout: '',
+    stderr: '',
+    outputLogCleanup,
+  };
+}
+
 export async function runCommand(
   input: RunCommandInput,
   context: ToolContext,
@@ -628,17 +741,38 @@ export async function runCommand(
 
   const removeOutputLog = runtime.removeOutputLog
     ?? ((path: string) => rm(path, {force: true}));
+  const sanitizeOutputLog = runtime.sanitizeOutputLog
+    ?? sanitizeOutputLogFile;
+  let outputHandle: FileHandle | undefined;
   let outputLog: Writable;
   try {
     await mkdir(tempDir, {recursive: true});
     if (runtime.createOutputLog === undefined) {
-      const outputHandle = await open(fullOutputPath, 'wx', 0o600);
+      outputHandle = await open(fullOutputPath, 'wx', 0o600);
       outputLog = outputHandle.createWriteStream();
+      outputHandle = undefined;
     } else {
       outputLog = await runtime.createOutputLog(fullOutputPath);
     }
   } catch {
-    await removeOutputLog(fullOutputPath).catch(() => undefined);
+    let outputHandleClosed = true;
+    await outputHandle?.close().catch(() => {
+      outputHandleClosed = false;
+    });
+    const cleanup = outputHandleClosed
+      ? await cleanupOutputLogFile(
+        fullOutputPath,
+        removeOutputLog,
+        sanitizeOutputLog,
+      )
+      : 'failed';
+    if (cleanup !== 'removed') {
+      return failure(
+        'OUTPUT_LOG_CLEANUP_FAILED',
+        '无法完整清理命令输出日志',
+        outputLogCleanupData(cleanup),
+      );
+    }
     return failure('OUTPUT_LOG_FAILED', '无法创建命令输出日志');
   }
 
@@ -657,9 +791,24 @@ export async function runCommand(
       ...(runtime.env === undefined ? {} : {env: runtime.env}),
     });
   } catch {
-    outputLog.end();
-    await outputLogFinished;
-    await removeOutputLog(fullOutputPath).catch(() => undefined);
+    const outputLogClosed = await ensureOutputLogClosed(
+      outputLog,
+      outputLogFinished,
+    );
+    const cleanup = outputLogClosed
+      ? await cleanupOutputLogFile(
+        fullOutputPath,
+        removeOutputLog,
+        sanitizeOutputLog,
+      )
+      : 'failed';
+    if (cleanup !== 'removed') {
+      return failure(
+        'OUTPUT_LOG_CLEANUP_FAILED',
+        '无法完整清理命令输出日志',
+        outputLogCleanupData(cleanup),
+      );
+    }
     return failure('COMMAND_EXECUTION_FAILED', '无法启动命令');
   }
 
@@ -874,25 +1023,46 @@ export async function runCommand(
   }
   signal.removeEventListener('abort', abort);
 
-  await outputLogFinished;
-
   const logWriteFailed = terminationReason === 'output-log-failed'
     || outputLogError !== undefined;
+  const outputLogClosed = await ensureOutputLogClosed(
+    outputLog,
+    outputLogFinished,
+  );
+  let outputLogCleanup: CommandOutput['outputLogCleanup'];
+  if (!outputLogClosed) {
+    outputLogCleanup = 'failed';
+  } else if (!truncated || logWriteFailed) {
+    const cleanup = await cleanupOutputLogFile(
+      fullOutputPath,
+      removeOutputLog,
+      sanitizeOutputLog,
+    );
+    if (cleanup !== 'removed') outputLogCleanup = cleanup;
+  }
+
   const data: CommandOutput = {
     exitCode: outcome.exitCode,
     stdout: decode(stdoutChunks),
     stderr: decode(stderrChunks),
-    ...(truncated && !logWriteFailed ? {fullOutputPath} : {}),
+    ...(truncated && !logWriteFailed && outputLogCleanup === undefined
+      ? {fullOutputPath}
+      : {}),
+    ...(outputLogCleanup === undefined ? {} : {outputLogCleanup}),
   };
-
-  if (!truncated || logWriteFailed) {
-    await removeOutputLog(fullOutputPath).catch(() => undefined);
-  }
 
   if (cleanupError !== undefined) {
     return failure(
       'PROCESS_TREE_CLEANUP_FAILED',
       '无法确认命令进程树已完整退出',
+      data,
+      truncated,
+    );
+  }
+  if (outputLogCleanup !== undefined) {
+    return failure(
+      'OUTPUT_LOG_CLEANUP_FAILED',
+      '无法完整清理命令输出日志',
       data,
       truncated,
     );

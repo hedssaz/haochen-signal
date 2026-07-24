@@ -8,13 +8,14 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join, relative} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {Writable} from 'node:stream';
-import {afterEach, beforeEach, describe, expect, it} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {
   createWindowsProcessController,
   runCommand,
@@ -222,6 +223,100 @@ describe('foreground command tool', () => {
     },
     TEST_TIMEOUT_MS,
   );
+
+  it('retries failed log deletion, sanitizes the residue and reports cleanup status', async () => {
+    let logPath: string | undefined;
+    let outputLog: Writable | undefined;
+    let removeAttempts = 0;
+    const closedBeforeRemove: boolean[] = [];
+    const result = await runCommand({
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write("secret-output")'],
+      maxOutputBytes: 1,
+    }, context, AbortSignal.timeout(TEST_TIMEOUT_MS), {
+      async createOutputLog(path) {
+        logPath = path;
+        await mkdir(dirname(path), {recursive: true});
+        await writeFile(path, 'partial-secret', {mode: 0o644});
+        outputLog = new Writable({
+          write(_chunk, _encoding, callback) {
+            callback(Object.assign(new Error('disk failure'), {code: 'EIO'}));
+          },
+        });
+        return outputLog;
+      },
+      async removeOutputLog() {
+        removeAttempts += 1;
+        closedBeforeRemove.push(outputLog?.closed === true);
+        throw Object.assign(new Error('permission denied'), {code: 'EACCES'});
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'OUTPUT_LOG_CLEANUP_FAILED'},
+      data: {outputLogCleanup: 'sanitized'},
+    });
+    expect(result.data).not.toHaveProperty('fullOutputPath');
+    expect(JSON.stringify(result)).not.toContain(logPath);
+    expect(removeAttempts).toBe(3);
+    expect(closedBeforeRemove).toEqual([true, true, true]);
+    expect(logPath).toBeDefined();
+    await expect(readFile(logPath ?? '', 'utf8')).resolves.toBe('');
+    expect((await stat(logPath ?? '')).mode & 0o777).toBe(0o600);
+  });
+
+  it('reports sanitized cleanup status when output-log creation fails early', async () => {
+    let logPath: string | undefined;
+    const result = await runCommand({
+      command: process.execPath,
+    }, context, AbortSignal.timeout(TEST_TIMEOUT_MS), {
+      async createOutputLog(path) {
+        logPath = path;
+        await mkdir(dirname(path), {recursive: true});
+        await writeFile(path, 'early-secret', {mode: 0o644});
+        throw new Error('creation failed');
+      },
+      async removeOutputLog() {
+        throw Object.assign(new Error('permission denied'), {code: 'EACCES'});
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'OUTPUT_LOG_CLEANUP_FAILED'},
+      data: {outputLogCleanup: 'sanitized'},
+    });
+    expect(JSON.stringify(result)).not.toContain(logPath);
+    await expect(readFile(logPath ?? '', 'utf8')).resolves.toBe('');
+    expect((await stat(logPath ?? '')).mode & 0o777).toBe(0o600);
+  });
+
+  it('cancels the bounded output-log close timer after normal completion', async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+    try {
+      const result = await runCommand({
+        command: process.execPath,
+        args: ['-e', 'process.stdout.write("done")'],
+      }, context, AbortSignal.timeout(TEST_TIMEOUT_MS));
+
+      expect(result.ok).toBe(true);
+      const closeTimers = setTimeoutSpy.mock.calls.flatMap((call, index) => (
+        call[1] === 250
+          ? [setTimeoutSpy.mock.results[index]?.value as NodeJS.Timeout]
+          : []
+      ));
+      expect(closeTimers.length).toBeGreaterThan(0);
+      for (const timer of closeTimers) {
+        expect(clearTimeoutSpy).toHaveBeenCalledWith(timer);
+      }
+    } finally {
+      setTimeoutSpy.mockRestore();
+      clearTimeoutSpy.mockRestore();
+    }
+  });
 
   it('cancels with SIGTERM and waits for graceful process cleanup', async () => {
     const pidPath = join(workspace, 'cancel.pid');
