@@ -3,6 +3,19 @@ import {randomUUID} from 'node:crypto';
 import {basename, dirname, join} from 'node:path';
 import {parseConfig, type HaochenConfig} from './schema.js';
 
+export interface SaveFileOperations {
+  mkdir: (path: string, options: {recursive: true}) => Promise<unknown>;
+  writeFile: (
+    path: string,
+    contents: string,
+    options: {encoding: 'utf8'; mode: number},
+  ) => Promise<void>;
+  rename: (from: string, to: string) => Promise<void>;
+  unlink: (path: string) => Promise<void>;
+}
+
+const defaultSaveFileOperations: SaveFileOperations = {mkdir, writeFile, rename, unlink};
+
 export async function loadConfig(path: string): Promise<HaochenConfig | undefined> {
   let contents: string;
 
@@ -16,20 +29,24 @@ export async function loadConfig(path: string): Promise<HaochenConfig | undefine
   return parseConfig(JSON.parse(contents));
 }
 
-export async function saveConfig(path: string, config: HaochenConfig): Promise<void> {
+export async function saveConfig(
+  path: string,
+  config: HaochenConfig,
+  files: SaveFileOperations = defaultSaveFileOperations,
+): Promise<void> {
   const directory = dirname(path);
   const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
 
-  await mkdir(directory, {recursive: true});
+  await files.mkdir(directory, {recursive: true});
 
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
+    await files.writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
       encoding: 'utf8',
       mode: 0o600,
     });
-    await rename(temporaryPath, path);
+    await files.rename(temporaryPath, path);
   } catch (error: unknown) {
-    await unlink(temporaryPath).catch(() => undefined);
+    await files.unlink(temporaryPath).catch(() => undefined);
     throw error;
   }
 }

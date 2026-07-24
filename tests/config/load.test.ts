@@ -1,6 +1,6 @@
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import {mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {loadConfig, saveConfig} from '../../src/config/load.js';
 import {parseConfig} from '../../src/config/schema.js';
@@ -35,6 +35,18 @@ describe('configuration', () => {
       auditDir: '/home/wolf/.local/state/haochen/audit',
     });
   });
+
+  for (const variable of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME'] as const) {
+    for (const value of ['', '  ', 'relative/haochen']) {
+      it(`falls back when ${variable} is not a non-empty absolute path: ${JSON.stringify(value)}`, () => {
+        expect(getAppPaths({[variable]: value}, '/home/wolf')).toEqual({
+          configFile: '/home/wolf/.config/haochen/config.json',
+          sessionsDir: '/home/wolf/.local/share/haochen/sessions',
+          auditDir: '/home/wolf/.local/state/haochen/audit',
+        });
+      });
+    }
+  }
 });
 
 describe('config files', () => {
@@ -75,6 +87,94 @@ describe('config files', () => {
       await expect(readFile(path, 'utf8')).resolves.toBe(`${JSON.stringify(config, null, 2)}\n`);
       expect((await stat(path)).mode & 0o777).toBe(0o600);
       expect(await readdir(join(directory, 'nested'))).toEqual(['config.json']);
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('writes a private temporary file beside the target before renaming it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
+    const path = join(directory, 'nested', 'config.json');
+    const config = parseConfig({baseUrl: 'https://example.test/v1', model: 'wolf-1'});
+    const events: string[] = [];
+    const files = {
+      mkdir: vi.fn(async () => {
+        events.push('mkdir');
+      }),
+      writeFile: vi.fn(async (
+        temporaryPath: string,
+        _contents: string,
+        _options: {encoding: 'utf8'; mode: number},
+      ) => {
+        events.push(`write:${temporaryPath}`);
+      }),
+      rename: vi.fn(async (temporaryPath: string, targetPath: string) => {
+        events.push(`rename:${temporaryPath}:${targetPath}`);
+      }),
+      unlink: vi.fn(async (temporaryPath: string) => {
+        events.push(`unlink:${temporaryPath}`);
+      }),
+    };
+
+    try {
+      await saveConfig(path, config, files);
+
+      const [temporaryPath, , options] = files.writeFile.mock.calls[0] ?? [];
+      expect(typeof temporaryPath).toBe('string');
+      if (typeof temporaryPath !== 'string') throw new Error('missing temporary path');
+      expect(dirname(temporaryPath)).toBe(dirname(path));
+      expect(options).toEqual({encoding: 'utf8', mode: 0o600});
+      expect(files.rename).toHaveBeenCalledWith(temporaryPath, path);
+      expect(files.unlink).not.toHaveBeenCalled();
+      expect(events).toEqual([
+        'mkdir',
+        `write:${temporaryPath}`,
+        `rename:${temporaryPath}:${path}`,
+      ]);
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('cleans the temporary file and preserves a rename failure', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
+    const path = join(directory, 'nested', 'config.json');
+    const config = parseConfig({baseUrl: 'https://example.test/v1', model: 'wolf-1'});
+    const renameFailure = new Error('rename failed');
+    const events: string[] = [];
+    const files = {
+      mkdir: vi.fn(async () => {
+        events.push('mkdir');
+      }),
+      writeFile: vi.fn(async (
+        temporaryPath: string,
+        _contents: string,
+        _options: {encoding: 'utf8'; mode: number},
+      ) => {
+        events.push(`write:${temporaryPath}`);
+      }),
+      rename: vi.fn(async (temporaryPath: string) => {
+        events.push(`rename:${temporaryPath}`);
+        throw renameFailure;
+      }),
+      unlink: vi.fn(async (temporaryPath: string) => {
+        events.push(`unlink:${temporaryPath}`);
+      }),
+    };
+
+    try {
+      await expect(saveConfig(path, config, files)).rejects.toBe(renameFailure);
+
+      const [temporaryPath] = files.writeFile.mock.calls[0] ?? [];
+      expect(typeof temporaryPath).toBe('string');
+      if (typeof temporaryPath !== 'string') throw new Error('missing temporary path');
+      expect(files.unlink).toHaveBeenCalledWith(temporaryPath);
+      expect(events).toEqual([
+        'mkdir',
+        `write:${temporaryPath}`,
+        `rename:${temporaryPath}`,
+        `unlink:${temporaryPath}`,
+      ]);
     } finally {
       await rm(directory, {recursive: true, force: true});
     }

@@ -14,6 +14,18 @@ describe('resolveApiKey', () => {
     expect(keychain).not.toHaveBeenCalled();
   });
 
+  it('uses a keychain value without prompting', async () => {
+    const prompt = vi.fn(async () => 'prompt-value');
+
+    await expect(resolveApiKey({
+      env: {},
+      readKeychain: async () => 'keychain-value',
+      prompt,
+    })).resolves.toBe('keychain-value');
+
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   it('falls back through keychain and prompt', async () => {
     await expect(resolveApiKey({
       env: {},
