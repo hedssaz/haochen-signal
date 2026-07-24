@@ -10,6 +10,7 @@ import {
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {expect, it} from 'vitest';
+import {jsonPrefixStatus} from '../../src/sessions/json-prefix.js';
 import {createSessionId, SessionStore} from '../../src/sessions/store.js';
 
 it('creates unique UUID session IDs', () => {
@@ -48,6 +49,47 @@ it('rejects a session file symlink that escapes the store root', async () => {
       {type: 'user', at: 1, text: 'must-not-append'},
     )).rejects.toThrow(/invalid session id/i);
     await expect(readFile(victim, 'utf8')).resolves.toBe('do-not-change');
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('reads an empty session and appends its first event', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+
+  try {
+    await writeFile(store.pathFor('empty-session'), '');
+
+    await expect(store.read('empty-session')).resolves.toEqual([]);
+
+    await store.append(
+      'empty-session',
+      {type: 'user', at: 1, text: 'first'},
+    );
+    await expect(store.read('empty-session')).resolves.toEqual([
+      {type: 'user', at: 1, text: 'first'},
+    ]);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('lists an empty session with a stable zero update time', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+
+  try {
+    await writeFile(store.pathFor('empty-session'), '');
+    await store.append(
+      'active-session',
+      {type: 'user', at: 1, text: 'active'},
+    );
+
+    await expect(store.list()).resolves.toEqual([
+      {id: 'active-session', updatedAt: 1},
+      {id: 'empty-session', updatedAt: 0},
+    ]);
   } finally {
     await rm(tempDir, {recursive: true, force: true});
   }
@@ -214,6 +256,32 @@ it.each([
       'session-1',
       {type: 'assistant', at: 3, text: 'must-not-append'},
     )).rejects.toThrow(/line 2/i);
+    await expect(readFile(store.pathFor('session-1'), 'utf8')).resolves.toBe(contents);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it.each([
+  ['NBSP', '\u00a0'],
+  ['vertical tab', '\u000b'],
+  ['form feed', '\u000c'],
+  ['BOM', '\ufeff'],
+  ['line separator', '\u2028'],
+])('rejects non-JSON whitespace in a final line: %s', async (_name, whitespace) => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+  const contents = `{"type"${whitespace}:`;
+
+  try {
+    await writeFile(store.pathFor('session-1'), contents);
+
+    expect(jsonPrefixStatus(contents)).toBe('invalid');
+    await expect(store.read('session-1')).rejects.toThrow(/line 1/i);
+    await expect(store.append(
+      'session-1',
+      {type: 'assistant', at: 2, text: 'must-not-append'},
+    )).rejects.toThrow(/line 1/i);
     await expect(readFile(store.pathFor('session-1'), 'utf8')).resolves.toBe(contents);
   } finally {
     await rm(tempDir, {recursive: true, force: true});

@@ -160,3 +160,33 @@ it('redacts explicit compound credential field names', () => {
     authorizationHeader: '[REDACTED]',
   });
 });
+
+it('redacts arbitrary values from raw credential header lines', () => {
+  expect(redactValue([
+    'authorization: Digest username="wolf", response="digest-secret"',
+    'Proxy-Authorization=AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE',
+    'Cookie: session=cookie-secret; theme=dark',
+    'Set-Cookie=session=new-secret; HttpOnly',
+    'x-api-key: opaque-api-secret',
+    'X-Safe-Header: visible',
+  ].join('\n'))).toBe([
+    'authorization: [REDACTED]',
+    'Proxy-Authorization=[REDACTED]',
+    'Cookie: [REDACTED]',
+    'Set-Cookie=[REDACTED]',
+    'x-api-key: [REDACTED]',
+    'X-Safe-Header: visible',
+  ].join('\n'));
+});
+
+it('redacts complete and truncated private-key blocks with extended labels', () => {
+  expect(redactValue(
+    'before -----BEGIN PGP PRIVATE KEY BLOCK-----\n'
+    + 'pgp-private-material\n'
+    + '-----END PGP PRIVATE KEY BLOCK----- after',
+  )).toBe('before [REDACTED] after');
+
+  expect(redactValue(
+    'before -----BEGIN PGP PRIVATE KEY BLOCK-----\ntruncated-private-material',
+  )).toBe('before [REDACTED]');
+});

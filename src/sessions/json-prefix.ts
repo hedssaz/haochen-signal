@@ -23,6 +23,13 @@ type Token =
   | {type: 'literal'; expected: string; offset: number}
   | {type: 'number'; value: string};
 
+function isJsonWhitespace(character: string): boolean {
+  return character === '\u0020'
+    || character === '\t'
+    || character === '\r'
+    || character === '\n';
+}
+
 function numberStatus(value: string): 'complete' | 'prefix' | 'invalid' {
   let offset = 0;
   if (value[offset] === '-') {
@@ -183,7 +190,7 @@ export function jsonPrefixStatus(source: string): JsonPrefixStatus {
       continue;
     }
 
-    if (/\s/.test(character)) {
+    if (isJsonWhitespace(character)) {
       offset += 1;
       continue;
     }

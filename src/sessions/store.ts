@@ -85,6 +85,7 @@ export class SessionStore {
 
   async read(sessionId: string): Promise<SessionEvent[]> {
     const contents = await readUtf8(this.pathFor(sessionId));
+    if (contents.length === 0) return [];
     const lines = contents.split('\n');
     const endsWithNewline = contents.endsWith('\n');
     if (endsWithNewline) lines.pop();
@@ -119,16 +120,15 @@ export class SessionStore {
     const sessions = await Promise.all(
       entries
         .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
-        .map(async (entry): Promise<SessionInfo | undefined> => {
+        .map(async (entry): Promise<SessionInfo> => {
           const id = entry.name.slice(0, -'.jsonl'.length);
           const events = await this.read(id);
           const finalEvent = events.at(-1);
-          return finalEvent ? {id, updatedAt: finalEvent.at} : undefined;
+          return {id, updatedAt: finalEvent?.at ?? 0};
         }),
     );
 
     return sessions
-      .filter((session): session is SessionInfo => session !== undefined)
       .sort((left, right) =>
         right.updatedAt - left.updatedAt || left.id.localeCompare(right.id));
   }
