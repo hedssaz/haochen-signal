@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 .worktrees/
+.superpowers/
 .DS_Store
 *.log
 .env
