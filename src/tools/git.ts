@@ -4,14 +4,19 @@ import {runCommand, type CommandOutput} from './command.js';
 import type {ToolContext, ToolResult} from './types.js';
 
 const DEFAULT_LOG_LIMIT = 20;
-const LOG_RECORD_SEPARATOR = '\x1e';
-const LOG_FIELD_SEPARATOR = '\x1f';
+const STATUS_ARGS = [
+  '-c',
+  'core.fsmonitor=false',
+  'status',
+  '--short',
+  '--branch',
+];
 const LOG_FORMAT = [
   '%H',
   '%an',
   '%aI',
   '%s',
-].join('%x1f') + '%x1e';
+].join('%x00');
 
 export interface GitStatusOutput {
   porcelain: string;
@@ -43,24 +48,53 @@ export interface GitLogOutput {
   fullOutputPath?: string;
 }
 
-function failure<T>(code: string, message: string): ToolResult<T> {
+function failure<T>(
+  code: string,
+  message: string,
+  data?: T,
+  truncated?: boolean,
+): ToolResult<T> {
   return {
     ok: false,
     summary: message,
+    ...(data === undefined ? {} : {data}),
     error: {code, message},
+    ...(truncated === undefined ? {} : {truncated}),
   };
 }
 
 function propagateCommandFailure<T>(
   result: ToolResult<CommandOutput>,
+  mapOutput: (output: CommandOutput) => T,
 ): ToolResult<T> {
   const code = result.error?.code ?? 'GIT_COMMAND_FAILED';
   const message = result.error?.message ?? 'Git 命令执行失败';
+  const data = result.data?.fullOutputPath === undefined
+    ? undefined
+    : mapOutput(result.data);
+  return failure(code, message, data, result.truncated);
+}
+
+function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.toUpperCase().startsWith('GIT_')) environment[key] = value;
+  }
+
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
   return {
-    ...failure<T>(code, message),
-    ...(result.truncated === undefined
-      ? {}
-      : {truncated: result.truncated}),
+    ...environment,
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: nullDevice,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: nullDevice,
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_PAGER: 'cat',
+    GIT_TERMINAL_PROMPT: '0',
+    LANG: 'C',
+    LANGUAGE: 'C',
+    LC_ALL: 'C',
+    PAGER: 'cat',
   };
 }
 
@@ -74,7 +108,9 @@ async function executeGit(
     command: 'git',
     args,
     shell: false,
-  }, context, effectiveSignal);
+  }, context, effectiveSignal, {
+    env: sanitizedGitEnvironment(),
+  });
   return result;
 }
 
@@ -107,11 +143,18 @@ async function hasGitMetadata(workspace: string): Promise<boolean> {
 
 async function repositoryStatusFailure<T>(
   context: ToolContext,
+  data?: T,
+  truncated?: boolean,
 ): Promise<ToolResult<T>> {
   if (await hasGitMetadata(context.workspace)) {
-    return failure('GIT_COMMAND_FAILED', 'Git 命令执行失败');
+    return failure('GIT_COMMAND_FAILED', 'Git 命令执行失败', data, truncated);
   }
-  return failure('NOT_A_GIT_REPOSITORY', '工作区不是 Git 仓库');
+  return failure(
+    'NOT_A_GIT_REPOSITORY',
+    '工作区不是 Git 仓库',
+    data,
+    truncated,
+  );
 }
 
 async function commandFailure<T>(
@@ -119,22 +162,48 @@ async function commandFailure<T>(
   context: ToolContext,
   signal: AbortSignal | undefined,
   commandWasStatus: boolean,
+  mapOutput: (output: CommandOutput) => T,
 ): Promise<ToolResult<T>> {
-  if (!result.ok) return propagateCommandFailure(result);
+  if (!result.ok) return propagateCommandFailure(result, mapOutput);
+  const originalData = result.data?.fullOutputPath === undefined
+    ? undefined
+    : mapOutput(result.data);
   if (commandWasStatus) {
-    return repositoryStatusFailure(context);
+    return repositoryStatusFailure(context, originalData, result.truncated);
   }
 
   const status = await executeGit(
-    ['status', '--short', '--branch'],
+    STATUS_ARGS,
     context,
     signal,
   );
-  if (!status.ok) return propagateCommandFailure(status);
-  if (status.data?.exitCode !== 0) {
-    return repositoryStatusFailure(context);
+  if (!status.ok) {
+    if (originalData !== undefined) {
+      return failure(
+        status.error?.code ?? 'GIT_COMMAND_FAILED',
+        status.error?.message ?? 'Git 命令执行失败',
+        originalData,
+        result.truncated,
+      );
+    }
+    return propagateCommandFailure(status, mapOutput);
   }
-  return failure('GIT_COMMAND_FAILED', 'Git 命令执行失败');
+  if (status.data?.exitCode !== 0) {
+    const statusData = status.data?.fullOutputPath === undefined
+      ? undefined
+      : mapOutput(status.data);
+    return repositoryStatusFailure(
+      context,
+      originalData ?? statusData,
+      result.truncated ?? status.truncated,
+    );
+  }
+  return failure(
+    'GIT_COMMAND_FAILED',
+    'Git 命令执行失败',
+    originalData,
+    result.truncated,
+  );
 }
 
 function outputPath(
@@ -145,26 +214,44 @@ function outputPath(
     : {fullOutputPath: commandOutput.fullOutputPath};
 }
 
+function statusOutput(commandOutput: CommandOutput): GitStatusOutput {
+  return {
+    porcelain: commandOutput.stdout,
+    ...outputPath(commandOutput),
+  };
+}
+
+function diffOutput(commandOutput: CommandOutput): GitDiffOutput {
+  return {
+    text: commandOutput.stdout,
+    ...outputPath(commandOutput),
+  };
+}
+
+function failedLogOutput(commandOutput: CommandOutput): GitLogOutput {
+  return {
+    commits: [],
+    ...outputPath(commandOutput),
+  };
+}
+
 export async function gitStatus(
   context: ToolContext,
   signal?: AbortSignal,
 ): Promise<ToolResult<GitStatusOutput>> {
   const result = await executeGit(
-    ['status', '--short', '--branch'],
+    STATUS_ARGS,
     context,
     signal,
   );
   if (!commandSucceeded(result)) {
-    return commandFailure(result, context, signal, true);
+    return commandFailure(result, context, signal, true, statusOutput);
   }
 
   return {
     ok: true,
     summary: '已读取 Git 状态',
-    data: {
-      porcelain: result.data.stdout,
-      ...outputPath(result.data),
-    },
+    data: statusOutput(result.data),
     truncated: result.truncated,
   };
 }
@@ -180,12 +267,15 @@ export async function gitDiff(
     return failure('INVALID_INPUT', 'staged 必须是布尔值');
   }
 
-  const args = input.staged === true
-    ? ['diff', '--cached']
-    : ['diff'];
+  const args = [
+    'diff',
+    '--no-ext-diff',
+    '--no-textconv',
+    ...(input.staged === true ? ['--cached'] : []),
+  ];
   const result = await executeGit(args, context, signal);
   if (!commandSucceeded(result)) {
-    return commandFailure(result, context, signal, false);
+    return commandFailure(result, context, signal, false, diffOutput);
   }
 
   return {
@@ -193,34 +283,33 @@ export async function gitDiff(
     summary: input.staged === true
       ? '已读取暂存区差异'
       : '已读取工作区差异',
-    data: {
-      text: result.data.stdout,
-      ...outputPath(result.data),
-    },
+    data: diffOutput(result.data),
     truncated: result.truncated,
   };
 }
 
 function parseLog(stdout: string): GitCommit[] {
-  const records = stdout
-    .split(LOG_RECORD_SEPARATOR)
-    .map((record) => record.replace(/^\n+|\n+$/g, ''))
-    .filter((record) => record.length > 0);
+  const fields = stdout.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  if (fields.length % 4 !== 0) {
+    throw new Error('Git 日志记录格式无效');
+  }
 
-  return records.map((record) => {
-    const fields = record.split(LOG_FIELD_SEPARATOR);
-    if (fields.length !== 4) {
-      throw new Error('Git 日志记录格式无效');
-    }
-    const [hash, author, date, subject] = fields;
+  const commits: GitCommit[] = [];
+  for (let index = 0; index < fields.length; index += 4) {
+    const hash = fields[index];
+    const author = fields[index + 1];
+    const date = fields[index + 2];
+    const subject = fields[index + 3];
     if (hash === undefined
       || author === undefined
       || date === undefined
       || subject === undefined) {
       throw new Error('Git 日志记录缺少字段');
     }
-    return {hash, author, date, subject};
-  });
+    commits.push({hash, author, date, subject});
+  }
+  return commits;
 }
 
 export async function gitLog(
@@ -237,20 +326,21 @@ export async function gitLog(
   }
 
   const result = await executeGit(
-    ['log', `--format=${LOG_FORMAT}`, '-n', String(limit)],
+    ['log', '-z', `--format=${LOG_FORMAT}`, '-n', String(limit)],
     context,
     signal,
   );
   if (!commandSucceeded(result)) {
-    return commandFailure(result, context, signal, false);
+    return commandFailure(result, context, signal, false, failedLogOutput);
   }
   if (result.truncated) {
     return {
       ...failure<GitLogOutput>(
         'GIT_OUTPUT_TRUNCATED',
         'Git 日志输出超过限制，无法完整解析',
+        failedLogOutput(result.data),
+        true,
       ),
-      truncated: true,
     };
   }
 
@@ -265,6 +355,14 @@ export async function gitLog(
       truncated: false,
     };
   } catch {
-    return failure('GIT_LOG_PARSE_FAILED', '无法解析 Git 日志');
+    const data = result.data.fullOutputPath === undefined
+      ? undefined
+      : failedLogOutput(result.data);
+    return failure(
+      'GIT_LOG_PARSE_FAILED',
+      '无法解析 Git 日志',
+      data,
+      result.truncated,
+    );
   }
 }

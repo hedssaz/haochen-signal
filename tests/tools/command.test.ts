@@ -1,4 +1,5 @@
 import {constants} from 'node:fs';
+import {getEventListeners} from 'node:events';
 import {
   access,
   mkdir,
@@ -6,10 +7,12 @@ import {
   readFile,
   realpath,
   rm,
+  writeFile,
 } from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname, join, relative} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
+import {Writable} from 'node:stream';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {runCommand} from '../../src/tools/command.js';
 import type {ToolContext} from '../../src/tools/types.js';
@@ -161,6 +164,59 @@ describe('foreground command tool', () => {
     ).resolves.toBe('😀');
   });
 
+  it('drops an incomplete UTF-8 tail while preserving its valid prefix', async () => {
+    const result = await runCommand({
+      command: process.execPath,
+      args: ['-e', 'process.stdout.write("a😀")'],
+      maxOutputBytes: 4,
+    }, context, AbortSignal.timeout(TEST_TIMEOUT_MS));
+
+    expect(result).toMatchObject({
+      ok: true,
+      truncated: true,
+      data: {stdout: 'a'},
+    });
+    await expect(
+      readFile(result.data?.fullOutputPath ?? '', 'utf8'),
+    ).resolves.toBe('a😀');
+  });
+
+  it.each(['EIO', 'ENOSPC'])(
+    'removes a partial log and hides its path when streaming fails with %s',
+    async (errorCode) => {
+      let logPath: string | undefined;
+      const result = await runCommand({
+        command: process.execPath,
+        args: [
+          '-e',
+          'process.stdout.write("x".repeat(20000))',
+        ],
+        maxOutputBytes: 1_024,
+      }, context, AbortSignal.timeout(TEST_TIMEOUT_MS), {
+        async createOutputLog(path) {
+          logPath = path;
+          await mkdir(dirname(path), {recursive: true});
+          await writeFile(path, 'partial');
+          return new Writable({
+            write(_chunk, _encoding, callback) {
+              callback(Object.assign(new Error(errorCode), {code: errorCode}));
+            },
+          });
+        },
+      });
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'LOG_WRITE_FAILED'},
+        truncated: true,
+      });
+      expect(result.data).not.toHaveProperty('fullOutputPath');
+      expect(logPath).toBeDefined();
+      await expect(access(logPath ?? '')).rejects.toMatchObject({code: 'ENOENT'});
+    },
+    TEST_TIMEOUT_MS,
+  );
+
   it('cancels with SIGTERM and waits for graceful process cleanup', async () => {
     const pidPath = join(workspace, 'cancel.pid');
     const termPath = join(workspace, 'cancel.term');
@@ -195,6 +251,69 @@ describe('foreground command tool', () => {
     });
     await expect(readFile(termPath, 'utf8')).resolves.toBe('term');
     await waitForProcessExit(pid);
+  });
+
+  it('keeps a Windows tree force-kill timer after the parent closes', async () => {
+    const readyPath = join(workspace, 'windows-controller.ready');
+    const controller = new AbortController();
+    const calls: string[] = [];
+    const activeTimers = new Set<NodeJS.Timeout>();
+    const timers = {
+      setTimeout(callback: () => void, timeoutMs: number): NodeJS.Timeout {
+        const effectiveTimeout = timeoutMs === 2_000 ? 20 : timeoutMs;
+        const timer = setTimeout(() => {
+          activeTimers.delete(timer);
+          callback();
+        }, effectiveTimeout);
+        activeTimers.add(timer);
+        return timer;
+      },
+      clearTimeout(timer: NodeJS.Timeout): void {
+        activeTimers.delete(timer);
+        clearTimeout(timer);
+      },
+    };
+    const processController = {
+      terminateTree(child: {kill(signal: NodeJS.Signals): boolean}): void {
+        calls.push('term');
+        child.kill('SIGTERM');
+      },
+      forceKillTree(): void {
+        calls.push('force');
+      },
+      treeExists(): boolean {
+        return true;
+      },
+      async waitForTreeExit(): Promise<void> {
+        calls.push('wait');
+      },
+    };
+    const command = runCommand({
+      command: process.execPath,
+      args: [
+        '-e',
+        [
+          'const fs = require("node:fs");',
+          'fs.writeFileSync(process.argv[1], "ready");',
+          'process.on("SIGTERM", () => process.exit(0));',
+          'setInterval(() => {}, 1000);',
+        ].join('\n'),
+        readyPath,
+      ],
+      timeoutMs: 5_000,
+    }, context, controller.signal, {
+      processController,
+      timers,
+    });
+
+    await waitForFile(readyPath);
+    controller.abort();
+    const result = await command;
+
+    expect(result.error?.code).toBe('ABORTED');
+    expect(calls).toEqual(['term', 'force', 'wait']);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+    expect(activeTimers).toHaveLength(0);
   });
 
   it.skipIf(process.platform === 'win32')(

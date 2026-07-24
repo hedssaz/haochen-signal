@@ -1,7 +1,10 @@
 import {execFile} from 'node:child_process';
 import {
+  access,
+  chmod,
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -56,6 +59,22 @@ describe('read-only git tools', () => {
     await runGit(workspace, ['commit', '--quiet', '-m', 'initial commit']);
   }
 
+  async function createHelper(
+    name: string,
+    markerPath: string,
+  ): Promise<string> {
+    const helperPath = join(root, name);
+    await writeFile(helperPath, [
+      '#!/usr/bin/env node',
+      'const fs = require("node:fs");',
+      `fs.writeFileSync(${JSON.stringify(markerPath)}, "called");`,
+      'const input = process.argv[2];',
+      'if (input && fs.existsSync(input)) process.stdout.write(fs.readFileSync(input));',
+    ].join('\n'));
+    await chmod(helperPath, 0o755);
+    return helperPath;
+  }
+
   it('returns porcelain status for a modified file', async () => {
     await initializeRepository();
     await writeFile(join(workspace, 'file.txt'), 'initial\nchanged\n');
@@ -99,6 +118,21 @@ describe('read-only git tools', () => {
     expect(result.data?.commits[0]?.date).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
     );
+  });
+
+  it('parses commit subjects containing record and field control characters', async () => {
+    await initializeRepository();
+    const subject = 'control-\x1e-record-\x1f-field';
+    await writeFile(join(workspace, 'file.txt'), 'initial\nsecond\n');
+    await runGit(workspace, ['add', 'file.txt']);
+    await runGit(workspace, ['commit', '--quiet', '-m', subject]);
+
+    const result = await gitLog({limit: 1}, context);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {commits: [{subject}]},
+    });
   });
 
   it.each([0, 101, 1.5])(
@@ -202,4 +236,125 @@ describe('read-only git tools', () => {
       error: {code: 'NOT_A_GIT_REPOSITORY'},
     });
   });
+
+  it('sanitizes inherited Git environment and config scope', async () => {
+    await initializeRepository();
+    await writeFile(join(workspace, 'file.txt'), 'initial\nworkspace\n');
+    const decoy = join(root, 'decoy');
+    await mkdir(decoy);
+    await runGit(decoy, ['init', '--quiet']);
+    const marker = join(root, 'inherited-helper.marker');
+    const helper = await createHelper('inherited-helper', marker);
+    const hostileConfig = join(root, 'hostile.gitconfig');
+    await writeFile(hostileConfig, [
+      '[core]',
+      `\tfsmonitor = ${helper}`,
+      '[diff]',
+      `\texternal = ${helper}`,
+    ].join('\n'));
+    const keys = [
+      'GIT_DIR',
+      'GIT_WORK_TREE',
+      'GIT_EXTERNAL_DIFF',
+      'GIT_CONFIG_SYSTEM',
+      'GIT_CONFIG_GLOBAL',
+      'GIT_CONFIG_NOSYSTEM',
+    ] as const;
+    const previous = Object.fromEntries(
+      keys.map((key) => [key, process.env[key]]),
+    ) as Record<(typeof keys)[number], string | undefined>;
+    process.env.GIT_DIR = join(decoy, '.git');
+    process.env.GIT_WORK_TREE = decoy;
+    process.env.GIT_EXTERNAL_DIFF = helper;
+    process.env.GIT_CONFIG_SYSTEM = hostileConfig;
+    process.env.GIT_CONFIG_GLOBAL = hostileConfig;
+    process.env.GIT_CONFIG_NOSYSTEM = '0';
+
+    try {
+      const status = await gitStatus(context);
+      const diff = await gitDiff({staged: false}, context);
+
+      expect(status.data?.porcelain).toContain(' M file.txt');
+      expect(diff.data?.text).toContain('+workspace');
+      await expect(access(marker)).rejects.toMatchObject({code: 'ENOENT'});
+    } finally {
+      for (const key of keys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
+  it('disables local fsmonitor, external diff and textconv helpers', async () => {
+    await initializeRepository();
+    const marker = join(root, 'local-helper.marker');
+    const helper = await createHelper('local-helper', marker);
+
+    await runGit(workspace, ['config', 'core.fsmonitor', helper]);
+    const status = await gitStatus(context);
+    expect(status.ok).toBe(true);
+    await expect(access(marker)).rejects.toMatchObject({code: 'ENOENT'});
+    await runGit(workspace, ['config', '--unset', 'core.fsmonitor']);
+
+    await writeFile(join(workspace, 'file.txt'), 'initial\nexternal\n');
+    await runGit(workspace, ['config', 'diff.external', helper]);
+    const externalDiff = await gitDiff({staged: false}, context);
+    expect(externalDiff.data?.text).toContain('+external');
+    await expect(access(marker)).rejects.toMatchObject({code: 'ENOENT'});
+    await runGit(workspace, ['config', '--unset', 'diff.external']);
+
+    await writeFile(join(workspace, 'file.txt'), 'initial\n');
+    await writeFile(join(workspace, '.gitattributes'), '*.txt diff=custom\n');
+    await runGit(workspace, ['add', '.gitattributes']);
+    await runGit(workspace, ['commit', '--quiet', '-m', 'add attributes']);
+    await runGit(workspace, ['config', 'diff.custom.textconv', helper]);
+    await writeFile(join(workspace, 'file.txt'), 'initial\ntextconv\n');
+
+    const textconvDiff = await gitDiff({staged: false}, context);
+
+    expect(textconvDiff.data?.text).toContain('+textconv');
+    await expect(access(marker)).rejects.toMatchObject({code: 'ENOENT'});
+  });
+
+  it('preserves complete logs for truncated status, diff and log output', async () => {
+    await initializeRepository();
+    for (let index = 0; index < 700; index += 1) {
+      const name = `untracked-${String(index).padStart(4, '0')}-${'x'.repeat(90)}`;
+      await writeFile(join(workspace, name), '');
+    }
+    const status = await gitStatus(context);
+
+    await writeFile(
+      join(workspace, 'file.txt'),
+      `initial\n${'changed\n'.repeat(12_000)}`,
+    );
+    const diff = await gitDiff({staged: false}, context);
+
+    const messagePath = join(root, 'long-message.txt');
+    await writeFile(messagePath, `${'subject'.repeat(11_000)}\n`);
+    await runGit(workspace, ['add', 'file.txt']);
+    await runGit(workspace, ['commit', '--quiet', '-F', messagePath]);
+    const log = await gitLog({limit: 1}, context);
+
+    expect(status).toMatchObject({ok: true, truncated: true});
+    expect(diff).toMatchObject({ok: true, truncated: true});
+    expect(log).toMatchObject({
+      ok: false,
+      truncated: true,
+      error: {code: 'GIT_OUTPUT_TRUNCATED'},
+    });
+    const paths = [
+      status.data?.fullOutputPath,
+      diff.data?.fullOutputPath,
+      log.data?.fullOutputPath,
+    ];
+    for (const path of paths) {
+      expect(path).toBeDefined();
+      await expect(access(path ?? '')).resolves.toBeUndefined();
+      expect((await readFile(path ?? '')).byteLength).toBeGreaterThan(64 * 1024);
+    }
+  }, 20_000);
 });

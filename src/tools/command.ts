@@ -2,8 +2,10 @@ import {randomUUID} from 'node:crypto';
 import {spawn, type ChildProcess} from 'node:child_process';
 import {mkdir, open, rm, stat} from 'node:fs/promises';
 import {resolve} from 'node:path';
+import type {Writable} from 'node:stream';
 import {finished} from 'node:stream/promises';
 import {setTimeout as delay} from 'node:timers/promises';
+import {TextDecoder} from 'node:util';
 import {resolveWorkspacePath} from '../security/path-boundary.js';
 import type {ToolContext, ToolResult} from './types.js';
 
@@ -26,6 +28,26 @@ export interface CommandOutput {
   stdout: string;
   stderr: string;
   fullOutputPath?: string;
+}
+
+export interface ProcessController {
+  terminateTree(child: ChildProcess): void | Promise<void>;
+  forceKillTree(child: ChildProcess): void | Promise<void>;
+  treeExists(child: ChildProcess): boolean | Promise<boolean>;
+  waitForTreeExit(child: ChildProcess): Promise<void>;
+}
+
+export interface CommandTimerController {
+  setTimeout(callback: () => void, timeoutMs: number): NodeJS.Timeout;
+  clearTimeout(timer: NodeJS.Timeout): void;
+}
+
+export interface RunCommandRuntimeOptions {
+  createOutputLog?: (path: string) => Promise<Writable>;
+  env?: NodeJS.ProcessEnv;
+  processController?: ProcessController;
+  removeOutputLog?: (path: string) => Promise<void>;
+  timers?: CommandTimerController;
 }
 
 type TerminationReason = 'aborted' | 'timeout' | 'output-log-failed';
@@ -115,25 +137,21 @@ function inputFailure<T>(error: unknown): ToolResult<T> {
   return failure('COMMAND_EXECUTION_FAILED', '无法准备命令执行');
 }
 
-function signalProcessTree(
+function signalPosixProcessGroup(
   child: ChildProcess,
   signal: NodeJS.Signals,
 ): void {
   if (child.pid === undefined) return;
 
-  if (process.platform !== 'win32') {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
-    }
-  }
-
   try {
-    child.kill(signal);
-  } catch {
-    // The process may have exited between the state check and the signal.
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+    try {
+      child.kill(signal);
+    } catch {
+      // The process may have exited between the state check and the signal.
+    }
   }
 }
 
@@ -153,11 +171,69 @@ async function waitForProcessGroupExit(child: ChildProcess): Promise<void> {
   }
 }
 
+async function runTaskkill(
+  child: ChildProcess,
+  force: boolean,
+): Promise<void> {
+  if (child.pid === undefined) return;
+  const args = ['/PID', String(child.pid), '/T'];
+  if (force) args.push('/F');
+
+  await new Promise<void>((complete) => {
+    const killer = spawn('taskkill', args, {
+      shell: false,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    killer.once('error', () => complete());
+    killer.once('close', () => complete());
+  });
+}
+
+const POSIX_PROCESS_CONTROLLER: ProcessController = {
+  terminateTree(child) {
+    signalPosixProcessGroup(child, 'SIGTERM');
+  },
+  forceKillTree(child) {
+    signalPosixProcessGroup(child, 'SIGKILL');
+  },
+  treeExists(child) {
+    return processGroupExists(child);
+  },
+  waitForTreeExit(child) {
+    return waitForProcessGroupExit(child);
+  },
+};
+
+const WINDOWS_PROCESS_CONTROLLER: ProcessController = {
+  terminateTree(child) {
+    return runTaskkill(child, false);
+  },
+  forceKillTree(child) {
+    return runTaskkill(child, true);
+  },
+  treeExists(child) {
+    return child.pid !== undefined;
+  },
+  async waitForTreeExit() {
+    // forceKillTree waits for the fixed taskkill process to finish.
+  },
+};
+
+const DEFAULT_TIMERS: CommandTimerController = {
+  setTimeout(callback, timeoutMs) {
+    return setTimeout(callback, timeoutMs);
+  },
+  clearTimeout(timer) {
+    clearTimeout(timer);
+  },
+};
+
 function decode(chunks: Buffer[]): string {
   if (chunks.length === 0) return '';
 
   const bytes = Buffer.concat(chunks);
-  const decoded = bytes.toString('utf8');
+  const decoded = new TextDecoder('utf-8').decode(bytes, {stream: true});
   if (Buffer.byteLength(decoded, 'utf8') <= bytes.length) return decoded;
 
   let usedBytes = 0;
@@ -175,6 +251,7 @@ export async function runCommand(
   input: RunCommandInput,
   context: ToolContext,
   signal: AbortSignal,
+  runtime: RunCommandRuntimeOptions = {},
 ): Promise<ToolResult<CommandOutput>> {
   try {
     validateInput(input);
@@ -210,23 +287,37 @@ export async function runCommand(
 
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  const processController = runtime.processController
+    ?? (process.platform === 'win32'
+      ? WINDOWS_PROCESS_CONTROLLER
+      : POSIX_PROCESS_CONTROLLER);
+  const timers = runtime.timers ?? DEFAULT_TIMERS;
   const tempDir = resolve(context.tempDir);
   const fullOutputPath = resolve(
     tempDir,
     `command-${randomUUID()}.log`,
   );
 
-  let outputHandle: Awaited<ReturnType<typeof open>>;
+  const removeOutputLog = runtime.removeOutputLog
+    ?? ((path: string) => rm(path, {force: true}));
+  let outputLog: Writable;
   try {
     await mkdir(tempDir, {recursive: true});
-    outputHandle = await open(fullOutputPath, 'wx', 0o600);
+    if (runtime.createOutputLog === undefined) {
+      const outputHandle = await open(fullOutputPath, 'wx', 0o600);
+      outputLog = outputHandle.createWriteStream();
+    } else {
+      outputLog = await runtime.createOutputLog(fullOutputPath);
+    }
   } catch {
+    await removeOutputLog(fullOutputPath).catch(() => undefined);
     return failure('OUTPUT_LOG_FAILED', '无法创建命令输出日志');
   }
 
-  const outputLog = outputHandle.createWriteStream();
-  const outputLogFinished = finished(outputLog);
   let outputLogError: unknown;
+  const outputLogFinished = finished(outputLog).catch((error) => {
+    outputLogError ??= error;
+  });
   let child: ChildProcess;
 
   try {
@@ -235,11 +326,12 @@ export async function runCommand(
       shell: input.shell ?? false,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
+      ...(runtime.env === undefined ? {} : {env: runtime.env}),
     });
   } catch {
     outputLog.end();
-    await outputLogFinished.catch(() => undefined);
-    await rm(fullOutputPath, {force: true}).catch(() => undefined);
+    await outputLogFinished;
+    await removeOutputLog(fullOutputPath).catch(() => undefined);
     return failure('COMMAND_EXECUTION_FAILED', '无法启动命令');
   }
 
@@ -266,11 +358,12 @@ export async function runCommand(
   const requestTermination = (reason: TerminationReason): void => {
     if (terminationReason !== undefined || closed) return;
     terminationReason = reason;
-    signalProcessTree(child, 'SIGTERM');
+    void Promise.resolve(processController.terminateTree(child))
+      .catch(() => undefined);
     forceKillPromise = new Promise<void>((complete) => {
-      forceKillTimer = setTimeout(() => {
-        signalProcessTree(child, 'SIGKILL');
-        complete();
+      forceKillTimer = timers.setTimeout(() => {
+        void Promise.resolve(processController.forceKillTree(child))
+          .then(complete, complete);
       }, FORCE_KILL_DELAY_MS);
     });
   };
@@ -314,7 +407,7 @@ export async function runCommand(
   signal.addEventListener('abort', abort, {once: true});
   if (signal.aborted) abort();
 
-  const timeout = setTimeout(
+  const timeout = timers.setTimeout(
     () => requestTermination('timeout'),
     timeoutMs,
   );
@@ -330,30 +423,36 @@ export async function runCommand(
     });
   });
 
-  clearTimeout(timeout);
+  timers.clearTimeout(timeout);
   if (forceKillTimer !== undefined) {
-    if (processGroupExists(child)) {
+    let treeExists = true;
+    try {
+      treeExists = await processController.treeExists(child);
+    } catch {
+      treeExists = true;
+    }
+    if (treeExists) {
       await forceKillPromise;
-      await waitForProcessGroupExit(child);
+      await processController.waitForTreeExit(child);
     } else {
-      clearTimeout(forceKillTimer);
+      timers.clearTimeout(forceKillTimer);
     }
   }
   signal.removeEventListener('abort', abort);
 
-  await outputLogFinished.catch((error) => {
-    outputLogError ??= error;
-  });
+  await outputLogFinished;
 
+  const logWriteFailed = terminationReason === 'output-log-failed'
+    || outputLogError !== undefined;
   const data: CommandOutput = {
     exitCode: outcome.exitCode,
     stdout: decode(stdoutChunks),
     stderr: decode(stderrChunks),
-    ...(truncated ? {fullOutputPath} : {}),
+    ...(truncated && !logWriteFailed ? {fullOutputPath} : {}),
   };
 
-  if (!truncated) {
-    await rm(fullOutputPath, {force: true}).catch(() => undefined);
+  if (!truncated || logWriteFailed) {
+    await removeOutputLog(fullOutputPath).catch(() => undefined);
   }
 
   if (terminationReason === 'aborted') {
@@ -367,9 +466,9 @@ export async function runCommand(
       truncated,
     );
   }
-  if (terminationReason === 'output-log-failed' || outputLogError) {
+  if (logWriteFailed) {
     return failure(
-      'OUTPUT_LOG_FAILED',
+      'LOG_WRITE_FAILED',
       '写入命令输出日志失败',
       data,
       truncated,
