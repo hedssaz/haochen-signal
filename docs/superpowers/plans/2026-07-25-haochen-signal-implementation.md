@@ -1583,7 +1583,7 @@ for (const file of ['dist/cli.mjs', 'dist/haochen-onefile.mjs']) {
 
 - [ ] **Step 3: 写端到端代理流程测试**
 
-本地模拟服务器必须实现两个 Chat Completions 流式响应：
+本地模拟服务器必须按代理循环依次实现以下 Chat Completions 流式响应：
 
 1. 请求 `read_file`；
 2. 收到工具结果后请求 `apply_patch`；
