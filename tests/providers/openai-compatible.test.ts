@@ -207,6 +207,111 @@ describe('OpenAI-compatible chat completions client', () => {
     });
   });
 
+  it('wraps and redacts an invalid apiKey during request construction', async () => {
+    const apiKey = 'invalid\napi-secret';
+    const fetchImpl = vi.fn(async () => sseResponse([
+      {choices: [{delta: {}, finish_reason: 'stop'}]},
+      '[DONE]',
+    ])) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), apiKey, {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // Invalid request headers must fail before fetch.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('Model request construction failed');
+    expect((thrown as Error).message).not.toContain(apiKey);
+  });
+
+  it('wraps and redacts an invalid sensitive config header', async () => {
+    const headerSecret = 'invalid\nheader-secret';
+    const fetchImpl = vi.fn(async () => sseResponse([
+      {choices: [{delta: {}, finish_reason: 'stop'}]},
+      '[DONE]',
+    ])) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+      headers: {'x-api-key': headerSecret},
+    }), 'auth-secret', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // Invalid request headers must fail before fetch.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('Model request construction failed');
+    expect((thrown as Error).message).not.toContain(headerSecret);
+    expect((thrown as Error).message).not.toContain('auth-secret');
+  });
+
+  it('identifies request-body serialization failures before fetch', async () => {
+    const parameters: Record<string, unknown> = {};
+    Object.defineProperty(parameters, 'secret', {
+      enumerable: true,
+      get() {
+        throw new Error('serialization failed for serialize-secret');
+      },
+    });
+    const fetchImpl = vi.fn(async () => sseResponse([
+      {choices: [{delta: {}, finish_reason: 'stop'}]},
+      '[DONE]',
+    ])) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+      headers: {'x-api-key': 'serialize-secret'},
+    }), 'auth-secret', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: '读取文件',
+            parameters,
+          },
+        }],
+      }, new AbortController().signal)) {
+        // Serialization failures must fail before fetch.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('Model request construction failed');
+    expect((thrown as Error).message).not.toContain('serialize-secret');
+    expect((thrown as Error).message).not.toContain('auth-secret');
+  });
+
   it('retries a 429 response using Retry-After before streaming success', async () => {
     let attempts = 0;
     const fetchImpl = vi.fn(async () => {
@@ -673,6 +778,249 @@ describe('OpenAI-compatible chat completions client', () => {
     expect(canceled).toBe(false);
   });
 
+  it('does not wait forever for retry-response cancellation', async () => {
+    vi.useFakeTimers();
+    let cancelStarted = false;
+
+    try {
+      let attempts = 0;
+      const fetchImpl = vi.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          const body = new ReadableStream<Uint8Array>({
+            cancel() {
+              cancelStarted = true;
+              return new Promise<void>(() => {});
+            },
+          });
+          return new Response(body, {
+            status: 503,
+            headers: {'retry-after': '0'},
+          });
+        }
+        return sseResponse([
+          {choices: [{delta: {}, finish_reason: 'stop'}]},
+          '[DONE]',
+        ]);
+      }) as typeof fetch;
+      const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl, sleep});
+      const outcomePromise = (async () => {
+        for await (const _event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '重试'}],
+        }, new AbortController().signal)) {
+          // Consume the successful retry.
+        }
+      })().then(
+        () => ({kind: 'completed' as const}),
+        error => ({kind: 'rejected' as const, error}),
+      );
+      const observed = Promise.race([
+        outcomePromise,
+        new Promise<{kind: 'timeout'}>(resolve => {
+          setTimeout(() => resolve({kind: 'timeout'}), 20);
+        }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(cancelStarted).toBe(true);
+      await expect(observed).resolves.toEqual({kind: 'completed'});
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues retrying when response cancellation rejects', async () => {
+    let attempts = 0;
+    const fetchImpl = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        const body = new ReadableStream<Uint8Array>({
+          cancel() {
+            return Promise.reject(new Error('asynchronous cancel failure'));
+          },
+        });
+        return new Response(body, {
+          status: 503,
+          headers: {'retry-after': '0'},
+        });
+      }
+      return sseResponse([
+        {choices: [{delta: {}, finish_reason: 'stop'}]},
+        '[DONE]',
+      ]);
+    }) as typeof fetch;
+    const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl, sleep});
+
+    for await (const _event of client.stream({
+      model: 'wolf-1',
+      messages: [{role: 'user', content: '重试'}],
+    }, new AbortController().signal)) {
+      // Consume the successful retry.
+    }
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not wait forever for DONE-response cancellation', async () => {
+    vi.useFakeTimers();
+    let cancelStarted = false;
+
+    try {
+      const payload = [
+        `data: ${JSON.stringify({choices: [{delta: {}, finish_reason: 'stop'}]})}\n\n`,
+        'data: [DONE]\n\n',
+      ].join('');
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(payload));
+        },
+        cancel() {
+          cancelStarted = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+      const outcomePromise = (async () => {
+        for await (const _event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '请求'}],
+        }, new AbortController().signal)) {
+          // Consume through DONE.
+        }
+      })().then(
+        () => ({kind: 'completed' as const}),
+        error => ({kind: 'rejected' as const, error}),
+      );
+      const observed = Promise.race([
+        outcomePromise,
+        new Promise<{kind: 'timeout'}>(resolve => {
+          setTimeout(() => resolve({kind: 'timeout'}), 20);
+        }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(cancelStarted).toBe(true);
+      await expect(observed).resolves.toEqual({kind: 'completed'});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not wait forever for cancellation after consumer break', async () => {
+    vi.useFakeTimers();
+    let cancelStarted = false;
+
+    try {
+      const payload =
+        `data: ${JSON.stringify({choices: [{delta: {content: '第一段'}}]})}\n\n`;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(payload));
+        },
+        cancel() {
+          cancelStarted = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+      const outcomePromise = (async () => {
+        for await (const _event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '请求'}],
+        }, new AbortController().signal)) {
+          break;
+        }
+      })().then(
+        () => ({kind: 'completed' as const}),
+        error => ({kind: 'rejected' as const, error}),
+      );
+      const observed = Promise.race([
+        outcomePromise,
+        new Promise<{kind: 'timeout'}>(resolve => {
+          setTimeout(() => resolve({kind: 'timeout'}), 20);
+        }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(20);
+
+      expect(cancelStarted).toBe(true);
+      await expect(observed).resolves.toEqual({kind: 'completed'});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not wait forever for cancellation after operation timeout', async () => {
+    vi.useFakeTimers();
+    let cancelStarted = false;
+
+    try {
+      const body = new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelStarted = true;
+          return new Promise<void>(() => {});
+        },
+      });
+      const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+      const outcomePromise = (async () => {
+        for await (const _event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '请求'}],
+        }, new AbortController().signal)) {
+          // A pending response body cannot produce events.
+        }
+      })().then(
+        () => ({kind: 'completed' as const}),
+        error => ({kind: 'rejected' as const, error}),
+      );
+      const observed = Promise.race([
+        outcomePromise,
+        new Promise<{kind: 'timeout'}>(resolve => {
+          setTimeout(() => resolve({kind: 'timeout'}), 1_020);
+        }),
+      ]);
+
+      await vi.advanceTimersByTimeAsync(1_020);
+      const outcome = await observed;
+
+      expect(cancelStarted).toBe(true);
+      expect(outcome.kind).toBe('rejected');
+      if (outcome.kind === 'rejected') {
+        expect(outcome.error).toMatchObject({name: 'TimeoutError'});
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([502, 503, 504])('retries transient HTTP status %i', async (status) => {
     let attempts = 0;
     const fetchImpl = vi.fn(async () => {
@@ -743,6 +1091,83 @@ describe('OpenAI-compatible chat completions client', () => {
     const [delay] = sleep.mock.calls[0] ?? [];
     expect(delay).toBe(3_000);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('segments huge default retry waits below the Node timer limit', async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+    try {
+      const fetchImpl = vi.fn(async () => new Response('temporary failure', {
+        status: 503,
+        headers: {'retry-after': '3000000'},
+      })) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+      const outcomePromise = (async () => {
+        for await (const _event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '重试'}],
+        }, new AbortController().signal)) {
+          // The operation timeout must fire before the retry delay.
+        }
+      })().then(
+        () => ({kind: 'completed' as const}),
+        error => ({kind: 'rejected' as const, error}),
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+      const delays = setTimeoutSpy.mock.calls.map(([, delay]) => Number(delay));
+      await vi.advanceTimersByTimeAsync(1_000);
+      const outcome = await outcomePromise;
+
+      expect(delays.length).toBeGreaterThanOrEqual(2);
+      expect(Math.max(...delays)).toBeLessThanOrEqual(2_147_483_647);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(outcome.kind).toBe('rejected');
+      if (outcome.kind === 'rejected') {
+        expect(outcome.error).toMatchObject({name: 'TimeoutError'});
+      }
+    } finally {
+      setTimeoutSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('passes the full parsed retry delay to an injected sleep', async () => {
+    let attempts = 0;
+    const fetchImpl = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response('temporary failure', {
+          status: 503,
+          headers: {'retry-after': '3000000'},
+        });
+      }
+      return sseResponse([
+        {choices: [{delta: {}, finish_reason: 'stop'}]},
+        '[DONE]',
+      ]);
+    }) as typeof fetch;
+    const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl, sleep});
+
+    for await (const _event of client.stream({
+      model: 'wolf-1',
+      messages: [{role: 'user', content: '重试'}],
+    }, new AbortController().signal)) {
+      // Consume the successful retry.
+    }
+
+    const [delay] = sleep.mock.calls[0] ?? [];
+    expect(delay).toBe(3_000_000_000);
   });
 
   it('aborts the default retry wait before issuing another request', async () => {

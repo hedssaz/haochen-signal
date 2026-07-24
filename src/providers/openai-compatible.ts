@@ -40,6 +40,7 @@ interface AccumulatedToolCall {
 }
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const SENSITIVE_HEADER_NAME =
   /(?:^|[-_])(?:authorization|cookie|set[-_]?cookie|api[-_]?key|key|token|secret)(?:$|[-_])/i;
 
@@ -96,11 +97,15 @@ function createOperationSignal(
   };
 }
 
-function collectSensitiveValues(headers: Headers, apiKey: string): string[] {
-  const values = new Set<string>();
+function collectSensitiveValues(
+  entries: Iterable<readonly [string, string]>,
+  apiKey: string,
+  initial: Iterable<string> = [],
+): string[] {
+  const values = new Set(initial);
   if (apiKey.length > 0) values.add(apiKey);
 
-  for (const [name, value] of headers) {
+  for (const [name, value] of entries) {
     if (value.length > 0 && SENSITIVE_HEADER_NAME.test(name)) {
       values.add(value);
     }
@@ -165,7 +170,7 @@ function retryDelayMs(response: Response, now: () => number): number {
     : 1_000;
 }
 
-function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
+function sleepSegment(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(signal.reason);
@@ -184,6 +189,24 @@ function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+async function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
+  let remaining = Number.isFinite(ms) && ms > 0 ? ms : 0;
+
+  do {
+    const segment = Math.min(remaining, MAX_TIMER_DELAY_MS);
+    await sleepSegment(segment, signal);
+    remaining -= segment;
+  } while (remaining > 0);
+}
+
+function observeCancellation(cancel: () => Promise<unknown>): void {
+  try {
+    void cancel().catch(() => {});
+  } catch {
+    // Cancellation is best-effort cleanup and must never mask model progress.
+  }
+}
+
 async function fetchResponse(
   fetchImpl: typeof fetch,
   sleep: (ms: number, signal: AbortSignal) => Promise<void>,
@@ -199,7 +222,9 @@ async function fetchResponse(
       return response;
     }
 
-    await response.body?.cancel();
+    if (response.body !== null) {
+      observeCancellation(() => response.body!.cancel());
+    }
     await sleep(retryDelayMs(response, now), signal);
   }
 
@@ -211,11 +236,14 @@ async function* responseChunks(
   signal: AbortSignal,
 ): AsyncGenerator<Uint8Array> {
   const reader = body.getReader();
-  let abortCancellation: Promise<void> | undefined;
+  let cancellationStarted = false;
   let reachedNaturalEof = false;
-  const onAbort = () => {
-    abortCancellation = reader.cancel(signal.reason).catch(() => {});
+  const cancelReader = (reason: unknown) => {
+    if (cancellationStarted) return;
+    cancellationStarted = true;
+    observeCancellation(() => reader.cancel(reason));
   };
+  const onAbort = () => cancelReader(signal.reason);
   signal.addEventListener('abort', onAbort, {once: true});
 
   try {
@@ -232,9 +260,9 @@ async function* responseChunks(
   } finally {
     signal.removeEventListener('abort', onAbort);
     if (!reachedNaturalEof) {
-      await (abortCancellation ?? reader.cancel(new Error(
+      cancelReader(new Error(
         'Model response stream was not fully consumed',
-      )).catch(() => {}));
+      ));
     }
     reader.releaseLock();
   }
@@ -345,10 +373,26 @@ export function createOpenAiCompatibleClient(
       const operation = createOperationSignal(callerSignal, config.timeoutMs);
 
       try {
-        const headers = new Headers(config.headers);
-        headers.set('content-type', 'application/json');
-        headers.set('authorization', `Bearer ${apiKey}`);
-        const secrets = collectSensitiveValues(headers, apiKey);
+        let secrets = collectSensitiveValues(
+          Object.entries(config.headers),
+          apiKey,
+        );
+        let headers: Headers;
+        let body: string;
+        try {
+          headers = new Headers(config.headers);
+          headers.set('content-type', 'application/json');
+          headers.set('authorization', `Bearer ${apiKey}`);
+          secrets = collectSensitiveValues(headers, apiKey, secrets);
+          body = JSON.stringify(requestBody(request));
+        } catch (error) {
+          throw providerError(
+            'Model request construction failed',
+            error,
+            secrets,
+            operation.signal,
+          );
+        }
         let response: Response;
         try {
           response = await fetchResponse(
@@ -359,7 +403,7 @@ export function createOpenAiCompatibleClient(
             {
               method: 'POST',
               headers,
-              body: JSON.stringify(requestBody(request)),
+              body,
               signal: operation.signal,
             },
             operation.signal,
@@ -373,7 +417,9 @@ export function createOpenAiCompatibleClient(
           );
         }
         if (!response.ok) {
-          await response.body?.cancel().catch(() => {});
+          if (response.body !== null) {
+            observeCancellation(() => response.body!.cancel());
+          }
           throw new ModelHttpError(
             response.status,
             httpErrorMessage(response, secrets),
