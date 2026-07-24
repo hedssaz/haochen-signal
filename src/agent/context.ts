@@ -142,19 +142,94 @@ function addTruncatedSystemPrompt(
   if (best !== undefined) messages.push(best);
 }
 
+function createReservedCurrentTask(currentTask: string, maxTokens: number): ModelMessage | undefined {
+  const fullMessage: ModelMessage = {role: 'user', content: `当前任务：${currentTask}`};
+  if (fitsBudget([fullMessage], maxTokens)) return fullMessage;
+
+  let low = 0;
+  let high = estimateTokens(currentTask);
+  let best: ModelMessage | undefined;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate: ModelMessage = {
+      role: 'user',
+      content: `当前任务：${truncateWithEnds(currentTask, middle, '…')}`,
+    };
+    if (fitsBudget([candidate], maxTokens)) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (best !== undefined) return best;
+
+  const minimalTask: ModelMessage = {role: 'user', content: '…'};
+  return fitsBudget([minimalTask], maxTokens) ? minimalTask : undefined;
+}
+
+function addTruncatedRelevantFile(
+  messages: ModelMessage[],
+  file: NonNullable<ContextInput['relevantFiles']>[number],
+  reservedCurrentTask: ModelMessage | undefined,
+  maxTokens: number,
+): void {
+  const fileBudget = Math.floor(maxTokens * FILE_BUDGET_FRACTION);
+  const header = `文件：${file.path}\n`;
+  const canAdd = (contentTokens: number): ModelMessage | undefined => {
+    const candidate: ModelMessage = {
+      role: 'system',
+      content: `${header}${truncateWithEnds(file.content, contentTokens)}`,
+    };
+    if (estimateTokens(candidate.content) > fileBudget) return undefined;
+    const combined = reservedCurrentTask === undefined
+      ? [...messages, candidate]
+      : [...messages, candidate, reservedCurrentTask];
+    return fitsBudget(combined, maxTokens) ? candidate : undefined;
+  };
+
+  let low = 0;
+  let high = estimateTokens(file.content);
+  let best: ModelMessage | undefined;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = canAdd(middle);
+    if (candidate !== undefined) {
+      best = candidate;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  if (best !== undefined) messages.push(best);
+}
+
+/**
+ * JSONL remains append-only. A summary marks the prefix it covers, so this
+ * read-time projection can replace that prefix without rewriting history.
+ */
+function projectCompactedEvents(events: readonly SessionEvent[]): SessionEvent[] {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type !== 'summary' || event.coveredEventCount === undefined) continue;
+    if (event.coveredEventCount > index) continue;
+
+    return [
+      event,
+      ...events.slice(event.coveredEventCount, index),
+      ...events.slice(index + 1),
+    ];
+  }
+  return [...events];
+}
+
 /**
  * Selects context deterministically. The current task is reserved first, then
  * emitted last so it remains the most recent instruction to the model.
  */
 export async function buildContext(input: ContextInput): Promise<ModelMessage[]> {
   const maxTokens = Math.max(0, Math.floor(input.maxTokens));
-  const currentTask: ModelMessage = {
-    role: 'user',
-    content: `当前任务：${input.currentTask}`,
-  };
-  const reserveCurrentTask = fitsBudget([currentTask], maxTokens)
-    ? currentTask
-    : undefined;
+  const reserveCurrentTask = createReservedCurrentTask(input.currentTask, maxTokens);
   const messages: ModelMessage[] = [];
 
   addTruncatedSystemPrompt(messages, input.systemPrompt, reserveCurrentTask, maxTokens);
@@ -167,15 +242,14 @@ export async function buildContext(input: ContextInput): Promise<ModelMessage[]>
     }, reserveCurrentTask, maxTokens);
   }
 
-  const recentEvents = input.events.slice(-RECENT_EVENT_COUNT);
+  const projectedEvents = projectCompactedEvents(input.events);
+  const recentEvents = projectedEvents.slice(-RECENT_EVENT_COUNT);
   for (const event of recentEvents) {
     addIfFits(messages, messageForEvent(event), reserveCurrentTask, maxTokens);
   }
 
-  const fileBudget = Math.floor(maxTokens * FILE_BUDGET_FRACTION);
   for (const file of input.relevantFiles ?? []) {
-    const content = truncateWithEnds(`文件：${file.path}\n${file.content}`, fileBudget);
-    addIfFits(messages, {role: 'system', content}, reserveCurrentTask, maxTokens);
+    addTruncatedRelevantFile(messages, file, reserveCurrentTask, maxTokens);
   }
 
   if (input.summary !== undefined) {
@@ -185,7 +259,7 @@ export async function buildContext(input: ContextInput): Promise<ModelMessage[]>
     }, reserveCurrentTask, maxTokens);
   }
 
-  for (const event of input.events.slice(0, -RECENT_EVENT_COUNT)) {
+  for (const event of projectedEvents.slice(0, -RECENT_EVENT_COUNT)) {
     addIfFits(messages, messageForEvent(event), reserveCurrentTask, maxTokens);
   }
 
@@ -243,6 +317,7 @@ export async function compactHistory(
     type: 'summary',
     at: Date.now(),
     text: JSON.stringify(parsed.data),
+    coveredEventCount: olderEvents.length,
   };
   return {
     compacted: true,

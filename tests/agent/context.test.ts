@@ -95,6 +95,59 @@ describe('context selection', () => {
     expect(estimateTokens(fileMessage?.content ?? '')).toBeLessThanOrEqual(50);
     expect(estimateTokens(JSON.stringify(messages))).toBeLessThanOrEqual(200);
   });
+
+  it('truncates an oversized current task instead of dropping the final user instruction', async () => {
+    const messages = await buildContext({
+      systemPrompt: 'system',
+      currentTask: `TASK-BEGIN${'x'.repeat(1_000)}TASK-END`,
+      events: [],
+      maxTokens: 60,
+    });
+
+    expect(messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: expect.stringContaining('TASK-BEGIN'),
+    });
+    expect(messages.at(-1)?.content).toContain('TASK-END');
+    expect(messages.at(-1)?.content).toContain('…');
+    expect(estimateTokens(JSON.stringify(messages))).toBeLessThanOrEqual(60);
+  });
+
+  it('uses an explicit minimal task marker when only its message envelope fits', async () => {
+    const minimalTask = [{role: 'user' as const, content: '…'}];
+    const messages = await buildContext({
+      systemPrompt: 'system',
+      currentTask: '极长任务'.repeat(100),
+      events: [],
+      maxTokens: estimateTokens(JSON.stringify(minimalTask)),
+    });
+
+    expect(messages).toEqual(minimalTask);
+    expect(estimateTokens(JSON.stringify(messages))).toBeLessThanOrEqual(
+      estimateTokens(JSON.stringify(minimalTask)),
+    );
+  });
+
+  it('truncates a relevant file again when only the remaining budget can fit it', async () => {
+    const messages = await buildContext({
+      systemPrompt: 's'.repeat(240),
+      currentTask: '检查剩余预算',
+      events: [],
+      relevantFiles: [{
+        path: 'src/remaining.ts',
+        content: `BEGIN${'x'.repeat(1_000)}END`,
+      }],
+      maxTokens: 150,
+    });
+    const fileMessage = messages.find(message =>
+      message.role === 'system' && message.content.includes('src/remaining.ts'));
+
+    expect(fileMessage).toBeDefined();
+    expect(fileMessage?.content).toContain('BEGIN');
+    expect(fileMessage?.content).toContain('END');
+    expect(fileMessage?.content).toContain('…[内容已省略]…');
+    expect(estimateTokens(JSON.stringify(messages))).toBeLessThanOrEqual(150);
+  });
 });
 
 describe('signal compaction', () => {
@@ -120,6 +173,7 @@ describe('signal compaction', () => {
     expect(result.events[0]).toMatchObject({
       type: 'summary',
       text: JSON.stringify(validSummary),
+      coveredEventCount: 1,
     });
   });
 
@@ -159,5 +213,39 @@ describe('signal compaction', () => {
     await store.append('session-1', result.summaryEvent);
 
     expect(await store.read('session-1')).toEqual([...events, result.summaryEvent]);
+  });
+
+  it('projects an appended summary into context without reloading its covered events', async () => {
+    const events: SessionEvent[] = [
+      {type: 'user', at: 1, text: 'obsolete-history'},
+      ...recentEvents,
+    ];
+    const result = await compactHistory(events, async () => validSummary);
+    if (!result.compacted) throw new Error('expected compaction to succeed');
+
+    const messages = await buildContext({
+      systemPrompt: 'system',
+      currentTask: '继续登录修复',
+      events: [...events, result.summaryEvent],
+      maxTokens: 500,
+    });
+
+    expect(result.summaryEvent).toMatchObject({coveredEventCount: 1});
+    expect(messages).toContainEqual({
+      role: 'system',
+      content: `历史摘要：${JSON.stringify(validSummary)}`,
+    });
+    for (const event of recentEvents) {
+      expect(JSON.stringify(messages)).toContain(
+        event.type === 'interrupted' ? event.reason : event.type === 'tool'
+          ? event.tool
+          : event.text,
+      );
+    }
+    expect(JSON.stringify(messages)).not.toContain('obsolete-history');
+    expect(messages.at(-1)).toMatchObject({
+      role: 'user',
+      content: expect.stringContaining('继续登录修复'),
+    });
   });
 });

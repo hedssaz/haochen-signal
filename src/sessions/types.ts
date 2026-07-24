@@ -12,7 +12,13 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
     input: z.unknown(),
     result: z.unknown(),
   }),
-  z.strictObject({type: z.literal('summary'), at: timestamp, text: z.string()}),
+  z.strictObject({
+    type: z.literal('summary'),
+    at: timestamp,
+    text: z.string(),
+    /** Number of earlier JSONL events represented by this appended summary. */
+    coveredEventCount: z.number().int().nonnegative().optional(),
+  }),
   z.strictObject({
     type: z.literal('interrupted'),
     at: timestamp,
