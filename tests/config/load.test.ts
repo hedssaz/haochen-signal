@@ -1,6 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 import {mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
-import {dirname, join} from 'node:path';
+import {basename, dirname, join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {loadConfig, saveConfig} from '../../src/config/load.js';
 import {parseConfig} from '../../src/config/schema.js';
@@ -123,8 +123,12 @@ describe('config files', () => {
       expect(typeof temporaryPath).toBe('string');
       if (typeof temporaryPath !== 'string') throw new Error('missing temporary path');
       expect(dirname(temporaryPath)).toBe(dirname(path));
+      expect(temporaryPath).not.toBe(path);
+      expect(basename(temporaryPath)).toMatch(/^\.config\.json\.[0-9a-f-]{36}\.tmp$/);
       expect(options).toEqual({encoding: 'utf8', mode: 0o600});
-      expect(files.rename).toHaveBeenCalledWith(temporaryPath, path);
+      const [renameSource, renameDestination] = files.rename.mock.calls[0] ?? [];
+      expect(renameSource).toBe(temporaryPath);
+      expect(renameDestination).toBe(path);
       expect(files.unlink).not.toHaveBeenCalled();
       expect(events).toEqual([
         'mkdir',
@@ -168,7 +172,10 @@ describe('config files', () => {
       const [temporaryPath] = files.writeFile.mock.calls[0] ?? [];
       expect(typeof temporaryPath).toBe('string');
       if (typeof temporaryPath !== 'string') throw new Error('missing temporary path');
-      expect(files.unlink).toHaveBeenCalledWith(temporaryPath);
+      expect(temporaryPath).not.toBe(path);
+      const [unlinkPath] = files.unlink.mock.calls[0] ?? [];
+      expect(unlinkPath).toBe(temporaryPath);
+      expect(unlinkPath).not.toBe(path);
       expect(events).toEqual([
         'mkdir',
         `write:${temporaryPath}`,
