@@ -56,3 +56,18 @@ it('recognizes CR-only empty-line frame boundaries', async () => {
 
   expect(events).toEqual(['one', 'two']);
 });
+
+it.each([
+  ['LF + CRLF', '\n\r\n'],
+  ['LF + CR', '\n\r'],
+  ['CRLF + LF', '\r\n\n'],
+  ['CRLF + CR', '\r\n\r'],
+  ['CR + CRLF', '\r\r\n'],
+])('recognizes mixed %s empty-line boundaries', async (_name, boundary) => {
+  const events: string[] = [];
+  const chunks = [`data: one${boundary}data: two${boundary}`];
+
+  for await (const event of decodeSse(chunks)) events.push(event);
+
+  expect(events).toEqual(['one', 'two']);
+});

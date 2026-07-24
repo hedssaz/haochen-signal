@@ -6,6 +6,7 @@ import type {ModelClient, ModelEvent, ModelRequest} from './types.js';
 interface ClientOptions {
   fetch?: typeof fetch;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  now?: () => number;
 }
 
 interface ToolCallDelta {
@@ -39,8 +40,22 @@ interface AccumulatedToolCall {
 }
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const SENSITIVE_HEADER_NAME =
+  /(?:^|[-_])(?:authorization|cookie|set[-_]?cookie|api[-_]?key|key|token|secret)(?:$|[-_])/i;
 
-export class ModelHttpError extends Error {
+interface OperationSignal {
+  signal: AbortSignal;
+  dispose(): void;
+}
+
+export class ModelProviderError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModelProviderError';
+  }
+}
+
+export class ModelHttpError extends ModelProviderError {
   readonly status: number;
 
   constructor(status: number, message: string) {
@@ -50,24 +65,104 @@ export class ModelHttpError extends Error {
   }
 }
 
-function httpErrorMessage(response: Response, apiKey: string): string {
-  const rawMessage =
-    `Model request failed with status ${response.status} ${response.statusText}`;
-  const redactedMessage = redactValue(rawMessage);
-  const message = typeof redactedMessage === 'string'
-    ? redactedMessage
-    : `Model request failed with status ${response.status}`;
+function createOperationSignal(
+  callerSignal: AbortSignal,
+  timeoutMs: number,
+): OperationSignal {
+  const controller = new AbortController();
+  const onCallerAbort = () => {
+    controller.abort(callerSignal.reason);
+  };
 
-  return apiKey.length > 0
-    ? message.replaceAll(apiKey, '[REDACTED]')
-    : message;
+  if (callerSignal.aborted) {
+    onCallerAbort();
+  } else {
+    callerSignal.addEventListener('abort', onCallerAbort, {once: true});
+  }
+
+  const timeout = setTimeout(() => {
+    controller.abort(new DOMException(
+      `Model request timed out after ${timeoutMs}ms`,
+      'TimeoutError',
+    ));
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timeout);
+      callerSignal.removeEventListener('abort', onCallerAbort);
+    },
+  };
 }
 
-function retryDelayMs(response: Response): number {
+function collectSensitiveValues(headers: Headers, apiKey: string): string[] {
+  const values = new Set<string>();
+  if (apiKey.length > 0) values.add(apiKey);
+
+  for (const [name, value] of headers) {
+    if (value.length > 0 && SENSITIVE_HEADER_NAME.test(name)) {
+      values.add(value);
+    }
+  }
+
+  return [...values].sort((a, b) => b.length - a.length);
+}
+
+function redactErrorMessage(rawMessage: string, secrets: string[]): string {
+  const redacted = redactValue(rawMessage);
+  let message = typeof redacted === 'string' ? redacted : 'Model provider failed';
+
+  for (const secret of secrets) {
+    message = message.replaceAll(secret, '[REDACTED]');
+  }
+
+  return message;
+}
+
+function errorDescription(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return String(error);
+}
+
+function providerError(
+  context: string,
+  error: unknown,
+  secrets: string[],
+  signal: AbortSignal,
+): Error {
+  if (signal.aborted) {
+    return signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException('The operation was aborted', 'AbortError');
+  }
+  if (error instanceof ModelProviderError) return error;
+
+  return new ModelProviderError(redactErrorMessage(
+    `${context}: ${errorDescription(error)}`,
+    secrets,
+  ));
+}
+
+function httpErrorMessage(response: Response, secrets: string[]): string {
+  const rawMessage =
+    `Model request failed with status ${response.status} ${response.statusText}`;
+  return redactErrorMessage(rawMessage, secrets);
+}
+
+function retryDelayMs(response: Response, now: () => number): number {
   const retryAfter = response.headers.get('retry-after');
   if (retryAfter === null) return 1_000;
+  const trimmed = retryAfter.trim();
   const seconds = Number(retryAfter);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : 1_000;
+  if (trimmed.length > 0 && Number.isFinite(seconds)) {
+    return seconds >= 0 ? seconds * 1_000 : 1_000;
+  }
+
+  const retryAt = Date.parse(retryAfter);
+  return Number.isFinite(retryAt)
+    ? Math.max(0, retryAt - now())
+    : 1_000;
 }
 
 function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -92,6 +187,7 @@ function defaultSleep(ms: number, signal: AbortSignal): Promise<void> {
 async function fetchResponse(
   fetchImpl: typeof fetch,
   sleep: (ms: number, signal: AbortSignal) => Promise<void>,
+  now: () => number,
   url: string,
   init: RequestInit,
   signal: AbortSignal,
@@ -104,7 +200,7 @@ async function fetchResponse(
     }
 
     await response.body?.cancel();
-    await sleep(retryDelayMs(response), signal);
+    await sleep(retryDelayMs(response, now), signal);
   }
 
   throw new Error('unreachable retry state');
@@ -115,8 +211,10 @@ async function* responseChunks(
   signal: AbortSignal,
 ): AsyncGenerator<Uint8Array> {
   const reader = body.getReader();
+  let abortCancellation: Promise<void> | undefined;
+  let reachedNaturalEof = false;
   const onAbort = () => {
-    void reader.cancel(signal.reason).catch(() => {});
+    abortCancellation = reader.cancel(signal.reason).catch(() => {});
   };
   signal.addEventListener('abort', onAbort, {once: true});
 
@@ -125,11 +223,19 @@ async function* responseChunks(
       signal.throwIfAborted();
       const result = await reader.read();
       signal.throwIfAborted();
-      if (result.done) return;
+      if (result.done) {
+        reachedNaturalEof = true;
+        return;
+      }
       yield result.value;
     }
   } finally {
     signal.removeEventListener('abort', onAbort);
+    if (!reachedNaturalEof) {
+      await (abortCancellation ?? reader.cancel(new Error(
+        'Model response stream was not fully consumed',
+      )).catch(() => {}));
+    }
     reader.releaseLock();
   }
 }
@@ -172,8 +278,18 @@ async function* streamResponse(
   let finishReason: string | undefined;
   let usage: {inputTokens: number; outputTokens: number} | undefined;
 
-  for await (const data of decodeSse(responseChunks(response.body, signal))) {
-    if (data === '[DONE]') break;
+  for await (const data of decodeSse(
+    responseChunks(response.body, signal),
+    {requireCompleteFinalFrame: true},
+  )) {
+    if (data === '[DONE]') {
+      if (finishReason === undefined) {
+        throw new Error(
+          'Chat completions stream received [DONE] before finish_reason',
+        );
+      }
+      break;
+    }
 
     const chunk = JSON.parse(data) as ChatCompletionChunk;
     if (
@@ -202,13 +318,17 @@ async function* streamResponse(
     }
   }
 
+  if (finishReason === undefined) {
+    throw new Error(
+      'Chat completions stream ended before finish_reason',
+    );
+  }
+
   for (const toolCall of [...toolCalls.values()].sort((a, b) => a.index - b.index)) {
     yield {type: 'tool_call_delta', ...toolCall};
   }
 
-  if (finishReason !== undefined) {
-    yield {type: 'finish', reason: finishReason, usage};
-  }
+  yield {type: 'finish', reason: finishReason, usage};
 }
 
 export function createOpenAiCompatibleClient(
@@ -218,33 +338,61 @@ export function createOpenAiCompatibleClient(
 ): ModelClient {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const sleep = options.sleep ?? defaultSleep;
+  const now = options.now ?? Date.now;
 
   return {
-    async *stream(request: ModelRequest, signal: AbortSignal) {
-      const headers = new Headers(config.headers);
-      headers.set('content-type', 'application/json');
-      headers.set('authorization', `Bearer ${apiKey}`);
-      const response = await fetchResponse(
-        fetchImpl,
-        sleep,
-        `${config.baseUrl}/chat/completions`,
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(requestBody(request)),
-          signal,
-        },
-        signal,
-      );
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new ModelHttpError(
-          response.status,
-          httpErrorMessage(response, apiKey),
-        );
-      }
+    async *stream(request: ModelRequest, callerSignal: AbortSignal) {
+      const operation = createOperationSignal(callerSignal, config.timeoutMs);
 
-      yield* streamResponse(response, signal);
+      try {
+        const headers = new Headers(config.headers);
+        headers.set('content-type', 'application/json');
+        headers.set('authorization', `Bearer ${apiKey}`);
+        const secrets = collectSensitiveValues(headers, apiKey);
+        let response: Response;
+        try {
+          response = await fetchResponse(
+            fetchImpl,
+            sleep,
+            now,
+            `${config.baseUrl}/chat/completions`,
+            {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(requestBody(request)),
+              signal: operation.signal,
+            },
+            operation.signal,
+          );
+        } catch (error) {
+          throw providerError(
+            'Model fetch failed',
+            error,
+            secrets,
+            operation.signal,
+          );
+        }
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          throw new ModelHttpError(
+            response.status,
+            httpErrorMessage(response, secrets),
+          );
+        }
+
+        try {
+          yield* streamResponse(response, operation.signal);
+        } catch (error) {
+          throw providerError(
+            'Model response stream failed',
+            error,
+            secrets,
+            operation.signal,
+          );
+        }
+      } finally {
+        operation.dispose();
+      }
     },
   };
 }

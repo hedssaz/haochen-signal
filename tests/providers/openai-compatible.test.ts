@@ -3,6 +3,7 @@ import {parseConfig} from '../../src/config/schema.js';
 import {
   createOpenAiCompatibleClient,
   ModelHttpError,
+  ModelProviderError,
 } from '../../src/providers/openai-compatible.js';
 import type {ModelEvent} from '../../src/providers/types.js';
 import {
@@ -107,7 +108,6 @@ describe('OpenAI-compatible chat completions client', () => {
         {choices: [{delta: {content: '完成'}}]},
         {choices: [{delta: {}, finish_reason: 'stop'}]},
         {choices: [], usage: {prompt_tokens: 12, completion_tokens: 3}},
-        '[DONE]',
       ]);
     }) as typeof fetch;
     const client = createOpenAiCompatibleClient(parseConfig({
@@ -239,7 +239,10 @@ describe('OpenAI-compatible chat completions client', () => {
     }
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(sleep).toHaveBeenCalledWith(0, controller.signal);
+    const [delay, retrySignal] = sleep.mock.calls[0] ?? [];
+    expect(delay).toBe(0);
+    expect(retrySignal).toBeInstanceOf(AbortSignal);
+    expect(retrySignal?.aborted).toBe(false);
     expect(events).toEqual([
       {type: 'text_delta', text: '重试成功'},
       {type: 'finish', reason: 'stop', usage: undefined},
@@ -278,6 +281,398 @@ describe('OpenAI-compatible chat completions client', () => {
     expect((thrown as Error).message).not.toContain('top-secret');
   });
 
+  it('redacts an actual x-api-key value echoed by HTTP status text', async () => {
+    const fetchImpl = vi.fn(async () => new Response('denied', {
+      status: 401,
+      statusText: 'provider rejected header-secret and bearer-secret',
+    })) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+      headers: {'x-api-key': 'header-secret'},
+    }), 'bearer-secret', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // A terminal HTTP error must not yield model events.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ModelHttpError);
+    expect(thrown).toMatchObject({status: 401});
+    expect((thrown as Error).message).toContain('status 401');
+    expect((thrown as Error).message).toContain('[REDACTED]');
+    expect((thrown as Error).message).not.toContain('header-secret');
+    expect((thrown as Error).message).not.toContain('bearer-secret');
+  });
+
+  it('redacts every supported sensitive header class', async () => {
+    const sensitiveHeaders = {
+      'proxy-authorization': 'proxy-value',
+      cookie: 'cookie-value',
+      'set-cookie': 'set-cookie-value',
+      'api-key': 'api-value',
+      'encryption-key': 'key-value',
+      'x-token': 'token-value',
+      'client-secret': 'secret-value',
+    };
+    const fetchImpl = vi.fn(async () => new Response('denied', {
+      status: 401,
+      statusText: `rejected ${Object.values(sensitiveHeaders).join(' ')}`,
+    })) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+      headers: sensitiveHeaders,
+    }), 'auth-secret', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // A terminal HTTP error must not yield model events.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ModelHttpError);
+    expect((thrown as Error).message).toContain('status 401');
+    for (const secret of Object.values(sensitiveHeaders)) {
+      expect((thrown as Error).message).not.toContain(secret);
+    }
+  });
+
+  it('wraps and redacts fetch rejections', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('socket failed for fetch-secret and auth-secret');
+    }) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+      headers: {'api-key': 'fetch-secret'},
+    }), 'auth-secret', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // A failed fetch must not yield model events.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('Model fetch failed');
+    expect((thrown as Error).message).toContain('[REDACTED]');
+    expect((thrown as Error).message).not.toContain('fetch-secret');
+    expect((thrown as Error).message).not.toContain('auth-secret');
+  });
+
+  it('wraps and redacts response reader errors', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error(
+          'reader failed for reader-secret and auth-secret',
+        ));
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+      headers: {'x-api-key': 'reader-secret'},
+    }), 'auth-secret', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // A failed reader must not yield model events.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('Model response stream failed');
+    expect((thrown as Error).message).toContain('[REDACTED]');
+    expect((thrown as Error).message).not.toContain('reader-secret');
+    expect((thrown as Error).message).not.toContain('auth-secret');
+  });
+
+  it('wraps and redacts malformed JSON errors', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      'data: parse-secret\n\n',
+      {status: 200, headers: {'content-type': 'text/event-stream'}},
+    )) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+      headers: {'x-api-key': 'parse-secret'},
+    }), 'auth-secret', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // Malformed JSON must not yield model events.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('Model response stream failed');
+    expect((thrown as Error).message).toContain('[REDACTED]');
+    expect((thrown as Error).message).not.toContain('parse-secret');
+    expect((thrown as Error).message).not.toContain('auth-secret');
+  });
+
+  it('rejects natural EOF before a finish reason', async () => {
+    const fetchImpl = vi.fn(async () => new Response(
+      `data: ${JSON.stringify({choices: [{delta: {content: '未完成'}}]})}\n\n`,
+      {status: 200, headers: {'content-type': 'text/event-stream'}},
+    )) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+    const events: ModelEvent[] = [];
+    let thrown: unknown;
+
+    try {
+      for await (const event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        events.push(event);
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(events).toEqual([{type: 'text_delta', text: '未完成'}]);
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('finish_reason');
+  });
+
+  it('rejects DONE before a finish reason', async () => {
+    const fetchImpl = vi.fn(async () => sseResponse([
+      {choices: [{delta: {content: '未完成'}}]},
+      '[DONE]',
+    ])) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+    const events: ModelEvent[] = [];
+    let thrown: unknown;
+
+    try {
+      for await (const event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        events.push(event);
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(events).toEqual([{type: 'text_delta', text: '未完成'}]);
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('[DONE]');
+    expect((thrown as Error).message).toContain('finish_reason');
+  });
+
+  it('rejects an SSE frame not terminated by an empty line', async () => {
+    const finalChunk = {
+      choices: [{delta: {}, finish_reason: 'stop'}],
+    };
+    const fetchImpl = vi.fn(async () => new Response(
+      `data: ${JSON.stringify(finalChunk)}`,
+      {status: 200, headers: {'content-type': 'text/event-stream'}},
+    )) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+    let thrown: unknown;
+
+    try {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // An incomplete final frame must not yield a finish event.
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ModelProviderError);
+    expect((thrown as Error).message).toContain('incomplete SSE frame');
+  });
+
+  it('cancels the response body after a valid DONE event', async () => {
+    let canceled = false;
+    const payload = [
+      `data: ${JSON.stringify({choices: [{delta: {}, finish_reason: 'stop'}]})}\n\n`,
+      'data: [DONE]\n\n',
+    ].join('');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+
+    for await (const _event of client.stream({
+      model: 'wolf-1',
+      messages: [{role: 'user', content: '请求'}],
+    }, new AbortController().signal)) {
+      // Consume the response through its DONE event.
+    }
+
+    expect(canceled).toBe(true);
+  });
+
+  it('cancels the response body after a JSON parse error', async () => {
+    let canceled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: not-json\n\n'));
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+
+    await expect((async () => {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // Malformed JSON must not yield model events.
+      }
+    })()).rejects.toBeInstanceOf(ModelProviderError);
+
+    expect(canceled).toBe(true);
+  });
+
+  it('cancels the response body after a protocol error', async () => {
+    let canceled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+
+    await expect((async () => {
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '请求'}],
+      }, new AbortController().signal)) {
+        // DONE before finish_reason must not yield model events.
+      }
+    })()).rejects.toBeInstanceOf(ModelProviderError);
+
+    expect(canceled).toBe(true);
+  });
+
+  it('cancels the response body when the consumer stops early', async () => {
+    let canceled = false;
+    const payload =
+      `data: ${JSON.stringify({choices: [{delta: {content: '第一段'}}]})}\n\n`;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+
+    for await (const _event of client.stream({
+      model: 'wolf-1',
+      messages: [{role: 'user', content: '请求'}],
+    }, new AbortController().signal)) {
+      break;
+    }
+
+    expect(canceled).toBe(true);
+  });
+
+  it('does not cancel a response body that reaches natural EOF', async () => {
+    let canceled = false;
+    const payload =
+      `data: ${JSON.stringify({choices: [{delta: {}, finish_reason: 'stop'}]})}\n\n`;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+      cancel() {
+        canceled = true;
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+
+    for await (const _event of client.stream({
+      model: 'wolf-1',
+      messages: [{role: 'user', content: '请求'}],
+    }, new AbortController().signal)) {
+      // Consume through natural EOF.
+    }
+
+    expect(canceled).toBe(false);
+  });
+
   it.each([502, 503, 504])('retries transient HTTP status %i', async (status) => {
     let attempts = 0;
     const fetchImpl = vi.fn(async () => {
@@ -310,6 +705,46 @@ describe('OpenAI-compatible chat completions client', () => {
     ]);
   });
 
+  it('uses an HTTP-date Retry-After value relative to the injected clock', async () => {
+    const now = Date.parse('2026-07-25T00:00:00.000Z');
+    let attempts = 0;
+    const fetchImpl = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        return new Response('temporary failure', {
+          status: 503,
+          headers: {
+            'retry-after': new Date(now + 3_000).toUTCString(),
+          },
+        });
+      }
+      return sseResponse([
+        {choices: [{delta: {}, finish_reason: 'stop'}]},
+        '[DONE]',
+      ]);
+    }) as typeof fetch;
+    const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {
+      fetch: fetchImpl,
+      sleep,
+      now: () => now,
+    });
+
+    for await (const _event of client.stream({
+      model: 'wolf-1',
+      messages: [{role: 'user', content: '重试'}],
+    }, new AbortController().signal)) {
+      // Consume the successful retry.
+    }
+
+    const [delay] = sleep.mock.calls[0] ?? [];
+    expect(delay).toBe(3_000);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it('aborts the default retry wait before issuing another request', async () => {
     const controller = new AbortController();
     let receivedSignal: AbortSignal | null | undefined;
@@ -336,7 +771,9 @@ describe('OpenAI-compatible chat completions client', () => {
     };
 
     await expect(consume()).rejects.toMatchObject({name: 'AbortError'});
-    expect(receivedSignal).toBe(controller.signal);
+    expect(receivedSignal).not.toBe(controller.signal);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(receivedSignal?.reason).toBe(controller.signal.reason);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -447,6 +884,134 @@ describe('OpenAI-compatible chat completions client', () => {
       expect(outcome.error).toMatchObject({name: 'AbortError'});
     }
     expect(cancelReason).toBe(controller.signal.reason);
+  });
+
+  it('times out a pending fetch with the configured timeout', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let transportSignal: AbortSignal | undefined;
+
+    try {
+      const fetchImpl = vi.fn((
+        _input: RequestInfo | URL,
+        init?: RequestInit,
+      ) => new Promise<Response>((_resolve, reject) => {
+        transportSignal = init?.signal ?? undefined;
+        transportSignal?.addEventListener('abort', () => {
+          reject(transportSignal?.reason);
+        }, {once: true});
+      })) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+      const outcomePromise = (async () => {
+        for await (const _event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '等待'}],
+        }, caller.signal)) {
+          // A pending fetch cannot produce model events.
+        }
+      })().then(
+        () => ({kind: 'resolved' as const}),
+        error => ({kind: 'rejected' as const, error}),
+      );
+
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(1_000);
+      const timedOut = transportSignal?.aborted ?? false;
+      if (!timedOut) caller.abort();
+      const outcome = await outcomePromise;
+
+      expect(timedOut).toBe(true);
+      expect(outcome.kind).toBe('rejected');
+      if (outcome.kind === 'rejected') {
+        expect(outcome.error).toMatchObject({name: 'TimeoutError'});
+      }
+    } finally {
+      caller.abort();
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out and cancels a pending response-body read', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let cancelReason: unknown;
+
+    try {
+      const body = new ReadableStream<Uint8Array>({
+        cancel(reason) {
+          cancelReason = reason;
+        },
+      });
+      const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+      const outcomePromise = (async () => {
+        for await (const _event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '等待'}],
+        }, caller.signal)) {
+          // A pending response body cannot produce model events.
+        }
+      })().then(
+        () => ({kind: 'resolved' as const}),
+        error => ({kind: 'rejected' as const, error}),
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      const timedOut = cancelReason !== undefined;
+      if (!timedOut) caller.abort();
+      const outcome = await outcomePromise;
+
+      expect(cancelReason).toMatchObject({name: 'TimeoutError'});
+      expect(outcome.kind).toBe('rejected');
+      if (outcome.kind === 'rejected') {
+        expect(outcome.error).toMatchObject({name: 'TimeoutError'});
+      }
+    } finally {
+      caller.abort();
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the configured timeout when streaming finishes', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+
+    try {
+      let timersDuringFetch: number | undefined;
+      const fetchImpl = vi.fn(async () => {
+        timersDuringFetch = vi.getTimerCount();
+        return sseResponse([
+          {choices: [{delta: {}, finish_reason: 'stop'}]},
+          '[DONE]',
+        ]);
+      }) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+
+      for await (const _event of client.stream({
+        model: 'wolf-1',
+        messages: [{role: 'user', content: '完成'}],
+      }, caller.signal)) {
+        // Consume the complete response.
+      }
+
+      expect(timersDuringFetch).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      caller.abort();
+      vi.useRealTimers();
+    }
   });
 });
 
