@@ -6,7 +6,7 @@ const PRIVATE_KEY_BLOCK =
 const PRIVATE_KEY_REMAINDER =
   /-----BEGIN [^\r\n]*PRIVATE KEY[^\r\n]*?-----[\s\S]*/gi;
 const CREDENTIAL_HEADER =
-  /^([ \t]*(?:proxy-authorization|authorization|cookie|set-cookie|x-api-key)[ \t]*[:=][ \t]*)[^\r\n]*/gim;
+  /(^|[^A-Za-z0-9_-])((?:proxy-authorization|authorization|set-cookie|cookie|x-api-key|api-key|api_key)[ \t]*[:=][ \t]*)[^\r\n]*/gim;
 const BEARER_CREDENTIAL = /\bBearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const PREFIXED_CREDENTIAL =
   /\b(?:sk[-_]|ghp_|github_pat_)[A-Za-z0-9_-]+/g;
@@ -17,7 +17,7 @@ function redactString(value: string): string {
   return value
     .replace(PRIVATE_KEY_BLOCK, '[REDACTED]')
     .replace(PRIVATE_KEY_REMAINDER, '[REDACTED]')
-    .replace(CREDENTIAL_HEADER, '$1[REDACTED]')
+    .replace(CREDENTIAL_HEADER, '$1$2[REDACTED]')
     .replace(URL_CREDENTIAL, '$1[REDACTED]@')
     .replace(BEARER_CREDENTIAL, '[REDACTED]')
     .replace(PREFIXED_CREDENTIAL, '[REDACTED]');

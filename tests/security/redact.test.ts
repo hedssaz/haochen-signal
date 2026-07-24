@@ -179,6 +179,24 @@ it('redacts arbitrary values from raw credential header lines', () => {
   ].join('\n'));
 });
 
+it('redacts inline credential fields in command arguments', () => {
+  expect(redactValue([
+    'curl -H "Authorization: Digest username=wolf, response=digest-secret"',
+    'curl --header="Proxy-Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE"',
+    'curl https://example.test Cookie: session=cookie-secret',
+    'fetch -H "X-API-Key: opaque-x-api-secret"',
+    'fetch -H "Api-Key: opaque-api-secret"',
+    'curl https://example.test api_key=opaque-query-secret',
+  ].join('\n'))).toBe([
+    'curl -H "Authorization: [REDACTED]',
+    'curl --header="Proxy-Authorization: [REDACTED]',
+    'curl https://example.test Cookie: [REDACTED]',
+    'fetch -H "X-API-Key: [REDACTED]',
+    'fetch -H "Api-Key: [REDACTED]',
+    'curl https://example.test api_key=[REDACTED]',
+  ].join('\n'));
+});
+
 it('redacts complete and truncated private-key blocks with extended labels', () => {
   expect(redactValue(
     'before -----BEGIN PGP PRIVATE KEY BLOCK-----\n'
