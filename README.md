@@ -18,6 +18,7 @@
 完整设计见：
 
 - [设计规格](docs/superpowers/specs/2026-07-25-haochen-signal-design.md)
+- [实施计划](docs/superpowers/plans/2026-07-25-haochen-signal-implementation.md)
 
 ## 设计目标
 
