@@ -30,6 +30,18 @@ const KNOWN_TOOLS = new Set([
   'web_fetch',
 ]);
 
+const SHELL_EXECUTABLES = new Set([
+  'sh',
+  'bash',
+  'zsh',
+  'dash',
+  'ksh',
+  'fish',
+  'cmd',
+  'powershell',
+  'pwsh',
+]);
+
 type JsonPrimitive = null | boolean | number | string;
 type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue};
 type JsonObject = {[key: string]: JsonValue};
@@ -145,9 +157,14 @@ function onlyKeys(
   field: string,
 ): void {
   const allowedKeys = new Set(allowed);
-  const unexpected = Object.keys(value).find((key) => !allowedKeys.has(key));
+  const unexpected = Reflect.ownKeys(value).find(
+    (key) => typeof key !== 'string' || !allowedKeys.has(key),
+  );
   if (unexpected !== undefined) {
-    inputError(`${field} 包含未知字段：${unexpected}`);
+    const name = typeof unexpected === 'symbol'
+      ? '<symbol>'
+      : unexpected;
+    inputError(`${field} 包含未知字段：${name}`);
   }
 }
 
@@ -423,10 +440,15 @@ function commandConfirmationReasons(
   const reasons: string[] = [];
   const effective = unwrapCommand(command, args);
   const rawText = [command, ...args].join(' ');
-  const allText = usesShellInterpreter(command, args, shell)
+  const shellSemantics = usesShellInterpreter(command, args, shell);
+  const allText = shellSemantics
     ? dequoteShellText(rawText)
     : rawText;
   const lowerArgs = effective.args.map((argument) => argument.toLowerCase());
+
+  if (shellSemantics) {
+    reasons.push('Shell 命令语义无法由确定性边界完整证明');
+  }
 
   if (effective.command === 'sudo'
     || containsShellHazard(
@@ -443,7 +465,10 @@ function commandConfirmationReasons(
       reasons.push('命令会执行破坏性 Git reset --hard');
     }
     if (git.name === 'clean'
-      && git.rest.some((argument) => /^-[a-z]*f[a-z]*$/iu.test(argument))) {
+      && git.rest.some((argument) => (
+        /^-[a-z]*f[a-z]*$/iu.test(argument)
+        || /^--force(?:=|$)/iu.test(argument)
+      ))) {
       reasons.push('命令会强制清理 Git 工作区');
     }
     if (git.name === 'push') {
@@ -477,19 +502,21 @@ function commandConfirmationReasons(
 
   const uploadFlags = new Set([
     '--data',
+    '--data-ascii',
     '--data-raw',
     '--data-binary',
+    '--data-urlencode',
     '--form',
-    '-f',
-    '-t',
+    '--form-string',
+    '--json',
     '--upload-file',
   ]);
   if (effective.command === 'curl'
     && effective.args.some((argument) => (
       uploadFlags.has(argument.toLowerCase())
-      || /^--(?:data|form|upload-file)=/iu.test(argument)
-      || /^-[dft]$/iu.test(argument)
-      || /^-[dft].+/iu.test(argument)
+      || /^--(?:data(?:-ascii|-binary|-raw|-urlencode)?|form(?:-string)?|json|upload-file)=/iu
+        .test(argument)
+      || /^-[A-Za-z]*(?:d|F|T)/u.test(argument)
     ))) {
     reasons.push('命令可能向外部服务发送项目内容');
   }
@@ -560,15 +587,7 @@ function commandReviewReasons(
   if (dependencyInstall(command, args)) {
     reasons.push('命令会安装或更新依赖');
   }
-  if (shell
-    || (['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'cmd', 'powershell', 'pwsh']
-      .includes(executable)
-      && args.some((argument) => [
-        '-c',
-        '/c',
-        '-command',
-        '-encodedcommand',
-      ].includes(argument.toLowerCase())))) {
+  if (usesShellInterpreter(command, args, shell)) {
     reasons.push('命令启用了 Shell 解释或复杂 Shell 参数');
   }
   if ([command, ...args].some((token) => /(?:^|[^|])\|{1,2}|[;&<>`]/u.test(token))) {
@@ -592,17 +611,12 @@ function commandReviewReasons(
   return [...new Set(reasons)];
 }
 
-function usesShellInterpreter(command: string, args: string[], shell: boolean): boolean {
-  const executable = normalizedExecutable(command);
-  return shell
-    || (['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'cmd', 'powershell', 'pwsh']
-      .includes(executable)
-      && args.some((argument) => [
-        '-c',
-        '/c',
-        '-command',
-        '-encodedcommand',
-      ].includes(argument.toLowerCase())));
+function usesShellInterpreter(
+  command: string,
+  args: string[],
+  shell: boolean,
+): boolean {
+  return shell || SHELL_EXECUTABLES.has(unwrapCommand(command, args).command);
 }
 
 function candidatePath(argument: string): string | undefined {
@@ -649,14 +663,40 @@ function commandUrlCandidates(argument: string): string[] {
   ) ?? [];
 }
 
+function compactCommandPathCandidates(
+  command: string,
+  args: string[],
+): string[] {
+  const effective = unwrapCommand(command, args);
+  const candidates: string[] = [];
+  if (effective.command === 'git') {
+    for (const argument of effective.args) {
+      const match = /^-C(.+)$/u.exec(argument);
+      if (match?.[1] !== undefined) candidates.push(match[1]);
+    }
+  }
+  if (effective.command === 'curl') {
+    for (const argument of effective.args) {
+      const match = /^-[A-Za-z]*T(.+)$/u.exec(argument);
+      if (match?.[1] !== undefined && match[1] !== '-') {
+        candidates.push(match[1]);
+      }
+    }
+  }
+  return candidates;
+}
+
 async function normalizeCommandTargets(
+  command: string,
   args: string[],
   context: BoundaryContext,
   shellSemantics: boolean,
+  includeCommandText: boolean,
 ): Promise<string[]> {
   const scope: string[] = [];
   const seen = new Set<string>();
-  for (const argument of args) {
+  const targetArguments = includeCommandText ? [command, ...args] : args;
+  for (const argument of targetArguments) {
     const texts = shellSemantics
       ? [argument, dequoteShellText(argument)]
       : [argument];
@@ -693,7 +733,86 @@ async function normalizeCommandTargets(
       }
     }
   }
+  for (const candidate of compactCommandPathCandidates(command, args)) {
+    const path = await normalizePath(
+      context,
+      candidate,
+      'new',
+      '命令紧凑参数路径',
+    );
+    const target = `path:${path}`;
+    if (!seen.has(target)) {
+      seen.add(target);
+      scope.push(target);
+    }
+  }
   return scope;
+}
+
+function curlResolveAddresses(specification: string): string[] {
+  let value = specification;
+  if (value.startsWith('+')) value = value.slice(1);
+  if (value.startsWith('-')) return [];
+
+  let hostEnd: number;
+  if (value.startsWith('[')) {
+    const closingBracket = value.indexOf(']');
+    if (closingBracket === -1 || value[closingBracket + 1] !== ':') {
+      inputError('curl --resolve 主机覆盖格式无效');
+    }
+    hostEnd = closingBracket + 1;
+  } else {
+    hostEnd = value.indexOf(':');
+    if (hostEnd <= 0) inputError('curl --resolve 主机覆盖格式无效');
+  }
+  const portEnd = value.indexOf(':', hostEnd + 1);
+  if (portEnd === -1 || portEnd === value.length - 1) {
+    inputError('curl --resolve 主机覆盖格式无效');
+  }
+  const addresses = value.slice(portEnd + 1).split(',');
+  if (addresses.some((address) => address.length === 0)) {
+    inputError('curl --resolve 主机覆盖格式无效');
+  }
+  return addresses.map((address) => (
+    address.startsWith('[') && address.endsWith(']')
+      ? address.slice(1, -1)
+      : address
+  ));
+}
+
+function normalizeCommandNetworkOverrides(
+  command: string,
+  args: string[],
+): string[] {
+  const effective = unwrapCommand(command, args);
+  if (effective.command !== 'curl') return [];
+
+  const scope: string[] = [];
+  for (let index = 0; index < effective.args.length; index += 1) {
+    const argument = effective.args[index] ?? '';
+    let specification: string | undefined;
+    if (argument === '--resolve') {
+      specification = effective.args[index + 1];
+      if (specification === undefined) {
+        inputError('curl --resolve 缺少主机覆盖值');
+      }
+      index += 1;
+    } else if (argument.startsWith('--resolve=')) {
+      specification = argument.slice('--resolve='.length);
+    }
+    if (specification === undefined) continue;
+
+    for (const address of curlResolveAddresses(specification)) {
+      const version = isIP(address);
+      if (version === 0) inputError('curl --resolve 地址必须是 IP 字面量');
+      if ((version === 4 && !ipv4IsPublic(address))
+        || (version === 6 && !ipv6IsPublic(address))) {
+        inputError('curl --resolve 目标位于本机、内网或保留地址');
+      }
+      scope.push(`network:${address.toLowerCase()}`);
+    }
+  }
+  return [...new Set(scope)];
 }
 
 async function normalizeCommand(
@@ -729,13 +848,22 @@ async function normalizeCommand(
     'existing',
     'cwd',
   );
+  const shellSemantics = usesShellInterpreter(command, args, shell);
   const targets = await normalizeCommandTargets(
+    command,
     args,
     context,
-    usesShellInterpreter(command, args, shell),
+    shellSemantics,
+    shell,
   );
+  const networkOverrides = normalizeCommandNetworkOverrides(command, args);
 
   const confirmReasons = commandConfirmationReasons(command, args, shell);
+  if (targets.some((target) => (
+    target.startsWith('path:') && sensitivePath(target.slice('path:'.length))
+  ))) {
+    confirmReasons.push('命令可能读取凭据或敏感配置');
+  }
   const reviewReasons = commandReviewReasons(
     command,
     args,
@@ -755,6 +883,7 @@ async function normalizeCommand(
       `cwd:${cwd}`,
       `command:${[command, ...args].join(' ')}`,
       ...targets,
+      ...networkOverrides,
     ],
     confirmReasons,
     reviewReasons,

