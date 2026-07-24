@@ -297,6 +297,12 @@ describe('read-only git tools', () => {
     const status = await gitStatus(context);
     expect(status.ok).toBe(true);
     await expect(access(marker)).rejects.toMatchObject({code: 'ENOENT'});
+
+    await writeFile(join(workspace, 'file.txt'), 'initial\nfsmonitor\n');
+    const fsmonitorDiff = await gitDiff({staged: false}, context);
+    expect(fsmonitorDiff.data?.text).toContain('+fsmonitor');
+    await expect(access(marker)).rejects.toMatchObject({code: 'ENOENT'});
+
     await runGit(workspace, ['config', '--unset', 'core.fsmonitor']);
 
     await writeFile(join(workspace, 'file.txt'), 'initial\nexternal\n');

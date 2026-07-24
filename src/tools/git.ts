@@ -268,6 +268,8 @@ export async function gitDiff(
   }
 
   const args = [
+    '-c',
+    'core.fsmonitor=false',
     'diff',
     '--no-ext-diff',
     '--no-textconv',

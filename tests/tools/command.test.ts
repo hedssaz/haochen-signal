@@ -1,4 +1,5 @@
 import {constants} from 'node:fs';
+import type {ChildProcess} from 'node:child_process';
 import {getEventListeners} from 'node:events';
 import {
   access,
@@ -14,7 +15,12 @@ import {dirname, join, relative} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {Writable} from 'node:stream';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
-import {runCommand} from '../../src/tools/command.js';
+import {
+  createWindowsProcessController,
+  runCommand,
+  type WindowsProcessRecord,
+  type WindowsProcessRunner,
+} from '../../src/tools/command.js';
 import type {ToolContext} from '../../src/tools/types.js';
 
 const TEST_TIMEOUT_MS = 10_000;
@@ -312,6 +318,427 @@ describe('foreground command tool', () => {
 
     expect(result.error?.code).toBe('ABORTED');
     expect(calls).toEqual(['term', 'force', 'wait']);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+    expect(activeTimers).toHaveLength(0);
+  });
+
+  it('tracks Windows descendants by creation identity after the parent PID is reused', async () => {
+    const oldRoot: WindowsProcessRecord = {
+      pid: 100,
+      parentPid: 1,
+      creationTime: '2026-07-25T01:00:00.000Z',
+    };
+    const childRecord: WindowsProcessRecord = {
+      pid: 101,
+      parentPid: 100,
+      creationTime: '2026-07-25T01:00:01.000Z',
+    };
+    const grandchildRecord: WindowsProcessRecord = {
+      pid: 102,
+      parentPid: 101,
+      creationTime: '2026-07-25T01:00:02.000Z',
+    };
+    const unrelatedRecord: WindowsProcessRecord = {
+      pid: 200,
+      parentPid: 1,
+      creationTime: '2026-07-25T01:00:03.000Z',
+    };
+    const reusedRoot: WindowsProcessRecord = {
+      pid: 100,
+      parentPid: 1,
+      creationTime: '2026-07-25T02:00:00.000Z',
+    };
+    let processes = [
+      oldRoot,
+      childRecord,
+      grandchildRecord,
+      unrelatedRecord,
+    ];
+    const taskkills: Array<{
+      pid: number;
+      tree: boolean;
+      force: boolean;
+    }> = [];
+    const runner: WindowsProcessRunner = {
+      async snapshotProcesses() {
+        return processes.map((record) => ({...record}));
+      },
+      async taskkill(pid, options) {
+        taskkills.push({pid, ...options});
+        if (!options.force) {
+          processes = [
+            reusedRoot,
+            childRecord,
+            grandchildRecord,
+            unrelatedRecord,
+          ];
+        } else {
+          processes = processes.filter((record) => record.pid !== pid);
+        }
+        return {exitCode: 0};
+      },
+    };
+    const controller = createWindowsProcessController(runner);
+    const child = {pid: oldRoot.pid} as ChildProcess;
+
+    await controller.trackTree?.(child);
+    await controller.terminateTree(child);
+
+    await expect(controller.treeExists(child)).resolves.toBe(true);
+    await controller.forceKillTree(child);
+    await controller.waitForTreeExit(child);
+
+    expect(taskkills[0]).toEqual({
+      pid: oldRoot.pid,
+      tree: true,
+      force: false,
+    });
+    expect(taskkills).not.toContainEqual({
+      pid: reusedRoot.pid,
+      tree: true,
+      force: true,
+    });
+    expect(processes).toContainEqual(reusedRoot);
+    expect(processes).toContainEqual(unrelatedRecord);
+    expect(processes).not.toContainEqual(childRecord);
+    expect(processes).not.toContainEqual(grandchildRecord);
+  });
+
+  it('fails Windows cleanup when taskkill is nonzero and the same process survives', async () => {
+    const rootRecord: WindowsProcessRecord = {
+      pid: 300,
+      parentPid: 1,
+      creationTime: '2026-07-25T03:00:00.000Z',
+    };
+    const childRecord: WindowsProcessRecord = {
+      pid: 301,
+      parentPid: 300,
+      creationTime: '2026-07-25T03:00:01.000Z',
+    };
+    let processes = [rootRecord, childRecord];
+    const runner: WindowsProcessRunner = {
+      async snapshotProcesses() {
+        return processes.map((record) => ({...record}));
+      },
+      async taskkill(_pid, options) {
+        if (!options.force) {
+          processes = [childRecord];
+          return {exitCode: 0};
+        }
+        return {exitCode: 5};
+      },
+    };
+    const controller = createWindowsProcessController(runner);
+    const child = {pid: rootRecord.pid} as ChildProcess;
+
+    await controller.trackTree?.(child);
+    await controller.terminateTree(child);
+
+    await expect(controller.forceKillTree(child)).rejects.toThrow(
+      /taskkill.*5/i,
+    );
+  });
+
+  it('rejects a Windows root identity captured after the original child exits', async () => {
+    const reusedRoot: WindowsProcessRecord = {
+      pid: 400,
+      parentPid: 1,
+      creationTime: '2026-07-25T04:00:00.000Z',
+    };
+    const taskkills: number[] = [];
+    const runner: WindowsProcessRunner = {
+      async snapshotProcesses() {
+        return [reusedRoot];
+      },
+      async taskkill(pid) {
+        taskkills.push(pid);
+        return {exitCode: 0};
+      },
+    };
+    const controller = createWindowsProcessController(runner);
+    const exitedChild = {
+      pid: reusedRoot.pid,
+      exitCode: 0,
+      signalCode: null,
+    } as ChildProcess;
+
+    await expect(controller.trackTree?.(exitedChild)).rejects.toThrow(
+      /退出|身份/,
+    );
+    expect(taskkills).toEqual([]);
+  });
+
+  it.each(['track', 'terminate'] as const)(
+    'bounds a hanging Windows %s phase and prevents late termination',
+    async (hangingPhase) => {
+    const readyPath = join(workspace, `hanging-${hangingPhase}.ready`);
+    const controller = new AbortController();
+    const calls: string[] = [];
+    let releaseHangingPhase = (): void => {};
+    const hanging = new Promise<void>((resolveHangingPhase) => {
+      releaseHangingPhase = resolveHangingPhase;
+    });
+    const activeTimers = new Set<NodeJS.Timeout>();
+    const timers = {
+      setTimeout(callback: () => void, timeoutMs: number): NodeJS.Timeout {
+        const effectiveTimeout = timeoutMs === 2_000 ? 20 : timeoutMs;
+        const timer = setTimeout(() => {
+          activeTimers.delete(timer);
+          callback();
+        }, effectiveTimeout);
+        activeTimers.add(timer);
+        return timer;
+      },
+      clearTimeout(timer: NodeJS.Timeout): void {
+        activeTimers.delete(timer);
+        clearTimeout(timer);
+      },
+    };
+    const failSafe = setTimeout(releaseHangingPhase, 500);
+
+    try {
+      const command = runCommand({
+        command: process.execPath,
+        args: [
+          '-e',
+          [
+            'const fs = require("node:fs");',
+            'fs.writeFileSync(process.argv[1], "ready");',
+            'process.on("SIGTERM", () => process.exit(0));',
+            'setInterval(() => {}, 1000);',
+          ].join('\n'),
+          readyPath,
+        ],
+      }, context, controller.signal, {
+        processController: {
+          trackTree() {
+            calls.push('track');
+            return hangingPhase === 'track' ? hanging : undefined;
+          },
+          terminateTree(childProcess) {
+            calls.push('terminate');
+            if (hangingPhase === 'terminate') return hanging;
+            childProcess.kill('SIGTERM');
+          },
+          forceKillTree() {
+            calls.push('force');
+          },
+          treeExists() {
+            calls.push('exists');
+            return true;
+          },
+          async waitForTreeExit() {
+            calls.push('wait');
+          },
+        },
+        timers,
+      });
+
+      await waitForFile(readyPath);
+      controller.abort();
+      const result = await command;
+      releaseHangingPhase();
+      await delay(0);
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'PROCESS_TREE_CLEANUP_FAILED'},
+      });
+      expect(calls).toEqual(
+        hangingPhase === 'track' ? ['track'] : ['track', 'terminate'],
+      );
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      expect(activeTimers).toHaveLength(0);
+    } finally {
+      clearTimeout(failSafe);
+      releaseHangingPhase();
+    }
+    },
+  );
+
+  it.each(['force', 'wait'] as const)(
+    'bounds a hanging %s cleanup phase',
+    async (hangingPhase) => {
+      const readyPath = join(workspace, `hanging-${hangingPhase}.ready`);
+      const controller = new AbortController();
+      const activeTimers = new Set<NodeJS.Timeout>();
+      const timers = {
+        setTimeout(callback: () => void, timeoutMs: number): NodeJS.Timeout {
+          const effectiveTimeout = timeoutMs === 2_000 ? 20 : timeoutMs;
+          const timer = setTimeout(() => {
+            activeTimers.delete(timer);
+            callback();
+          }, effectiveTimeout);
+          activeTimers.add(timer);
+          return timer;
+        },
+        clearTimeout(timer: NodeJS.Timeout): void {
+          activeTimers.delete(timer);
+          clearTimeout(timer);
+        },
+      };
+      const never = new Promise<void>(() => {});
+      const command = runCommand({
+        command: process.execPath,
+        args: [
+          '-e',
+          [
+            'const fs = require("node:fs");',
+            'fs.writeFileSync(process.argv[1], "ready");',
+            'process.on("SIGTERM", () => process.exit(0));',
+            'setInterval(() => {}, 1000);',
+          ].join('\n'),
+          readyPath,
+        ],
+      }, context, controller.signal, {
+        processController: {
+          trackTree() {},
+          terminateTree(childProcess) {
+            childProcess.kill('SIGTERM');
+          },
+          forceKillTree() {
+            return hangingPhase === 'force' ? never : undefined;
+          },
+          treeExists() {
+            return true;
+          },
+          waitForTreeExit() {
+            return hangingPhase === 'wait' ? never : Promise.resolve();
+          },
+        },
+        timers,
+      });
+
+      await waitForFile(readyPath);
+      controller.abort();
+      const result = await command;
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'PROCESS_TREE_CLEANUP_FAILED'},
+      });
+      expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+      expect(activeTimers).toHaveLength(0);
+    },
+  );
+
+  it('does not wait forever when force kill returns before the root exits', async () => {
+    const readyPath = join(workspace, 'force-without-exit.ready');
+    const controller = new AbortController();
+    let spawnedChild: ChildProcess | undefined;
+    const timers = {
+      setTimeout(callback: () => void, timeoutMs: number): NodeJS.Timeout {
+        return setTimeout(callback, timeoutMs === 2_000 ? 20 : timeoutMs);
+      },
+      clearTimeout(timer: NodeJS.Timeout): void {
+        clearTimeout(timer);
+      },
+    };
+    const startedAt = Date.now();
+    const command = runCommand({
+      command: process.execPath,
+      args: [
+        '-e',
+        [
+          'const fs = require("node:fs");',
+          'fs.writeFileSync(process.argv[1], "ready");',
+          'process.on("SIGTERM", () => {});',
+          'setInterval(() => {}, 1000);',
+        ].join('\n'),
+        readyPath,
+      ],
+    }, context, controller.signal, {
+      processController: {
+        trackTree() {},
+        terminateTree(childProcess) {
+          spawnedChild = childProcess;
+          childProcess.kill('SIGTERM');
+        },
+        forceKillTree() {},
+        treeExists() {
+          return true;
+        },
+        waitForTreeExit() {
+          return new Promise<void>(() => {});
+        },
+      },
+      timers,
+    });
+    const failSafe = setTimeout(() => {
+      spawnedChild?.kill('SIGKILL');
+    }, 500);
+
+    try {
+      await waitForFile(readyPath);
+      controller.abort();
+      const result = await command;
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'PROCESS_TREE_CLEANUP_FAILED'},
+      });
+      expect(Date.now() - startedAt).toBeLessThan(250);
+    } finally {
+      clearTimeout(failSafe);
+      spawnedChild?.kill('SIGKILL');
+    }
+  });
+
+  it('returns cleanup failure when process-tree exit cannot be proven', async () => {
+    const readyPath = join(workspace, 'cleanup-failure.ready');
+    const controller = new AbortController();
+    const activeTimers = new Set<NodeJS.Timeout>();
+    const timers = {
+      setTimeout(callback: () => void, timeoutMs: number): NodeJS.Timeout {
+        const effectiveTimeout = timeoutMs === 2_000 ? 20 : timeoutMs;
+        const timer = setTimeout(() => {
+          activeTimers.delete(timer);
+          callback();
+        }, effectiveTimeout);
+        activeTimers.add(timer);
+        return timer;
+      },
+      clearTimeout(timer: NodeJS.Timeout): void {
+        activeTimers.delete(timer);
+        clearTimeout(timer);
+      },
+    };
+    const command = runCommand({
+      command: process.execPath,
+      args: [
+        '-e',
+        [
+          'const fs = require("node:fs");',
+          'fs.writeFileSync(process.argv[1], "ready");',
+          'process.on("SIGTERM", () => process.exit(0));',
+          'setInterval(() => {}, 1000);',
+        ].join('\n'),
+        readyPath,
+      ],
+    }, context, controller.signal, {
+      processController: {
+        terminateTree(childProcess) {
+          childProcess.kill('SIGTERM');
+        },
+        forceKillTree() {},
+        treeExists() {
+          return true;
+        },
+        async waitForTreeExit() {
+          throw new Error('cannot prove tree exit');
+        },
+      },
+      timers,
+    });
+
+    await waitForFile(readyPath);
+    controller.abort();
+    const result = await command;
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'PROCESS_TREE_CLEANUP_FAILED'},
+    });
     expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
     expect(activeTimers).toHaveLength(0);
   });
