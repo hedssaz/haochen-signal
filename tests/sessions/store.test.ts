@@ -1,4 +1,12 @@
-import {appendFile, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {expect, it} from 'vitest';
@@ -10,6 +18,39 @@ it('creates unique UUID session IDs', () => {
 
   expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   expect(second).not.toBe(first);
+});
+
+it('keeps safe session IDs inside the store and rejects unsafe IDs', () => {
+  const store = new SessionStore('/tmp/haochen-session-root');
+
+  expect(store.pathFor('session-1')).toBe(
+    '/tmp/haochen-session-root/session-1.jsonl',
+  );
+  for (const id of ['', '.', '..', '../escape', 'nested/id', 'nested\\id', '/tmp/escape']) {
+    expect(() => store.pathFor(id)).toThrow(/invalid session id/i);
+  }
+});
+
+it('rejects a session file symlink that escapes the store root', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const root = join(tempDir, 'store');
+  const victim = join(tempDir, 'victim.jsonl');
+  const store = new SessionStore(root);
+
+  try {
+    await mkdir(root);
+    await writeFile(victim, 'do-not-change');
+    await symlink(victim, join(root, 'session-link.jsonl'));
+
+    expect(() => store.pathFor('session-link')).toThrow(/invalid session id/i);
+    await expect(store.append(
+      'session-link',
+      {type: 'user', at: 1, text: 'must-not-append'},
+    )).rejects.toThrow(/invalid session id/i);
+    await expect(readFile(victim, 'utf8')).resolves.toBe('do-not-change');
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
 });
 
 it('restores complete events and ignores a truncated final line', async () => {
@@ -56,6 +97,129 @@ it('redacts each event before appending one newline-terminated JSON record', asy
   }
 });
 
+it('removes a structurally truncated final line before appending', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+
+  try {
+    await store.append('session-1', {type: 'user', at: 1, text: 'first'});
+    await appendFile(
+      store.pathFor('session-1'),
+      '{"type":"assistant","at":2,"text":"unfinished \\" } ]',
+    );
+
+    await store.append('session-1', {type: 'assistant', at: 3, text: 'recovered'});
+
+    await expect(store.read('session-1')).resolves.toEqual([
+      {type: 'user', at: 1, text: 'first'},
+      {type: 'assistant', at: 3, text: 'recovered'},
+    ]);
+    expect(await readFile(store.pathFor('session-1'), 'utf8')).not.toContain('unfinished');
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('preserves a complete final JSON record without a newline before appending', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+
+  try {
+    await writeFile(
+      store.pathFor('session-1'),
+      '{"type":"user","at":1,"text":"first"}',
+    );
+
+    await store.append('session-1', {type: 'assistant', at: 2, text: 'second'});
+
+    await expect(store.read('session-1')).resolves.toEqual([
+      {type: 'user', at: 1, text: 'first'},
+      {type: 'assistant', at: 2, text: 'second'},
+    ]);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('rejects balanced invalid final JSON without changing the file', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+  const contents =
+    '{"type":"user","at":1,"text":"first"}\n{"type":"assistant","at":2,}';
+
+  try {
+    await writeFile(store.pathFor('session-1'), contents);
+
+    await expect(store.append(
+      'session-1',
+      {type: 'assistant', at: 3, text: 'must-not-append'},
+    )).rejects.toThrow(/line 2/i);
+    await expect(readFile(store.pathFor('session-1'), 'utf8')).resolves.toBe(contents);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('rejects an invalid string escape instead of treating it as truncation', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+  const contents =
+    '{"type":"user","at":1,"text":"first"}\n{"type":"assistant","at":2,"text":"bad\\q';
+
+  try {
+    await writeFile(store.pathFor('session-1'), contents);
+
+    await expect(store.append(
+      'session-1',
+      {type: 'assistant', at: 3, text: 'must-not-append'},
+    )).rejects.toThrow(/line 2/i);
+    await expect(readFile(store.pathFor('session-1'), 'utf8')).resolves.toBe(contents);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('rejects a trailing fragment after a complete JSON value', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+  const contents =
+    '{"type":"user","at":1,"text":"first"}\n'
+    + '{"type":"assistant","at":2,"text":"complete"}{"type":';
+
+  try {
+    await writeFile(store.pathFor('session-1'), contents);
+
+    await expect(store.append(
+      'session-1',
+      {type: 'assistant', at: 3, text: 'must-not-append'},
+    )).rejects.toThrow(/line 2/i);
+    await expect(readFile(store.pathFor('session-1'), 'utf8')).resolves.toBe(contents);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it.each([
+  '{"type":oops',
+  '{"type":"assistant",???',
+])('rejects a final line that is not a valid JSON prefix: %s', async (invalidPrefix) => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+  const contents = `{"type":"user","at":1,"text":"first"}\n${invalidPrefix}`;
+
+  try {
+    await writeFile(store.pathFor('session-1'), contents);
+
+    await expect(store.append(
+      'session-1',
+      {type: 'assistant', at: 3, text: 'must-not-append'},
+    )).rejects.toThrow(/line 2/i);
+    await expect(readFile(store.pathFor('session-1'), 'utf8')).resolves.toBe(contents);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
 it('reports the line number for malformed complete records', async () => {
   const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
   const store = new SessionStore(tempDir);
@@ -95,6 +259,44 @@ it('reads a valid final record without a newline but rejects non-truncated corru
       '{"type":broken}',
     );
     await expect(store.read('invalid-no-newline')).rejects.toThrow(/line 1/i);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it.each([
+  ['empty object', '{}'],
+  ['scalar', '42'],
+  ['invalid timestamp', '{"type":"user","at":"1","text":"wrong"}'],
+  ['missing field', '{"type":"assistant","at":1}'],
+  ['unknown field', '{"type":"summary","at":1,"text":"ok","extra":true}'],
+])('rejects a structurally invalid session event: %s', async (_name, invalidEvent) => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+
+  try {
+    await writeFile(
+      store.pathFor('invalid-event'),
+      `{"type":"user","at":1,"text":"valid"}\n${invalidEvent}\n`,
+    );
+
+    await expect(store.read('invalid-event')).rejects.toThrow(/line 2/i);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('validates session event structure while listing', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+
+  try {
+    await writeFile(
+      store.pathFor('invalid-event'),
+      '{"type":"user","at":1,"text":"valid"}\n{}\n',
+    );
+
+    await expect(store.list()).rejects.toThrow(/line 2/i);
   } finally {
     await rm(tempDir, {recursive: true, force: true});
   }

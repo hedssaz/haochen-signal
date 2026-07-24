@@ -1,7 +1,9 @@
 import {createHash} from 'node:crypto';
-import {appendFile, mkdir} from 'node:fs/promises';
-import {join, resolve} from 'node:path';
+import {mkdir} from 'node:fs/promises';
+import {resolve} from 'node:path';
 import {redactValue} from '../security/redact.js';
+import {appendUtf8} from './files.js';
+import {jsonlPathFor} from './path.js';
 import type {AuditEntry} from './types.js';
 
 export function workspaceId(workspacePath: string): string {
@@ -12,15 +14,14 @@ export class AuditStore {
   constructor(private readonly directory: string) {}
 
   pathFor(workspaceId: string): string {
-    return join(this.directory, `${workspaceId}.jsonl`);
+    return jsonlPathFor(this.directory, workspaceId, 'workspace');
   }
 
   async append(workspaceId: string, entry: AuditEntry): Promise<void> {
     await mkdir(this.directory, {recursive: true});
-    await appendFile(
+    await appendUtf8(
       this.pathFor(workspaceId),
       `${JSON.stringify(redactValue(entry))}\n`,
-      'utf8',
     );
   }
 }

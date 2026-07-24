@@ -78,3 +78,85 @@ it('removes complete environment maps', () => {
     nested: {environment: '[REDACTED]'},
   });
 });
+
+it('redacts Basic and API key headers in strings, objects, and tuples', () => {
+  expect(redactValue({
+    basicLine: 'Authorization: Basic dXNlcjpwYXNzd29yZA==',
+    apiLine: 'X-API-Key: api-value',
+    headers: {
+      Authorization: 'Basic dXNlcjpwYXNzd29yZA==',
+      'X-API-Key': 'api-value',
+    },
+    headerTuples: [
+      ['Authorization', 'Basic dXNlcjpwYXNzd29yZA=='],
+      ['X-API-Key', 'api-value'],
+    ],
+  })).toEqual({
+    basicLine: 'Authorization: [REDACTED]',
+    apiLine: 'X-API-Key: [REDACTED]',
+    headers: {
+      Authorization: '[REDACTED]',
+      'X-API-Key': '[REDACTED]',
+    },
+    headerTuples: [
+      ['Authorization', '[REDACTED]'],
+      ['X-API-Key', '[REDACTED]'],
+    ],
+  });
+});
+
+it('redacts GitHub, Stripe, and credential-bearing database URLs', () => {
+  expect(redactValue({
+    github: 'github_pat_1234567890abcdef',
+    stripeLive: 'sk_live_1234567890abcdef',
+    stripeTest: 'sk_test_1234567890abcdef',
+    DATABASE_URL: 'postgresql://app:db-password@db.example.test/app',
+    message: 'connect mongodb://worker:mongo-secret@db.example.test/jobs now',
+  })).toEqual({
+    github: '[REDACTED]',
+    stripeLive: '[REDACTED]',
+    stripeTest: '[REDACTED]',
+    DATABASE_URL: '[REDACTED]',
+    message: 'connect mongodb://[REDACTED]@db.example.test/jobs now',
+  });
+});
+
+it('replaces binary containers instead of expanding their bytes', () => {
+  expect(redactValue({
+    buffer: Buffer.from('secret-bytes'),
+    bytes: new Uint8Array([115, 101, 99, 114, 101, 116]),
+    view: new DataView(new Uint8Array([1, 2, 3]).buffer),
+  })).toEqual({
+    buffer: '[REDACTED_BINARY]',
+    bytes: '[REDACTED_BINARY]',
+    view: '[REDACTED_BINARY]',
+  });
+});
+
+it('does not redact safe keys that only contain sensitive substrings', () => {
+  expect(redactValue({
+    tokenCount: 42,
+    secretary: 'Ada',
+    cookiePolicy: 'strict',
+  })).toEqual({
+    tokenCount: 42,
+    secretary: 'Ada',
+    cookiePolicy: 'strict',
+  });
+});
+
+it('redacts explicit compound credential field names', () => {
+  expect(redactValue({
+    sessionToken: 'opaque-session-value',
+    githubToken: 'opaque-github-value',
+    apiToken: 'opaque-api-value',
+    privateKey: 'opaque-private-material',
+    authorizationHeader: 'Basic dXNlcjpwYXNz',
+  })).toEqual({
+    sessionToken: '[REDACTED]',
+    githubToken: '[REDACTED]',
+    apiToken: '[REDACTED]',
+    privateKey: '[REDACTED]',
+    authorizationHeader: '[REDACTED]',
+  });
+});
