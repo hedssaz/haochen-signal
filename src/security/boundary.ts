@@ -813,11 +813,41 @@ function curlResolveAddresses(specification: string): string[] {
   if (addresses.some((address) => address.length === 0)) {
     inputError('curl --resolve 主机覆盖格式无效');
   }
-  return addresses.map((address) => (
-    address.startsWith('[') && address.endsWith(']')
-      ? address.slice(1, -1)
-      : address
-  ));
+  return addresses.map((address) => {
+    const normalized = normalizeIpAddress(address);
+    if (normalized === undefined) {
+      inputError('curl --resolve 地址必须是 IP 字面量');
+    }
+    return normalized;
+  });
+}
+
+function normalizeIpAddress(value: string): string | undefined {
+  const literal = value.startsWith('[') && value.endsWith(']')
+    ? value.slice(1, -1)
+    : value;
+  const directVersion = isIP(literal);
+  if (directVersion !== 0) return literal.toLowerCase();
+  if (literal.includes(':')) return undefined;
+
+  try {
+    const parsed = new URL(`http://${literal}`);
+    if (parsed.username !== ''
+      || parsed.password !== ''
+      || parsed.port !== ''
+      || parsed.pathname !== '/'
+      || parsed.search !== ''
+      || parsed.hash !== '') {
+      return undefined;
+    }
+    const hostname = parsed.hostname.startsWith('[')
+      && parsed.hostname.endsWith(']')
+      ? parsed.hostname.slice(1, -1)
+      : parsed.hostname;
+    return isIP(hostname) === 0 ? undefined : hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
 }
 
 function curlConnectToAddress(specification: string): string | undefined {
@@ -1008,15 +1038,18 @@ function normalizeCommandNetworkOverrides(
     for (const specification of curlOptionSpecifications(curlArgs, '--connect-to')) {
       const address = curlConnectToAddress(specification);
       if (address === undefined) continue;
-      const version = isIP(address);
+      const normalizedAddress = normalizeIpAddress(address);
+      const version = normalizedAddress === undefined ? 0 : isIP(normalizedAddress);
       if (version === 0 && nonPublicHostname(address)) {
         inputError('curl --connect-to 目标位于本机、内网或保留地址');
       }
-      if ((version === 4 && !ipv4IsPublic(address))
-        || (version === 6 && !ipv6IsPublic(address))) {
+      if ((version === 4 && !ipv4IsPublic(normalizedAddress ?? address))
+        || (version === 6 && !ipv6IsPublic(normalizedAddress ?? address))) {
         inputError('curl --connect-to 目标位于本机、内网或保留地址');
       }
-      if (version !== 0) scope.push(`network:${address.toLowerCase()}`);
+      if (normalizedAddress !== undefined) {
+        scope.push(`network:${normalizedAddress}`);
+      }
     }
   }
   return [...new Set(scope)];

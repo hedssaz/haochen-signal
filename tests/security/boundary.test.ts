@@ -547,6 +547,24 @@ describe('classifyOperation', () => {
     expect(decision.action).toBe('deny');
   });
 
+  it('classifies non-standard private --resolve addresses as private', async () => {
+    const decision = await classifyOperation({
+      tool: 'run_command',
+      input: {
+        command: 'curl',
+        args: [
+          '--resolve=example.com:443:0x7f000001',
+          'https://example.com',
+        ],
+      },
+    }, context);
+
+    expect(decision.action).toBe('deny');
+    expect(decision.reasons).toEqual([
+      'curl --resolve 目标位于本机、内网或保留地址',
+    ]);
+  });
+
   it.each([
     ['split', ['--connect-to', 'example.com:443:127.0.0.1:443']],
     ['equals', ['--connect-to=example.com:443:127.0.0.1:443']],
@@ -569,6 +587,29 @@ describe('classifyOperation', () => {
         command: 'curl',
         args: [
           '--connect-to=example.com:443:localhost:443',
+          'https://example.com',
+        ],
+      },
+    }, context);
+
+    expect(decision.action).toBe('deny');
+  });
+
+  it.each([
+    ['hexadecimal', '0x7f000001'],
+    ['octal', '0177.0.0.1'],
+    ['decimal', '2130706433'],
+    ['short IPv4', '127.1'],
+  ])('denies curl --connect-to non-standard private IPv4 in %s form', async (
+    _form,
+    destination,
+  ) => {
+    const decision = await classifyOperation({
+      tool: 'run_command',
+      input: {
+        command: 'curl',
+        args: [
+          `--connect-to=example.com:443:${destination}:443`,
           'https://example.com',
         ],
       },
