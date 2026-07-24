@@ -329,6 +329,94 @@ describe('web fetch', () => {
     });
   });
 
+  it('interrupts a stalled body read at the total deadline and releases resources', async () => {
+    let cancelled = false;
+    const dispatcher = {
+      close: vi.fn(async () => undefined),
+      destroy: vi.fn(async () => undefined),
+    };
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => undefined);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const result = await Promise.race([
+      webFetch(
+        {url: 'https://docs.example/stalled-body-timeout'},
+        context,
+        signal,
+        {
+          fetch: async () => new Response(body),
+          resolveDns: publicDns,
+          createDispatcher: () => dispatcher,
+          timeoutMs: 5,
+        } as unknown as Parameters<typeof webFetch>[3],
+      ),
+      new Promise((resolve) => {
+        setTimeout(() => resolve({guardExpired: true}), 100);
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'WEB_TIMEOUT'},
+    });
+    expect(cancelled).toBe(true);
+    expect(dispatcher.close).toHaveBeenCalledOnce();
+    expect(dispatcher.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('interrupts a stalled body read when the caller cancels and releases resources', async () => {
+    const controller = new AbortController();
+    let markPullStarted!: () => void;
+    const pullStarted = new Promise<void>((resolve) => {
+      markPullStarted = resolve;
+    });
+    let cancelled = false;
+    const dispatcher = {
+      close: vi.fn(async () => undefined),
+      destroy: vi.fn(async () => undefined),
+    };
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        markPullStarted();
+        return new Promise<void>(() => undefined);
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }, {highWaterMark: 0});
+    const fetching = webFetch(
+      {url: 'https://docs.example/stalled-body-cancel'},
+      context,
+      controller.signal,
+      {
+        fetch: async () => new Response(body),
+        resolveDns: publicDns,
+        createDispatcher: () => dispatcher,
+      } as unknown as Parameters<typeof webFetch>[3],
+    );
+    await pullStarted;
+    controller.abort();
+    const result = await Promise.race([
+      fetching,
+      new Promise((resolve) => {
+        setTimeout(() => resolve({guardExpired: true}), 100);
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    expect(cancelled).toBe(true);
+    expect(dispatcher.close).toHaveBeenCalledOnce();
+    expect(dispatcher.destroy).toHaveBeenCalledOnce();
+  });
+
   it('returns WEB_TIMEOUT when a request exceeds its timeout', async () => {
     const fetcher = vi.fn((_: RequestInfo | URL, init?: RequestInit) => new Promise<Response>(
       (_resolve, reject) => {

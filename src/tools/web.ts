@@ -446,7 +446,7 @@ async function readResponseText(
   try {
     while (true) {
       assertNotAborted(signal);
-      const {done, value} = await reader.read();
+      const {done, value} = await awaitWithSignal(reader.read(), signal);
       if (done) break;
       if (value === undefined) continue;
       bytesRead += value.byteLength;
