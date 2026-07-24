@@ -42,6 +42,17 @@ const SHELL_EXECUTABLES = new Set([
   'pwsh',
 ]);
 
+const READ_ONLY_GIT_SUBCOMMANDS = new Set([
+  'status',
+  'diff',
+  'log',
+  'show',
+  'rev-parse',
+  'ls-files',
+  'grep',
+  'describe',
+]);
+
 type JsonPrimitive = null | boolean | number | string;
 type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue};
 type JsonObject = {[key: string]: JsonValue};
@@ -353,19 +364,28 @@ function isWhitelistedCommand(
 function unwrapCommand(
   command: string,
   args: string[],
-): {command: string; args: string[]} {
+): {command: string; args: string[]; envSplitString: boolean} {
   let effectiveCommand = normalizedExecutable(command);
   let effectiveArgs = [...args];
-  const seen = new Set<string>();
+  let envSplitString = false;
 
   while (['env', 'command', 'exec', 'nice', 'nohup'].includes(effectiveCommand)
-    && effectiveArgs.length > 0
-    && !seen.has(effectiveCommand)) {
-    seen.add(effectiveCommand);
+    && effectiveArgs.length > 0) {
     let index = 0;
     if (effectiveCommand === 'env') {
       while (index < effectiveArgs.length) {
         const token = effectiveArgs[index] ?? '';
+        if (token === '--') {
+          index += 1;
+          break;
+        }
+        if (token === '-S'
+          || token === '--split-string'
+          || token.startsWith('--split-string=')
+          || (token.startsWith('-S') && token.length > 2)) {
+          envSplitString = true;
+          return {command: effectiveCommand, args: effectiveArgs, envSplitString};
+        }
         if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)
           || token === '-i'
           || token === '--ignore-environment') {
@@ -394,7 +414,7 @@ function unwrapCommand(
     effectiveCommand = normalizedExecutable(next);
     effectiveArgs = effectiveArgs.slice(index + 1);
   }
-  return {command: effectiveCommand, args: effectiveArgs};
+  return {command: effectiveCommand, args: effectiveArgs, envSplitString};
 }
 
 function gitSubcommand(args: string[]): {name?: string; rest: string[]} {
@@ -460,6 +480,9 @@ function commandConfirmationReasons(
 
   if (effective.command === 'git') {
     const git = gitSubcommand(effective.args);
+    if (!READ_ONLY_GIT_SUBCOMMANDS.has(git.name ?? '')) {
+      reasons.push('Git 子命令不是明确的只读操作');
+    }
     if (git.name === 'reset'
       && git.rest.some((argument) => /^--hard(?:=|$)/iu.test(argument))) {
       reasons.push('命令会执行破坏性 Git reset --hard');
@@ -616,7 +639,10 @@ function usesShellInterpreter(
   args: string[],
   shell: boolean,
 ): boolean {
-  return shell || SHELL_EXECUTABLES.has(unwrapCommand(command, args).command);
+  const effective = unwrapCommand(command, args);
+  return shell
+    || effective.envSplitString
+    || SHELL_EXECUTABLES.has(effective.command);
 }
 
 function candidatePath(argument: string): string | undefined {
@@ -780,36 +806,106 @@ function curlResolveAddresses(specification: string): string[] {
   ));
 }
 
+function curlConnectToAddress(specification: string): string | undefined {
+  let position = 0;
+  const readHost = (): string | undefined => {
+    if (specification[position] === '[') {
+      const closing = specification.indexOf(']', position + 1);
+      if (closing === -1 || specification[closing + 1] !== ':') {
+        inputError('curl --connect-to 主机覆盖格式无效');
+      }
+      const host = specification.slice(position + 1, closing);
+      position = closing + 2;
+      return host;
+    }
+    const separator = specification.indexOf(':', position);
+    if (separator === -1) inputError('curl --connect-to 主机覆盖格式无效');
+    const host = specification.slice(position, separator);
+    position = separator + 1;
+    return host;
+  };
+  const readPort = (): void => {
+    const separator = specification.indexOf(':', position);
+    if (separator === -1) inputError('curl --connect-to 主机覆盖格式无效');
+    if (separator === position) inputError('curl --connect-to 主机覆盖格式无效');
+    position = separator + 1;
+  };
+
+  readHost();
+  readPort();
+  const destination = readHost();
+  if (destination === undefined || position >= specification.length) {
+    inputError('curl --connect-to 主机覆盖格式无效');
+  }
+  if (specification.slice(position).length === 0) {
+    inputError('curl --connect-to 主机覆盖格式无效');
+  }
+  return destination === '' ? undefined : destination;
+}
+
+function curlOptionSpecifications(
+  args: string[],
+  option: '--resolve' | '--connect-to',
+): string[] {
+  const values: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] ?? '';
+    if (argument === option) {
+      const value = args[index + 1];
+      if (value === undefined) inputError(`curl ${option} 缺少主机覆盖值`);
+      values.push(value);
+      index += 1;
+    } else if (argument.startsWith(`${option}=`)) {
+      values.push(argument.slice(option.length + 1));
+    }
+  }
+  return values;
+}
+
+function shellCurlArguments(command: string, args: string[]): string[][] {
+  const sets: string[][] = [];
+  for (const value of [command, ...args]) {
+    const text = dequoteShellText(value);
+    if (/(?:^|[\s;&|])curl(?:\s|$)/u.test(text)) {
+      sets.push(text.split(/\s+/u));
+    }
+  }
+  return sets;
+}
+
 function normalizeCommandNetworkOverrides(
   command: string,
   args: string[],
+  shellSemantics: boolean,
 ): string[] {
   const effective = unwrapCommand(command, args);
-  if (effective.command !== 'curl') return [];
+  const argumentSets = effective.command === 'curl'
+    ? [effective.args]
+    : [];
+  if (shellSemantics) argumentSets.push(...shellCurlArguments(command, args));
 
   const scope: string[] = [];
-  for (let index = 0; index < effective.args.length; index += 1) {
-    const argument = effective.args[index] ?? '';
-    let specification: string | undefined;
-    if (argument === '--resolve') {
-      specification = effective.args[index + 1];
-      if (specification === undefined) {
-        inputError('curl --resolve 缺少主机覆盖值');
+  for (const curlArgs of argumentSets) {
+    for (const specification of curlOptionSpecifications(curlArgs, '--resolve')) {
+      for (const address of curlResolveAddresses(specification)) {
+        const version = isIP(address);
+        if (version === 0) inputError('curl --resolve 地址必须是 IP 字面量');
+        if ((version === 4 && !ipv4IsPublic(address))
+          || (version === 6 && !ipv6IsPublic(address))) {
+          inputError('curl --resolve 目标位于本机、内网或保留地址');
+        }
+        scope.push(`network:${address.toLowerCase()}`);
       }
-      index += 1;
-    } else if (argument.startsWith('--resolve=')) {
-      specification = argument.slice('--resolve='.length);
     }
-    if (specification === undefined) continue;
-
-    for (const address of curlResolveAddresses(specification)) {
+    for (const specification of curlOptionSpecifications(curlArgs, '--connect-to')) {
+      const address = curlConnectToAddress(specification);
+      if (address === undefined) continue;
       const version = isIP(address);
-      if (version === 0) inputError('curl --resolve 地址必须是 IP 字面量');
       if ((version === 4 && !ipv4IsPublic(address))
         || (version === 6 && !ipv6IsPublic(address))) {
-        inputError('curl --resolve 目标位于本机、内网或保留地址');
+        inputError('curl --connect-to 目标位于本机、内网或保留地址');
       }
-      scope.push(`network:${address.toLowerCase()}`);
+      if (version !== 0) scope.push(`network:${address.toLowerCase()}`);
     }
   }
   return [...new Set(scope)];
@@ -856,7 +952,11 @@ async function normalizeCommand(
     shellSemantics,
     shell,
   );
-  const networkOverrides = normalizeCommandNetworkOverrides(command, args);
+  const networkOverrides = normalizeCommandNetworkOverrides(
+    command,
+    args,
+    shellSemantics,
+  );
 
   const confirmReasons = commandConfirmationReasons(command, args, shell);
   if (targets.some((target) => (

