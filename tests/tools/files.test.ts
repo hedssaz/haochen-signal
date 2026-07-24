@@ -2,13 +2,16 @@ import {createHash} from 'node:crypto';
 import {writeFileSync} from 'node:fs';
 import {
   chmod,
+  link as linkFile,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
+  rename as renameFile,
   rm,
   stat,
   symlink,
+  unlink as unlinkFile,
   writeFile,
 } from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -411,16 +414,25 @@ describe('workspace file tools', () => {
     );
   });
 
-  it.each(['write', 'truncate', 'sync', 'chmod', 'link'] as const)(
+  it.each(['write', 'truncate', 'sync', 'chmod', 'close', 'link'] as const)(
     'cleans a nested add temp file when %s fails',
     async (stage) => {
       const directory = join(workspace, 'nested');
       await mkdir(directory);
-      const injected = {
-        [stage]: async () => {
-          throw new Error(`${stage} failed`);
-        },
-      } as Partial<PatchFileOperations>;
+      const injected = (stage === 'close'
+        ? {
+            close: async (
+              file: Parameters<PatchFileOperations['write']>[0],
+            ) => {
+              await file.close();
+              throw new Error('close failed');
+            },
+          }
+        : {
+            [stage]: async () => {
+              throw new Error(`${stage} failed`);
+            },
+          }) as Partial<PatchFileOperations>;
 
       const result = await applyPatch({
         operations: [{
@@ -437,6 +449,41 @@ describe('workspace file tools', () => {
       await expect(readdir(directory)).resolves.toEqual([]);
     },
   );
+
+  it('reports add cleanup failure as a redacted warning after commit', async () => {
+    const secret = 'sk-add-cleanup-secret-123456';
+    let linkCalls = 0;
+    let cleanupCalls = 0;
+    const result = await applyPatch({
+      operations: [{
+        type: 'add',
+        path: 'committed-add.txt',
+        content: 'created',
+      }],
+    }, context, signal, {
+      link: async (existingPath: string, newPath: string) => {
+        linkCalls += 1;
+        await linkFile(existingPath, newPath);
+      },
+      unlink: async () => {
+        cleanupCalls += 1;
+        throw `temp cleanup failed with ${secret}`;
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        warnings: [expect.stringContaining('[REDACTED]')],
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    await expect(
+      readFile(join(workspace, 'committed-add.txt'), 'utf8'),
+    ).resolves.toBe('created');
+    expect(linkCalls).toBe(1);
+    expect(cleanupCalls).toBe(1);
+  });
 
   it('updates one exact fragment and reports its line counts', async () => {
     await writeFile(join(workspace, 'update.txt'), 'header\nbefore\nfooter\n');
@@ -466,18 +513,27 @@ describe('workspace file tools', () => {
     );
   });
 
-  it.each(['write', 'truncate', 'sync', 'chmod', 'rename'] as const)(
+  it.each(['write', 'truncate', 'sync', 'chmod', 'close', 'rename'] as const)(
     'preserves update target and cleans temp when %s fails',
     async (stage) => {
       const path = join(workspace, 'atomic-update.txt');
       const original = Buffer.from('before');
       await writeFile(path, original);
       await chmod(path, 0o640);
-      const injected = {
-        [stage]: async () => {
-          throw new Error(`${stage} failed`);
-        },
-      } as Partial<PatchFileOperations>;
+      const injected = (stage === 'close'
+        ? {
+            close: async (
+              file: Parameters<PatchFileOperations['write']>[0],
+            ) => {
+              await file.close();
+              throw new Error('close failed');
+            },
+          }
+        : {
+            [stage]: async () => {
+              throw new Error(`${stage} failed`);
+            },
+          }) as Partial<PatchFileOperations>;
 
       const result = await applyPatch({
         operations: [{
@@ -497,6 +553,39 @@ describe('workspace file tools', () => {
       await expect(readdir(workspace)).resolves.toEqual(['atomic-update.txt']);
     },
   );
+
+  it('reports an already committed rename error as a redacted warning', async () => {
+    const path = join(workspace, 'committed-update.txt');
+    const secret = 'sk-update-publish-secret-123456';
+    let renameCalls = 0;
+    await writeFile(path, 'before');
+
+    const result = await applyPatch({
+      operations: [{
+        type: 'update',
+        path: 'committed-update.txt',
+        expected: 'before',
+        replacement: 'after',
+      }],
+    }, context, signal, {
+      rename: async (oldPath, newPath) => {
+        renameCalls += 1;
+        await renameFile(oldPath, newPath);
+        throw `rename returned late error ${secret}`;
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        warnings: [expect.stringContaining('[REDACTED]')],
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    await expect(readFile(path, 'utf8')).resolves.toBe('after');
+    expect(renameCalls).toBe(1);
+    await expect(readdir(workspace)).resolves.toEqual(['committed-update.txt']);
+  });
 
   it('atomically updates a file while preserving its mode', async () => {
     const path = join(workspace, 'mode-update.txt');
@@ -659,6 +748,46 @@ describe('workspace file tools', () => {
       },
     });
     await expect(readFile(path, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
+  });
+
+  it('reports delete close failure as a redacted warning after commit', async () => {
+    const path = join(workspace, 'committed-delete.txt');
+    const secret = 'sk-delete-close-secret-123456';
+    const currentSha = createHash('sha256').update('delete me').digest('hex');
+    let deleteCalls = 0;
+    let closeCalls = 0;
+    await writeFile(path, 'delete me');
+
+    const result = await applyPatch({
+      operations: [{
+        type: 'delete',
+        path: 'committed-delete.txt',
+        sha256: currentSha,
+      }],
+    }, context, signal, {
+      unlink: async (targetPath: string) => {
+        deleteCalls += 1;
+        await unlinkFile(targetPath);
+      },
+      close: async (
+        file: Parameters<PatchFileOperations['write']>[0],
+      ) => {
+        closeCalls += 1;
+        await file.close();
+        throw `close returned late error ${secret}`;
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        warnings: [expect.stringContaining('[REDACTED]')],
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    await expect(readFile(path, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
+    expect(deleteCalls).toBe(1);
+    expect(closeCalls).toBe(1);
   });
 
   it('rejects patch paths that use a symlink without changing the target', async () => {

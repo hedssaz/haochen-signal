@@ -88,6 +88,7 @@ export interface FileChange {
 
 export interface ApplyPatchOutput {
   changes: FileChange[];
+  warnings?: string[];
 }
 
 type OpenFileHandle = Awaited<ReturnType<typeof open>>;
@@ -99,6 +100,8 @@ export interface PatchFileOperations {
   chmod(file: OpenFileHandle, mode: number): Promise<void>;
   link(existingPath: string, newPath: string): Promise<void>;
   rename(oldPath: string, newPath: string): Promise<void>;
+  unlink(path: string): Promise<void>;
+  close(file: OpenFileHandle): Promise<void>;
 }
 
 const DEFAULT_PATCH_FILE_OPERATIONS: PatchFileOperations = {
@@ -131,6 +134,12 @@ const DEFAULT_PATCH_FILE_OPERATIONS: PatchFileOperations = {
   },
   async rename(oldPath, newPath) {
     await rename(oldPath, newPath);
+  },
+  async unlink(path) {
+    await unlink(path);
+  },
+  async close(file) {
+    await file.close();
   },
 };
 
@@ -182,6 +191,11 @@ interface PlannedDelete {
 
 type PlannedOperation = PlannedAdd | PlannedUpdate | PlannedDelete;
 
+interface ExecutedChange {
+  change: FileChange;
+  warning?: string;
+}
+
 function success<T>(
   summary: string,
   data: T,
@@ -230,6 +244,17 @@ function safeRedactedMessage(value: unknown, fallback: string): string {
   } catch {
     return fallback;
   }
+}
+
+function postCommitWarning(
+  action: string,
+  error: unknown,
+): string {
+  const detail = safeRedactedMessage(error, '后置操作失败');
+  return safeRedactedMessage(
+    `${action}，但后置操作失败：${detail}`,
+    '操作已提交，但后置操作失败',
+  );
 }
 
 function failure<T>(
@@ -1090,9 +1115,12 @@ async function assertParentUnchanged(
   }
 }
 
-async function removeTempFile(path: string): Promise<void> {
+async function removeTempFile(
+  path: string,
+  fileOperations: PatchFileOperations,
+): Promise<void> {
   try {
-    await unlink(path);
+    await fileOperations.unlink(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
@@ -1129,13 +1157,13 @@ async function prepareTempFile(
     await fileOperations.truncate(file, contents.length);
     await fileOperations.chmod(file, mode);
     await fileOperations.sync(file);
-    await file.close();
+    await fileOperations.close(file);
     return temp;
   } catch (error) {
     try {
       await file.close();
     } finally {
-      await removeTempFile(temp.absolute);
+      await removeTempFile(temp.absolute, fileOperations);
     }
     throw error;
   }
@@ -1170,7 +1198,7 @@ async function executeAdd(
   operation: PlannedAdd,
   context: ToolContext,
   fileOperations: PatchFileOperations,
-): Promise<FileChange> {
+): Promise<ExecutedChange> {
   await assertAddTargetUnchanged(operation, context);
   const temp = await prepareTempFile(
     operation.resolved,
@@ -1185,23 +1213,57 @@ async function executeAdd(
     await assertAddTargetUnchanged(operation, context);
     await fileOperations.link(temp.absolute, operation.resolved.absolute);
   } catch (error) {
-    await removeTempFile(temp.absolute);
+    await removeTempFile(temp.absolute, fileOperations);
     throw error;
   }
-  await removeTempFile(temp.absolute);
+
+  let warning: string | undefined;
+  try {
+    await removeTempFile(temp.absolute, fileOperations);
+  } catch (error) {
+    warning = postCommitWarning(
+      `新增文件 ${operation.path} 已创建`,
+      error,
+    );
+  }
   return {
-    path: operation.path,
-    type: 'add',
-    additions: countLines(operation.content),
-    deletions: 0,
+    change: {
+      path: operation.path,
+      type: 'add',
+      additions: countLines(operation.content),
+      deletions: 0,
+    },
+    ...(warning === undefined ? {} : {warning}),
   };
+}
+
+async function updateWasPublished(
+  operation: PlannedUpdate,
+  temp: ResolvedPath,
+  updated: Buffer,
+  context: ToolContext,
+): Promise<boolean> {
+  try {
+    await lstat(temp.absolute);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  }
+
+  try {
+    const current = await readVerifiedFile(operation.resolved, context);
+    return sha256(current.contents) === sha256(updated)
+      && current.mode === operation.mode;
+  } catch {
+    return false;
+  }
 }
 
 async function executeUpdate(
   operation: PlannedUpdate,
   context: ToolContext,
   fileOperations: PatchFileOperations,
-): Promise<FileChange> {
+): Promise<ExecutedChange> {
   const before = await readVerifiedFile(operation.resolved, context);
   if (sha256(before.contents) !== operation.snapshotSha256
     || before.mode !== operation.mode) {
@@ -1245,27 +1307,47 @@ async function executeUpdate(
     );
     await fileOperations.rename(temp.absolute, operation.resolved.absolute);
   } catch (error) {
-    await removeTempFile(temp.absolute);
+    if (await updateWasPublished(operation, temp, updated, context)) {
+      return {
+        change: {
+          path: operation.path,
+          type: 'update',
+          additions: operation.additions,
+          deletions: operation.deletions,
+        },
+        warning: postCommitWarning(
+          `更新文件 ${operation.path} 已提交`,
+          error,
+        ),
+      };
+    }
+    await removeTempFile(temp.absolute, fileOperations);
     throw error;
   }
 
   return {
-    path: operation.path,
-    type: 'update',
-    additions: operation.additions,
-    deletions: operation.deletions,
+    change: {
+      path: operation.path,
+      type: 'update',
+      additions: operation.additions,
+      deletions: operation.deletions,
+    },
   };
 }
 
 async function executeDelete(
   operation: PlannedDelete,
   context: ToolContext,
-): Promise<FileChange> {
+  fileOperations: PatchFileOperations,
+): Promise<ExecutedChange> {
   const {file, identity} = await openVerifiedRegularFile(
     operation.resolved,
     context,
     constants.O_RDONLY,
   );
+  let operationFailed = false;
+  let operationError: unknown;
+  let committed = false;
   try {
     const contents = await file.readFile();
     if (sha256(contents) !== operation.snapshotSha256) {
@@ -1281,15 +1363,43 @@ async function executeDelete(
     if (!sameIdentity(identity, fileIdentity(currentStat))) {
       throw new FileToolError('FILE_CHANGED', '文件在删除前已被替换');
     }
-    await unlink(current.absolute);
-  } finally {
-    await file.close();
+    await fileOperations.unlink(current.absolute);
+    committed = true;
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
   }
+
+  let closeFailed = false;
+  let closeError: unknown;
+  try {
+    await fileOperations.close(file);
+  } catch (error) {
+    closeFailed = true;
+    closeError = error;
+  }
+
+  if (!committed) {
+    if (operationFailed) throw operationError;
+    if (closeFailed) throw closeError;
+    throw new FileToolError('FILE_OPERATION_FAILED', '删除操作未完成');
+  }
+
   return {
-    path: operation.path,
-    type: 'delete',
-    additions: 0,
-    deletions: operation.deletions,
+    change: {
+      path: operation.path,
+      type: 'delete',
+      additions: 0,
+      deletions: operation.deletions,
+    },
+    ...(closeFailed
+      ? {
+          warning: postCommitWarning(
+            `删除文件 ${operation.path} 已完成`,
+            closeError,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -1311,17 +1421,28 @@ export async function applyPatch(
     assertPlansUnchanged(initial, checked);
 
     const changes: FileChange[] = [];
+    const warnings: string[] = [];
     for (const operation of checked) {
       assertNotAborted(signal);
+      let executed: ExecutedChange;
       if (operation.type === 'add') {
-        changes.push(await executeAdd(operation, context, fileOperations));
+        executed = await executeAdd(operation, context, fileOperations);
       } else if (operation.type === 'update') {
-        changes.push(await executeUpdate(operation, context, fileOperations));
+        executed = await executeUpdate(operation, context, fileOperations);
       } else {
-        changes.push(await executeDelete(operation, context));
+        executed = await executeDelete(operation, context, fileOperations);
       }
+      changes.push(executed.change);
+      if (executed.warning !== undefined) warnings.push(executed.warning);
     }
-    return success(`已应用 ${changes.length} 个文件补丁`, {changes});
+    return success(
+      `已应用 ${changes.length} 个文件补丁`
+        + (warnings.length === 0 ? '' : `，含 ${warnings.length} 个后置警告`),
+      {
+        changes,
+        ...(warnings.length === 0 ? {} : {warnings}),
+      },
+    );
   } catch (error) {
     return failure(error, signal);
   }
