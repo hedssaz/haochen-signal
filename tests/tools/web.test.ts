@@ -36,6 +36,10 @@ describe('assertPublicHttpUrl', () => {
     'http://169.254.169.254/latest/meta-data',
     'http://10.0.0.2',
     'http://[::1]',
+    'http://[fec0::1]',
+    'http://[64:ff9b:1::a00:1]',
+    'http://[2001:2::1]',
+    'http://[4000::1]',
     'https://user:password@example.com',
   ])('blocks non-public target %s', async (url) => {
     await expect(assertPublicHttpUrl(url, publicDns)).rejects.toThrow();
@@ -105,8 +109,54 @@ describe('web search', () => {
 });
 
 describe('web fetch', () => {
+  it('pins the request transport to the addresses validated for this DNS lookup', async () => {
+    const dispatcher = {close: vi.fn(async () => undefined)};
+    const createDispatcher = vi.fn(() => dispatcher);
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(_input)).toBe('https://public.example/article');
+      expect((init as RequestInit & {dispatcher?: unknown}).dispatcher).toBe(dispatcher);
+      return htmlResponse(`
+        <!doctype html>
+        <html><head><title>固定地址</title></head><body>
+          <article>
+            <h1>固定地址</h1>
+            <p>${'经过固定公网地址获取的正文。'.repeat(20)}</p>
+          </article>
+        </body></html>
+      `);
+    });
+
+    const result = await webFetch(
+      {url: 'https://public.example/article'},
+      context,
+      signal,
+      {
+        fetch: fetcher,
+        resolveDns: async () => ['93.184.216.34'],
+        createDispatcher,
+      } as unknown as Parameters<typeof webFetch>[3],
+    );
+
+    expect(result).toMatchObject({ok: true});
+    expect(createDispatcher).toHaveBeenCalledOnce();
+    expect(createDispatcher).toHaveBeenCalledWith(
+      'public.example',
+      ['93.184.216.34'],
+    );
+    expect(dispatcher.close).toHaveBeenCalledOnce();
+  });
+
   it('revalidates every redirect target before requesting it', async () => {
-    const fetcher = vi.fn(async () => htmlResponse('', {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = vi.fn(async () => new Response(body, {
       status: 302,
       headers: {location: 'http://127.0.0.1/private'},
     }));
@@ -121,6 +171,7 @@ describe('web fetch', () => {
       error: {code: 'WEB_URL_BLOCKED'},
     });
     expect(fetcher).toHaveBeenCalledOnce();
+    expect(cancelled).toBe(true);
   });
 
   it('extracts an article as untrusted external content', async () => {
@@ -154,7 +205,16 @@ describe('web fetch', () => {
   });
 
   it('rejects a declared response larger than 2 MiB before reading it', async () => {
-    const fetcher = vi.fn(async () => htmlResponse('<article>small</article>', {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = vi.fn(async () => new Response(body, {
       headers: {'content-length': String(TWO_MEBIBYTES + 1)},
     }));
 
@@ -167,6 +227,54 @@ describe('web fetch', () => {
       ok: false,
       error: {code: 'WEB_RESPONSE_TOO_LARGE'},
     });
+    expect(cancelled).toBe(true);
+  });
+
+  it('accepts a response whose decoded body is exactly 2 MiB', async () => {
+    const prefix = '<!doctype html><html><head><title>边界</title></head><body>'
+      + '<article><h1>边界</h1><p>';
+    const suffix = '</p></article></body></html>';
+    const paddingBytes = TWO_MEBIBYTES - Buffer.byteLength(prefix) - Buffer.byteLength(suffix);
+    const html = `${prefix}${'x'.repeat(paddingBytes)}${suffix}`;
+    expect(Buffer.byteLength(html)).toBe(TWO_MEBIBYTES);
+    const fetcher = vi.fn(async () => htmlResponse(html, {
+      headers: {'content-length': String(TWO_MEBIBYTES)},
+    }));
+
+    const result = await webFetch({url: 'https://docs.example/exact'}, context, signal, {
+      fetch: fetcher,
+      resolveDns: publicDns,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      truncated: true,
+      data: {title: '边界'},
+    });
+  });
+
+  it('cancels an HTTP error response before returning the failure', async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetcher = vi.fn(async () => new Response(body, {status: 503}));
+
+    const result = await webFetch({url: 'https://docs.example/error'}, context, signal, {
+      fetch: fetcher,
+      resolveDns: publicDns,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'WEB_HTTP_ERROR'},
+    });
+    expect(cancelled).toBe(true);
   });
 
   it('cancels a lengthless response once it reaches 2 MiB', async () => {
@@ -195,6 +303,32 @@ describe('web fetch', () => {
     expect(cancelled).toBe(true);
   });
 
+  it('does not exceed the deadline when stream cancellation stalls', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(TWO_MEBIBYTES + 1));
+      },
+      cancel() {
+        return new Promise<void>(() => undefined);
+      },
+    });
+    const result = await Promise.race([
+      webFetch({url: 'https://docs.example/stalled-cancel'}, context, signal, {
+        fetch: async () => new Response(body),
+        resolveDns: publicDns,
+        timeoutMs: 5,
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => resolve({guardExpired: true}), 100);
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'WEB_TIMEOUT'},
+    });
+  });
+
   it('returns WEB_TIMEOUT when a request exceeds its timeout', async () => {
     const fetcher = vi.fn((_: RequestInfo | URL, init?: RequestInit) => new Promise<Response>(
       (_resolve, reject) => {
@@ -212,5 +346,77 @@ describe('web fetch', () => {
       ok: false,
       error: {code: 'WEB_TIMEOUT'},
     });
+  });
+
+  it('applies the same timeout while DNS resolution is pending', async () => {
+    const fetcher = vi.fn();
+    const result = await Promise.race([
+      webFetch({url: 'https://docs.example/dns'}, context, signal, {
+        fetch: fetcher,
+        resolveDns: async () => new Promise<readonly string[]>(() => undefined),
+        timeoutMs: 5,
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => resolve({guardExpired: true}), 100);
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'WEB_TIMEOUT'},
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('returns WEB_TIMEOUT when dispatcher cleanup exceeds the total deadline', async () => {
+    const dispatcher = {
+      close: vi.fn(async () => new Promise<void>(() => undefined)),
+      destroy: vi.fn(async () => undefined),
+    };
+    const result = await Promise.race([
+      webFetch(
+        {url: 'https://docs.example/cleanup'},
+        context,
+        signal,
+        {
+          fetch: async () => htmlResponse(`
+            <!doctype html><html><head><title>清理</title></head><body>
+              <article><p>${'清理超时测试正文。'.repeat(20)}</p></article>
+            </body></html>
+          `),
+          resolveDns: publicDns,
+          createDispatcher: () => dispatcher,
+          timeoutMs: 5,
+        } as unknown as Parameters<typeof webFetch>[3],
+      ),
+      new Promise((resolve) => {
+        setTimeout(() => resolve({guardExpired: true}), 100);
+      }),
+    ]);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'WEB_TIMEOUT'},
+    });
+    expect(dispatcher.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('does not start DNS after the caller has already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const resolveDns = vi.fn(async () => ['8.8.8.8']);
+
+    const result = await webFetch(
+      {url: 'https://docs.example/cancelled'},
+      context,
+      controller.signal,
+      {resolveDns},
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    expect(resolveDns).not.toHaveBeenCalled();
   });
 });

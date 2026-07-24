@@ -30,8 +30,10 @@
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
     "ink": "^7.1.1",
+    "ipaddr.js": "^2.4.0",
     "linkedom": "^0.18.13",
     "react": "^19.2.8",
+    "undici": "^6.28.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

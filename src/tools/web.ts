@@ -1,7 +1,9 @@
-import {lookup} from 'node:dns/promises';
-import {isIP} from 'node:net';
+import {Resolver} from 'node:dns/promises';
+import {isIP, type LookupFunction} from 'node:net';
 import {Readability} from '@mozilla/readability';
+import ipaddr from 'ipaddr.js';
 import {parseHTML} from 'linkedom';
+import {Agent, type Dispatcher, fetch as undiciFetch} from 'undici';
 import type {ToolContext, ToolResult} from './types.js';
 
 const DUCKDUCKGO_HTML_URL = 'https://html.duckduckgo.com/html/';
@@ -12,11 +14,25 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ARTICLE_CHARACTERS = 40_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-export type ResolveDns = (hostname: string) => Promise<readonly string[]>;
+export type ResolveDns = (
+  hostname: string,
+  signal?: AbortSignal,
+) => Promise<readonly string[]>;
+
+type WebFetchFunction = (
+  input: string | URL,
+  init?: RequestInit & {dispatcher?: Dispatcher},
+) => Promise<Response>;
+
+type CreatePinnedDispatcher = (
+  hostname: string,
+  addresses: readonly string[],
+) => Dispatcher;
 
 export interface WebToolDependencies {
-  fetch?: typeof globalThis.fetch;
+  fetch?: WebFetchFunction;
   resolveDns?: ResolveDns;
+  createDispatcher?: CreatePinnedDispatcher;
   timeoutMs?: number;
   now?: () => Date;
 }
@@ -67,6 +83,13 @@ interface RequestControl {
 interface FetchedResponse {
   response: Response;
   url: URL;
+  dispatcher: Dispatcher;
+}
+
+interface ValidatedUrl {
+  url: URL;
+  hostname: string;
+  addresses: readonly string[];
 }
 
 function failure<T>(code: string, message: string): ToolResult<T> {
@@ -77,125 +100,46 @@ function failure<T>(code: string, message: string): ToolResult<T> {
   };
 }
 
-function defaultResolveDns(hostname: string): Promise<readonly string[]> {
-  return lookup(hostname, {all: true, verbatim: true})
-    .then((addresses) => addresses.map((address) => address.address));
-}
+async function defaultResolveDns(
+  hostname: string,
+  signal?: AbortSignal,
+): Promise<readonly string[]> {
+  signal?.throwIfAborted();
+  const resolver = new Resolver();
+  const onAbort = (): void => resolver.cancel();
+  signal?.addEventListener('abort', onAbort, {once: true});
+  if (signal?.aborted) onAbort();
 
-function ipv4Bytes(address: string): number[] {
-  return address.split('.').map((segment) => Number(segment));
-}
-
-function isPublicIpv4(address: string): boolean {
-  const [first, second, third] = ipv4Bytes(address);
-  if (first === undefined || second === undefined || third === undefined) {
-    return false;
+  try {
+    const answers = await Promise.allSettled([
+      resolver.resolve4(hostname),
+      resolver.resolve6(hostname),
+    ]);
+    signal?.throwIfAborted();
+    const addresses = answers.flatMap((answer) => (
+      answer.status === 'fulfilled' ? answer.value : []
+    ));
+    if (addresses.length === 0) {
+      const failureAnswer = answers.find((answer) => answer.status === 'rejected');
+      throw failureAnswer?.reason;
+    }
+    return addresses;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
   }
-
-  if (first === 0
-    || first === 10
-    || first === 127
-    || first >= 224
-    || (first === 100 && second >= 64 && second <= 127)
-    || (first === 169 && second === 254)
-    || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 0)
-    || (first === 192 && second === 88 && third === 99)
-    || (first === 192 && second === 168)
-    || (first === 198 && (second === 18 || second === 19))
-    || (first === 198 && second === 51 && third === 100)
-    || (first === 203 && second === 0 && third === 113)) {
-    return false;
-  }
-  return true;
-}
-
-function expandIpv4Group(groups: string[]): string[] | undefined {
-  const last = groups.at(-1);
-  if (last === undefined || !last.includes('.')) return groups;
-  if (isIP(last) !== 4) return undefined;
-  const [first, second, third, fourth] = ipv4Bytes(last);
-  if ([first, second, third, fourth].some((part) => part === undefined)) {
-    return undefined;
-  }
-  return [
-    ...groups.slice(0, -1),
-    `${first!.toString(16).padStart(2, '0')}${second!.toString(16).padStart(2, '0')}`,
-    `${third!.toString(16).padStart(2, '0')}${fourth!.toString(16).padStart(2, '0')}`,
-  ];
-}
-
-function ipv6Bytes(address: string): Uint8Array | undefined {
-  const normalized = address.toLowerCase();
-  const parts = normalized.split('::');
-  if (parts.length > 2) return undefined;
-
-  const left = parts[0] === '' ? [] : parts[0]!.split(':');
-  const right = parts.length === 1 || parts[1] === '' ? [] : parts[1]!.split(':');
-  const initialGroups = expandIpv4Group([...left, ...right]);
-  if (initialGroups === undefined) return undefined;
-
-  const missing = 8 - initialGroups.length;
-  if ((parts.length === 1 && missing !== 0) || missing < 0) return undefined;
-  const groups = parts.length === 2
-    ? [...left, ...Array.from({length: missing}, () => '0'), ...right]
-    : initialGroups;
-  const expandedGroups = expandIpv4Group(groups);
-  if (expandedGroups === undefined || expandedGroups.length !== 8) return undefined;
-
-  const bytes = new Uint8Array(16);
-  for (let index = 0; index < expandedGroups.length; index += 1) {
-    const group = expandedGroups[index]!;
-    if (!/^[0-9a-f]{1,4}$/i.test(group)) return undefined;
-    const value = Number.parseInt(group, 16);
-    bytes[index * 2] = value >> 8;
-    bytes[index * 2 + 1] = value & 0xff;
-  }
-  return bytes;
-}
-
-function isAllZero(bytes: Uint8Array, endExclusive: number): boolean {
-  for (let index = 0; index < endExclusive; index += 1) {
-    if (bytes[index] !== 0) return false;
-  }
-  return true;
-}
-
-function isPublicIpv6(address: string): boolean {
-  const bytes = ipv6Bytes(address);
-  if (bytes === undefined) return false;
-
-  const isUnspecified = isAllZero(bytes, 16);
-  const isLoopback = isAllZero(bytes, 15) && bytes[15] === 1;
-  const isUniqueLocal = (bytes[0]! & 0xfe) === 0xfc;
-  const isLinkLocal = bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80;
-  const isMulticast = bytes[0] === 0xff;
-  const isDocumentation = bytes[0] === 0x20
-    && bytes[1] === 0x01
-    && bytes[2] === 0x0d
-    && bytes[3] === 0xb8;
-  if (isUnspecified || isLoopback || isUniqueLocal || isLinkLocal
-    || isMulticast || isDocumentation) {
-    return false;
-  }
-
-  const isIpv4Mapped = isAllZero(bytes, 10)
-    && bytes[10] === 0xff
-    && bytes[11] === 0xff;
-  if (isIpv4Mapped) {
-    return isPublicIpv4(Array.from(bytes.slice(12)).join('.'));
-  }
-
-  const isIpv4Compatible = isAllZero(bytes, 12);
-  if (isIpv4Compatible) return false;
-  return true;
 }
 
 function isPublicIpAddress(address: string): boolean {
-  const family = isIP(address);
-  if (family === 4) return isPublicIpv4(address);
-  if (family === 6) return isPublicIpv6(address);
-  return false;
+  try {
+    const parsed = ipaddr.parse(address);
+    if (parsed.kind() === 'ipv6'
+      && !parsed.match(ipaddr.IPv6.parse('2000::'), 3)) {
+      return false;
+    }
+    return parsed.range() === 'unicast';
+  } catch {
+    return false;
+  }
 }
 
 function hostnameFromUrl(url: URL): string {
@@ -214,10 +158,37 @@ function isLocalHostname(hostname: string): boolean {
  * Every DNS answer must be a globally routable address so rebinding cannot
  * redirect an allowed hostname to local infrastructure.
  */
-export async function assertPublicHttpUrl(
+async function awaitWithSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (signal === undefined) return promise;
+  signal.throwIfAborted();
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(signal.reason ?? new DOMException('网页请求已取消', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, {once: true});
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function validatePublicHttpUrl(
   input: string,
-  resolveDns: ResolveDns = defaultResolveDns,
-): Promise<URL> {
+  resolveDns: ResolveDns,
+  signal?: AbortSignal,
+): Promise<ValidatedUrl> {
+  signal?.throwIfAborted();
   let url: URL;
   try {
     url = new URL(input);
@@ -240,13 +211,14 @@ export async function assertPublicHttpUrl(
     if (!isPublicIpAddress(hostname)) {
       throw new WebToolError('WEB_URL_BLOCKED', '目标地址不是公网地址');
     }
-    return url;
+    return {url, hostname, addresses: [hostname]};
   }
 
   let addresses: readonly string[];
   try {
-    addresses = await resolveDns(hostname);
+    addresses = await awaitWithSignal(resolveDns(hostname, signal), signal);
   } catch {
+    signal?.throwIfAborted();
     throw new WebToolError('WEB_DNS_FAILED', '无法解析网页目标地址');
   }
   if (!Array.isArray(addresses) || addresses.length === 0
@@ -254,7 +226,56 @@ export async function assertPublicHttpUrl(
       || !isPublicIpAddress(address))) {
     throw new WebToolError('WEB_URL_BLOCKED', '目标域名解析到非公网地址');
   }
-  return url;
+  return {url, hostname, addresses};
+}
+
+export async function assertPublicHttpUrl(
+  input: string,
+  resolveDns: ResolveDns = defaultResolveDns,
+): Promise<URL> {
+  return (await validatePublicHttpUrl(input, resolveDns)).url;
+}
+
+function createPinnedDispatcher(
+  hostname: string,
+  addresses: readonly string[],
+): Dispatcher {
+  const records = addresses.map((address) => ({
+    address,
+    family: isIP(address),
+  }));
+  const lookup: LookupFunction = (requestedHostname, options, callback) => {
+    if (requestedHostname.toLowerCase().replace(/\.$/, '') !== hostname) {
+      const error = Object.assign(new Error('拒绝解析未验证的主机名'), {
+        code: 'ENOTFOUND',
+      });
+      callback(error, '', 0);
+      return;
+    }
+
+    const candidates = options.family === 4 || options.family === 6
+      ? records.filter((record) => record.family === options.family)
+      : records;
+    if (candidates.length === 0) {
+      const error = Object.assign(new Error('没有已验证的目标地址族'), {
+        code: 'ENOTFOUND',
+      });
+      callback(error, '', 0);
+      return;
+    }
+    if (options.all === true) {
+      callback(null, candidates);
+      return;
+    }
+    const selected = candidates[0]!;
+    callback(null, selected.address, selected.family);
+  };
+
+  return new Agent({
+    connect: {
+      lookup,
+    },
+  });
 }
 
 function createRequestControl(
@@ -293,45 +314,117 @@ function isRedirect(status: number): boolean {
     || status === 308;
 }
 
+function destroyDispatcher(dispatcher: Dispatcher): void {
+  try {
+    void dispatcher.destroy().catch(() => undefined);
+  } catch {
+    // A custom dispatcher can throw synchronously while being destroyed.
+  }
+}
+
+async function closeDispatcher(
+  dispatcher: Dispatcher,
+  signal: AbortSignal,
+): Promise<void> {
+  const closing = Promise.resolve()
+    .then(async () => dispatcher.close())
+    .catch(() => undefined);
+  try {
+    await awaitWithSignal(closing, signal);
+  } catch {
+    destroyDispatcher(dispatcher);
+  }
+}
+
+async function disposeResponse(
+  response: Response,
+  dispatcher: Dispatcher,
+  signal: AbortSignal,
+): Promise<void> {
+  const cancel = response.body === null
+    ? Promise.resolve()
+    : Promise.resolve()
+      .then(async () => response.body?.cancel())
+      .catch(() => undefined);
+  const closing = Promise.resolve()
+    .then(async () => dispatcher.close())
+    .catch(() => undefined);
+  const cleanup = Promise.all([cancel, closing]).then(() => undefined);
+  try {
+    await awaitWithSignal(cleanup, signal);
+  } catch {
+    destroyDispatcher(dispatcher);
+  }
+}
+
+function redirectTarget(response: Response, url: URL, redirects: number): string {
+  if (redirects >= MAX_REDIRECTS) {
+    throw new WebToolError('WEB_REDIRECT_LIMIT', '网页重定向次数超过限制');
+  }
+  const location = response.headers.get('location');
+  if (location === null || location === '') {
+    throw new WebToolError('WEB_INVALID_RESPONSE', '网页重定向缺少目标地址');
+  }
+  try {
+    return new URL(location, url).toString();
+  } catch {
+    throw new WebToolError('WEB_INVALID_RESPONSE', '网页重定向地址无效');
+  }
+}
+
+async function cancelReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal,
+): Promise<void> {
+  const cancelling = Promise.resolve()
+    .then(async () => reader.cancel())
+    .catch(() => undefined);
+  try {
+    await awaitWithSignal(cancelling, signal);
+  } catch {
+    // The total deadline wins over a stalled stream cancellation.
+  }
+}
+
 async function fetchWithValidatedRedirects(
   inputUrl: string,
   signal: AbortSignal,
   dependencies: WebToolDependencies,
 ): Promise<FetchedResponse> {
   const resolveDns = dependencies.resolveDns ?? defaultResolveDns;
-  const fetcher = dependencies.fetch ?? globalThis.fetch;
-  let url = await assertPublicHttpUrl(inputUrl, resolveDns);
+  const fetcher = dependencies.fetch ?? undiciFetch as unknown as WebFetchFunction;
+  const dispatcherFactory = dependencies.createDispatcher ?? createPinnedDispatcher;
+  let target = await validatePublicHttpUrl(inputUrl, resolveDns, signal);
   let redirects = 0;
 
   while (true) {
     assertNotAborted(signal);
+    const dispatcher = dispatcherFactory(target.hostname, target.addresses);
     let response: Response;
     try {
-      response = await fetcher(url, {
+      response = await fetcher(target.url, {
         redirect: 'manual',
         signal,
         headers: {accept: 'text/html,application/xhtml+xml'},
+        dispatcher,
       });
     } catch (error) {
+      await closeDispatcher(dispatcher, signal);
       if (signal.aborted) throw error;
       throw new WebToolError('WEB_REQUEST_FAILED', '网页请求失败');
     }
 
-    if (!isRedirect(response.status)) return {response, url};
-    if (redirects >= MAX_REDIRECTS) {
-      throw new WebToolError('WEB_REDIRECT_LIMIT', '网页重定向次数超过限制');
+    if (!isRedirect(response.status)) {
+      return {response, url: target.url, dispatcher};
     }
-    const location = response.headers.get('location');
-    if (location === null || location === '') {
-      throw new WebToolError('WEB_INVALID_RESPONSE', '网页重定向缺少目标地址');
-    }
+
     let redirectedUrl: string;
     try {
-      redirectedUrl = new URL(location, url).toString();
-    } catch {
-      throw new WebToolError('WEB_INVALID_RESPONSE', '网页重定向地址无效');
+      redirectedUrl = redirectTarget(response, target.url, redirects);
+    } finally {
+      await disposeResponse(response, dispatcher, signal);
     }
-    url = await assertPublicHttpUrl(redirectedUrl, resolveDns);
+    target = await validatePublicHttpUrl(redirectedUrl, resolveDns, signal);
     redirects += 1;
   }
 }
@@ -357,18 +450,13 @@ async function readResponseText(
       if (done) break;
       if (value === undefined) continue;
       bytesRead += value.byteLength;
-      if (bytesRead >= MAX_RESPONSE_BYTES) {
-        await reader.cancel();
+      if (bytesRead > MAX_RESPONSE_BYTES) {
         throw new WebToolError('WEB_RESPONSE_TOO_LARGE', '网页响应超过 2 MiB 限制');
       }
       chunks.push(value);
     }
   } catch (error) {
-    try {
-      await reader.cancel();
-    } catch {
-      // The reader can already be closed after a failed read.
-    }
+    await cancelReader(reader, signal);
     throw error;
   } finally {
     reader.releaseLock();
@@ -500,27 +588,37 @@ export async function webSearch(
     outerSignal,
     dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
+  let fetched: FetchedResponse | undefined;
+  let result: ToolResult<WebSearchOutput>;
   try {
-    const {response} = await fetchWithValidatedRedirects(
+    fetched = await fetchWithValidatedRedirects(
       searchUrl.toString(),
       request.signal,
       dependencies,
     );
+    const {response} = fetched;
     if (!response.ok) {
       throw new WebToolError('WEB_HTTP_ERROR', `网页请求返回 HTTP ${response.status}`);
     }
     const html = await readResponseText(response, request.signal);
     const results = extractSearchResults(html, limit);
-    return {
+    result = {
       ok: true,
       summary: `搜索到 ${results.length} 条公开网页结果`,
       data: {results},
     };
   } catch (error) {
-    return failureFromError(error, outerSignal, request);
+    result = failureFromError(error, outerSignal, request);
   } finally {
+    if (fetched !== undefined) {
+      await disposeResponse(fetched.response, fetched.dispatcher, request.signal);
+    }
     request.dispose();
   }
+  if (request.signal.aborted) {
+    return failureFromError(request.signal.reason, outerSignal, request);
+  }
+  return result;
 }
 
 export async function webFetch(
@@ -536,18 +634,21 @@ export async function webFetch(
     outerSignal,
     dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
+  let fetched: FetchedResponse | undefined;
+  let result: ToolResult<WebFetchOutput>;
   try {
-    const {response, url} = await fetchWithValidatedRedirects(
+    fetched = await fetchWithValidatedRedirects(
       input.url,
       request.signal,
       dependencies,
     );
+    const {response, url} = fetched;
     if (!response.ok) {
       throw new WebToolError('WEB_HTTP_ERROR', `网页请求返回 HTTP ${response.status}`);
     }
     const html = await readResponseText(response, request.signal);
     const article = extractArticle(html);
-    return {
+    result = {
       ok: true,
       summary: `已提取网页正文：${article.title}`,
       data: {
@@ -560,8 +661,15 @@ export async function webFetch(
       truncated: article.truncated,
     };
   } catch (error) {
-    return failureFromError(error, outerSignal, request);
+    result = failureFromError(error, outerSignal, request);
   } finally {
+    if (fetched !== undefined) {
+      await disposeResponse(fetched.response, fetched.dispatcher, request.signal);
+    }
     request.dispose();
   }
+  if (request.signal.aborted) {
+    return failureFromError(request.signal.reason, outerSignal, request);
+  }
+  return result;
 }
