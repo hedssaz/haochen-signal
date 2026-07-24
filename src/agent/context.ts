@@ -208,19 +208,30 @@ function addTruncatedRelevantFile(
  * JSONL remains append-only. A summary marks the prefix it covers, so this
  * read-time projection can replace that prefix without rewriting history.
  */
-function projectCompactedEvents(events: readonly SessionEvent[]): SessionEvent[] {
+interface ProjectedHistory {
+  events: SessionEvent[];
+  sourceIndexes: number[];
+}
+
+function projectCompactedEvents(events: readonly SessionEvent[]): ProjectedHistory {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (event?.type !== 'summary' || event.coveredEventCount === undefined) continue;
     if (event.coveredEventCount > index) continue;
 
-    return [
-      event,
-      ...events.slice(event.coveredEventCount, index),
-      ...events.slice(index + 1),
-    ];
+    const projectedEvents: SessionEvent[] = [event];
+    const sourceIndexes = [index];
+    for (let sourceIndex = event.coveredEventCount; sourceIndex < events.length; sourceIndex += 1) {
+      if (sourceIndex === index) continue;
+      const candidate = events[sourceIndex];
+      if (candidate?.type === 'summary' && candidate.coveredEventCount !== undefined) continue;
+      if (candidate === undefined) continue;
+      projectedEvents.push(candidate);
+      sourceIndexes.push(sourceIndex);
+    }
+    return {events: projectedEvents, sourceIndexes};
   }
-  return [...events];
+  return {events: [...events], sourceIndexes: events.map((_, index) => index)};
 }
 
 /**
@@ -242,7 +253,7 @@ export async function buildContext(input: ContextInput): Promise<ModelMessage[]>
     }, reserveCurrentTask, maxTokens);
   }
 
-  const projectedEvents = projectCompactedEvents(input.events);
+  const projectedEvents = projectCompactedEvents(input.events).events;
   const recentEvents = projectedEvents.slice(-RECENT_EVENT_COUNT);
   for (const event of recentEvents) {
     addIfFits(messages, messageForEvent(event), reserveCurrentTask, maxTokens);
@@ -295,11 +306,17 @@ export async function compactHistory(
   events: readonly SessionEvent[],
   summarize: HistorySummarizer,
 ): Promise<CompactionResult> {
-  if (events.length <= RECENT_EVENT_COUNT) {
+  const projectedHistory = projectCompactedEvents(events);
+  if (projectedHistory.events.length <= RECENT_EVENT_COUNT) {
     return failure(events, `至少需要 ${RECENT_EVENT_COUNT + 1} 条事件才能压缩历史`);
   }
 
-  const olderEvents = events.slice(0, -RECENT_EVENT_COUNT);
+  const olderEvents = projectedHistory.events.slice(0, -RECENT_EVENT_COUNT);
+  const recentEvents = projectedHistory.events.slice(-RECENT_EVENT_COUNT);
+  const coveredEventCount = projectedHistory.sourceIndexes.at(-RECENT_EVENT_COUNT);
+  if (coveredEventCount === undefined) {
+    return failure(events, '无法确定历史摘要的覆盖范围');
+  }
   let response: unknown;
   try {
     response = await summarize(compactionPrompt(olderEvents));
@@ -317,11 +334,11 @@ export async function compactHistory(
     type: 'summary',
     at: Date.now(),
     text: JSON.stringify(parsed.data),
-    coveredEventCount: olderEvents.length,
+    coveredEventCount,
   };
   return {
     compacted: true,
-    events: [summaryEvent, ...events.slice(-RECENT_EVENT_COUNT)],
+    events: [summaryEvent, ...recentEvents],
     summary: parsed.data,
     summaryEvent,
   };

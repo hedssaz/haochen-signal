@@ -248,4 +248,58 @@ describe('signal compaction', () => {
       content: expect.stringContaining('继续登录修复'),
     });
   });
+
+  it('recompacts projected history without retaining superseded summaries or displacing real recent events', async () => {
+    const initialEvents: SessionEvent[] = [
+      {type: 'user', at: 1, text: 'event-0'},
+      ...recentEvents,
+    ];
+    const first = await compactHistory(initialEvents, async () => validSummary);
+    if (!first.compacted) throw new Error('expected first compaction to succeed');
+
+    const event7: SessionEvent = {type: 'user', at: 8, text: 'event-7'};
+    const second = await compactHistory(
+      [...initialEvents, first.summaryEvent, event7],
+      async () => validSummary,
+    );
+    if (!second.compacted) throw new Error('expected second compaction to succeed');
+
+    expect(second.summaryEvent.coveredEventCount).toBe(2);
+    expect(second.events.slice(1)).toEqual([...recentEvents.slice(1), event7]);
+
+    const event8: SessionEvent = {type: 'assistant', at: 9, text: 'event-8'};
+    const third = await compactHistory(
+      [...initialEvents, first.summaryEvent, event7, second.summaryEvent, event8],
+      async () => validSummary,
+    );
+    if (!third.compacted) throw new Error('expected third compaction to succeed');
+
+    const messages = await buildContext({
+      systemPrompt: 'system',
+      currentTask: '继续登录修复',
+      events: [
+        ...initialEvents,
+        first.summaryEvent,
+        event7,
+        second.summaryEvent,
+        event8,
+        third.summaryEvent,
+      ],
+      maxTokens: 800,
+    });
+
+    expect(third.summaryEvent.coveredEventCount).toBe(3);
+    expect(third.events.slice(1)).toEqual([...recentEvents.slice(2), event7, event8]);
+    expect(messages.filter(message => message.content === `历史摘要：${JSON.stringify(validSummary)}`))
+      .toHaveLength(1);
+    expect(JSON.stringify(messages)).not.toContain('event-0');
+    expect(JSON.stringify(messages)).not.toContain('recent-1');
+    for (const event of [...recentEvents.slice(2), event7, event8]) {
+      expect(JSON.stringify(messages)).toContain(
+        event.type === 'interrupted' ? event.reason : event.type === 'tool'
+          ? event.tool
+          : event.text,
+      );
+    }
+  });
 });
