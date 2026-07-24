@@ -15,6 +15,7 @@
 - 开发语言：TypeScript
 - 模型协议：OpenAI-compatible Chat Completions
 - 已实现：真实工作区路径边界、结构化文件补丁、受控命令执行与确定性边界守卫
+- 边界策略：路径越界和非公开网络目标直接拒绝；通用 Git、env、curl 与 Shell 命令必须确认，固定专用只读 Git 工具可直接执行
 
 完整设计见：
 

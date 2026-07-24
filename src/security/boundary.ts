@@ -42,17 +42,6 @@ const SHELL_EXECUTABLES = new Set([
   'pwsh',
 ]);
 
-const READ_ONLY_GIT_SUBCOMMANDS = new Set([
-  'status',
-  'diff',
-  'log',
-  'show',
-  'rev-parse',
-  'ls-files',
-  'grep',
-  'describe',
-]);
-
 type JsonPrimitive = null | boolean | number | string;
 type JsonValue = JsonPrimitive | JsonValue[] | {[key: string]: JsonValue};
 type JsonObject = {[key: string]: JsonValue};
@@ -364,10 +353,16 @@ function isWhitelistedCommand(
 function unwrapCommand(
   command: string,
   args: string[],
-): {command: string; args: string[]; envSplitString: boolean} {
+): {
+  command: string;
+  args: string[];
+  envSplitString: boolean;
+  commands: string[];
+} {
   let effectiveCommand = normalizedExecutable(command);
   let effectiveArgs = [...args];
   let envSplitString = false;
+  const commands = [effectiveCommand];
 
   while (['env', 'command', 'exec', 'nice', 'nohup'].includes(effectiveCommand)
     && effectiveArgs.length > 0) {
@@ -384,7 +379,12 @@ function unwrapCommand(
           || token.startsWith('--split-string=')
           || (token.startsWith('-S') && token.length > 2)) {
           envSplitString = true;
-          return {command: effectiveCommand, args: effectiveArgs, envSplitString};
+          return {
+            command: effectiveCommand,
+            args: effectiveArgs,
+            envSplitString,
+            commands,
+          };
         }
         if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)
           || token === '-i'
@@ -412,9 +412,10 @@ function unwrapCommand(
     const next = effectiveArgs[index];
     if (next === undefined) break;
     effectiveCommand = normalizedExecutable(next);
+    commands.push(effectiveCommand);
     effectiveArgs = effectiveArgs.slice(index + 1);
   }
-  return {command: effectiveCommand, args: effectiveArgs, envSplitString};
+  return {command: effectiveCommand, args: effectiveArgs, envSplitString, commands};
 }
 
 function gitSubcommand(args: string[]): {name?: string; rest: string[]} {
@@ -470,6 +471,16 @@ function commandConfirmationReasons(
     reasons.push('Shell 命令语义无法由确定性边界完整证明');
   }
 
+  if (effective.commands.includes('env')) {
+    reasons.push('run_command 中的 env 包装需要用户确认');
+  }
+  if (effective.commands.includes('curl')) {
+    reasons.push('run_command 中的 curl 网络操作需要用户确认');
+  }
+  if (effective.commands.includes('git')) {
+    reasons.push('run_command 中的 Git 操作需要用户确认');
+  }
+
   if (effective.command === 'sudo'
     || containsShellHazard(
       allText,
@@ -480,9 +491,6 @@ function commandConfirmationReasons(
 
   if (effective.command === 'git') {
     const git = gitSubcommand(effective.args);
-    if (!READ_ONLY_GIT_SUBCOMMANDS.has(git.name ?? '')) {
-      reasons.push('Git 子命令不是明确的只读操作');
-    }
     if (git.name === 'reset'
       && git.rest.some((argument) => /^--hard(?:=|$)/iu.test(argument))) {
       reasons.push('命令会执行破坏性 Git reset --hard');
@@ -695,6 +703,12 @@ function compactCommandPathCandidates(
 ): string[] {
   const effective = unwrapCommand(command, args);
   const candidates: string[] = [];
+  if (effective.commands.includes('env')) {
+    for (const argument of args) {
+      const match = /^-C(.+)$/u.exec(argument);
+      if (match?.[1] !== undefined) candidates.push(match[1]);
+    }
+  }
   if (effective.command === 'git') {
     for (const argument of effective.args) {
       const match = /^-C(.+)$/u.exec(argument);
@@ -873,19 +887,113 @@ function shellCurlArguments(command: string, args: string[]): string[][] {
   return sets;
 }
 
+function envSplitCurlArguments(command: string, args: string[]): string[][] {
+  if (!unwrapCommand(command, args).commands.includes('env')) return [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] ?? '';
+    let payload: string | undefined;
+    let remaining: string[];
+    if (argument === '-S' || argument === '--split-string') {
+      payload = args[index + 1];
+      remaining = args.slice(index + 2);
+    } else if (argument.startsWith('--split-string=')) {
+      payload = argument.slice('--split-string='.length);
+      remaining = args.slice(index + 1);
+    } else if (argument.startsWith('-S') && argument.length > 2) {
+      payload = argument.slice(2);
+      remaining = args.slice(index + 1);
+    } else {
+      continue;
+    }
+    if (payload === undefined) return [];
+
+    const tokens = [
+      ...dequoteShellText(payload).trim().split(/\s+/u),
+      ...remaining,
+    ];
+    if (normalizedExecutable(tokens[0] ?? '') === 'curl') {
+      return [tokens.slice(1)];
+    }
+    return [];
+  }
+  return [];
+}
+
+function curlArgumentSets(
+  command: string,
+  args: string[],
+  shellSemantics: boolean,
+): string[][] {
+  const effective = unwrapCommand(command, args);
+  const sets = effective.command === 'curl' ? [effective.args] : [];
+  if (shellSemantics) sets.push(...shellCurlArguments(command, args));
+  sets.push(...envSplitCurlArguments(command, args));
+  return sets;
+}
+
+function curlFilePathCandidates(
+  command: string,
+  args: string[],
+  shellSemantics: boolean,
+): string[] {
+  const candidates: string[] = [];
+  for (const curlArgs of curlArgumentSets(command, args, shellSemantics)) {
+    for (let index = 0; index < curlArgs.length; index += 1) {
+      const argument = curlArgs[index] ?? '';
+      const uploadMatch = /^--upload-file=(.+)$/u.exec(argument)
+        ?? /^-[A-Za-z]*T(.+)$/u.exec(argument);
+      if (uploadMatch?.[1] !== undefined && uploadMatch[1] !== '-') {
+        candidates.push(uploadMatch[1]);
+      } else if (argument === '--upload-file') {
+        const path = curlArgs[index + 1];
+        if (path !== undefined && path !== '-') candidates.push(path);
+        index += 1;
+      }
+
+      const filePattern = /@((?:[^@\s'"`;&|<>])+)/gu;
+      let match = filePattern.exec(argument);
+      while (match !== null) {
+        if (match[1] !== undefined && match[1] !== '-') {
+          candidates.push(match[1]);
+        }
+        match = filePattern.exec(argument);
+      }
+    }
+  }
+  return [...new Set(candidates)];
+}
+
+async function normalizeCurlFileTargets(
+  command: string,
+  args: string[],
+  context: BoundaryContext,
+  shellSemantics: boolean,
+): Promise<string[]> {
+  const targets: string[] = [];
+  for (const candidate of curlFilePathCandidates(
+    command,
+    args,
+    shellSemantics,
+  )) {
+    const path = await normalizePath(
+      context,
+      candidate,
+      'new',
+      'curl 文件参数路径',
+    );
+    targets.push(`path:${path}`);
+  }
+  return targets;
+}
+
 function normalizeCommandNetworkOverrides(
   command: string,
   args: string[],
   shellSemantics: boolean,
 ): string[] {
-  const effective = unwrapCommand(command, args);
-  const argumentSets = effective.command === 'curl'
-    ? [effective.args]
-    : [];
-  if (shellSemantics) argumentSets.push(...shellCurlArguments(command, args));
-
   const scope: string[] = [];
-  for (const curlArgs of argumentSets) {
+  for (const curlArgs of curlArgumentSets(command, args, shellSemantics)) {
     for (const specification of curlOptionSpecifications(curlArgs, '--resolve')) {
       for (const address of curlResolveAddresses(specification)) {
         const version = isIP(address);
@@ -901,6 +1009,9 @@ function normalizeCommandNetworkOverrides(
       const address = curlConnectToAddress(specification);
       if (address === undefined) continue;
       const version = isIP(address);
+      if (version === 0 && nonPublicHostname(address)) {
+        inputError('curl --connect-to 目标位于本机、内网或保留地址');
+      }
       if ((version === 4 && !ipv4IsPublic(address))
         || (version === 6 && !ipv6IsPublic(address))) {
         inputError('curl --connect-to 目标位于本机、内网或保留地址');
@@ -952,6 +1063,12 @@ async function normalizeCommand(
     shellSemantics,
     shell,
   );
+  const curlFileTargets = await normalizeCurlFileTargets(
+    command,
+    args,
+    context,
+    shellSemantics,
+  );
   const networkOverrides = normalizeCommandNetworkOverrides(
     command,
     args,
@@ -983,6 +1100,7 @@ async function normalizeCommand(
       `cwd:${cwd}`,
       `command:${[command, ...args].join(' ')}`,
       ...targets,
+      ...curlFileTargets,
       ...networkOverrides,
     ],
     confirmReasons,
@@ -1068,6 +1186,16 @@ function ipv6IsPublic(host: string): boolean {
   return true;
 }
 
+function nonPublicHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/u, '');
+  return host === ''
+    || host === 'localhost'
+    || host.endsWith('.localhost')
+    || host.endsWith('.local')
+    || host.endsWith('.internal')
+    || host.endsWith('.lan');
+}
+
 function normalizePublicUrl(value: unknown): string {
   const raw = cleanToken(value, 'url');
   let parsed: URL;
@@ -1083,13 +1211,7 @@ function normalizePublicUrl(value: unknown): string {
     inputError('URL 不得包含凭据');
   }
   const host = parsed.hostname.toLowerCase().replace(/\.$/u, '');
-  if (host === ''
-    || /[{}[\]]/u.test(host)
-    || host === 'localhost'
-    || host.endsWith('.localhost')
-    || host.endsWith('.local')
-    || host.endsWith('.internal')
-    || host.endsWith('.lan')) {
+  if (/[{}[\]]/u.test(host) || nonPublicHostname(host)) {
     inputError('URL 目标不是公开主机');
   }
   const ipVersion = isIP(host.startsWith('[') ? host.slice(1, -1) : host);
