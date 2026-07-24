@@ -1,10 +1,13 @@
 import {createHash} from 'node:crypto';
 import {writeFileSync} from 'node:fs';
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -17,6 +20,7 @@ import {
   readFileTool,
   searchText,
 } from '../../src/tools/files.js';
+import type {PatchFileOperations} from '../../src/tools/files.js';
 import type {ToolContext} from '../../src/tools/types.js';
 
 const signal = AbortSignal.timeout(10_000);
@@ -118,6 +122,42 @@ describe('workspace file tools', () => {
     expect(result.truncated).toBe(true);
   });
 
+  it('bounds every search preview around its match', async () => {
+    const longLine = `${'x'.repeat(500)}match${'y'.repeat(500)}`;
+    await writeFile(
+      join(workspace, 'long-matches.txt'),
+      Array.from({length: 201}, () => longLine).join('\n'),
+    );
+
+    const result = await searchText({query: 'match'}, context, signal);
+
+    expect(result.data?.matches).toHaveLength(200);
+    for (const match of result.data?.matches ?? []) {
+      expect(match.preview.length).toBeLessThanOrEqual(240);
+      expect(match.preview).toContain('match');
+      expect(match.preview.startsWith('…')).toBe(true);
+      expect(match.preview.endsWith('…')).toBe(true);
+      expect(match.column).toBe(501);
+    }
+    expect(JSON.stringify(result.data).length).toBeLessThan(70_000);
+  });
+
+  it('uses the shared CR, CRLF and LF line semantics for search', async () => {
+    await writeFile(
+      join(workspace, 'mixed-search.txt'),
+      'first\rneedle\r\nlast\n',
+    );
+
+    const result = await searchText({query: 'needle'}, context, signal);
+
+    expect(result.data?.matches).toEqual([{
+      path: 'mixed-search.txt',
+      line: 2,
+      column: 1,
+      preview: 'needle',
+    }]);
+  });
+
   it('reads an inclusive line range and limits the default response to 400 lines', async () => {
     await writeFile(
       join(workspace, 'lines.txt'),
@@ -143,6 +183,120 @@ describe('workspace file tools', () => {
     });
     expect(limited.data?.content.split('\n')).toHaveLength(400);
     expect(limited.truncated).toBe(true);
+  });
+
+  it('rejects a huge line at the read byte limit without returning its contents', async () => {
+    await writeFile(
+      join(workspace, 'huge-line.txt'),
+      Buffer.alloc(2 * 1024 * 1024 + 1, 'x'),
+    );
+
+    const result = await readFileTool({
+      path: 'huge-line.txt',
+    }, context, signal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'READ_LIMIT_EXCEEDED'},
+    });
+    expect(result.data).toBeUndefined();
+  });
+
+  it('rejects one in-limit file line before accumulating the whole file', async () => {
+    await writeFile(
+      join(workspace, 'single-line.txt'),
+      Buffer.alloc(2 * 1024 * 1024, 'x'),
+    );
+
+    const result = await readFileTool({
+      path: 'single-line.txt',
+    }, context, signal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'READ_LIMIT_EXCEEDED'},
+    });
+    expect(result.data).toBeUndefined();
+  });
+
+  it('returns consistent metadata for an empty file', async () => {
+    await writeFile(join(workspace, 'empty.txt'), '');
+
+    const result = await readFileTool({path: 'empty.txt'}, context, signal);
+
+    expect(result).toEqual({
+      ok: true,
+      summary: '读取 empty.txt：空文件',
+      data: {
+        path: 'empty.txt',
+        content: '',
+        startLine: 0,
+        endLine: 0,
+        totalLines: 0,
+      },
+      truncated: false,
+    });
+  });
+
+  it('normalizes LF, CRLF and CR without a trailing phantom line', async () => {
+    await writeFile(join(workspace, 'mixed-lines.txt'), 'one\rtwo\r\nthree\n');
+
+    const result = await readFileTool({
+      path: 'mixed-lines.txt',
+    }, context, signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        content: 'one\ntwo\nthree',
+        startLine: 1,
+        endLine: 3,
+        totalLines: 3,
+      },
+      truncated: false,
+    });
+  });
+
+  it('recognizes CRLF split across read chunks as one line ending', async () => {
+    await writeFile(
+      join(workspace, 'chunk-boundary.txt'),
+      `${'x'.repeat(64 * 1024 - 1)}\r\nsecond`,
+    );
+
+    const result = await readFileTool({
+      path: 'chunk-boundary.txt',
+      startLine: 2,
+    }, context, signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        content: 'second',
+        startLine: 2,
+        endLine: 2,
+        totalLines: 2,
+      },
+    });
+  });
+
+  it('does not count a deferred bare CR against the exact line limit', async () => {
+    const line = 'x'.repeat(64 * 1024);
+    await writeFile(join(workspace, 'bare-cr-limit.txt'), `${line}\r`);
+
+    const result = await readFileTool({
+      path: 'bare-cr-limit.txt',
+    }, context, signal);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        content: line,
+        startLine: 1,
+        endLine: 1,
+        totalLines: 1,
+      },
+      truncated: false,
+    });
   });
 
   it('requires update expected text to appear exactly once', async () => {
@@ -257,6 +411,33 @@ describe('workspace file tools', () => {
     );
   });
 
+  it.each(['write', 'truncate', 'sync', 'chmod', 'link'] as const)(
+    'cleans a nested add temp file when %s fails',
+    async (stage) => {
+      const directory = join(workspace, 'nested');
+      await mkdir(directory);
+      const injected = {
+        [stage]: async () => {
+          throw new Error(`${stage} failed`);
+        },
+      } as Partial<PatchFileOperations>;
+
+      const result = await applyPatch({
+        operations: [{
+          type: 'add',
+          path: 'nested/new.txt',
+          content: 'new contents',
+        }],
+      }, context, signal, injected);
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'FILE_OPERATION_FAILED'},
+      });
+      await expect(readdir(directory)).resolves.toEqual([]);
+    },
+  );
+
   it('updates one exact fragment and reports its line counts', async () => {
     await writeFile(join(workspace, 'update.txt'), 'header\nbefore\nfooter\n');
 
@@ -283,6 +464,142 @@ describe('workspace file tools', () => {
     await expect(readFile(join(workspace, 'update.txt'), 'utf8')).resolves.toBe(
       'header\nafter\nmore\nfooter\n',
     );
+  });
+
+  it.each(['write', 'truncate', 'sync', 'chmod', 'rename'] as const)(
+    'preserves update target and cleans temp when %s fails',
+    async (stage) => {
+      const path = join(workspace, 'atomic-update.txt');
+      const original = Buffer.from('before');
+      await writeFile(path, original);
+      await chmod(path, 0o640);
+      const injected = {
+        [stage]: async () => {
+          throw new Error(`${stage} failed`);
+        },
+      } as Partial<PatchFileOperations>;
+
+      const result = await applyPatch({
+        operations: [{
+          type: 'update',
+          path: 'atomic-update.txt',
+          expected: 'before',
+          replacement: 'after',
+        }],
+      }, context, signal, injected);
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'FILE_OPERATION_FAILED'},
+      });
+      await expect(readFile(path)).resolves.toEqual(original);
+      expect((await stat(path)).mode & 0o777).toBe(0o640);
+      await expect(readdir(workspace)).resolves.toEqual(['atomic-update.txt']);
+    },
+  );
+
+  it('atomically updates a file while preserving its mode', async () => {
+    const path = join(workspace, 'mode-update.txt');
+    await writeFile(path, 'before');
+    await chmod(path, 0o640);
+
+    const result = await applyPatch({
+      operations: [{
+        type: 'update',
+        path: 'mode-update.txt',
+        expected: 'before',
+        replacement: 'after',
+      }],
+    }, context, signal);
+
+    expect(result.ok).toBe(true);
+    await expect(readFile(path, 'utf8')).resolves.toBe('after');
+    expect((await stat(path)).mode & 0o777).toBe(0o640);
+    await expect(readdir(workspace)).resolves.toEqual(['mode-update.txt']);
+  });
+
+  it('returns a ToolResult when a file operation throws null', async () => {
+    const result = await applyPatch({
+      operations: [{type: 'add', path: 'null-error.txt', content: 'contents'}],
+    }, context, signal, {
+      write: async () => {
+        throw null;
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'FILE_OPERATION_FAILED'},
+    });
+    expect(result.summary).toBeTypeOf('string');
+    await expect(readdir(workspace)).resolves.toEqual([]);
+  });
+
+  it('redacts a non-Error thrown value from summary and error message', async () => {
+    const path = join(workspace, 'redacted-error.txt');
+    const secret = 'sk-test-secret-1234567890';
+    await writeFile(path, 'before');
+
+    const result = await applyPatch({
+      operations: [{
+        type: 'update',
+        path: 'redacted-error.txt',
+        expected: 'before',
+        replacement: 'after',
+      }],
+    }, context, signal, {
+      rename: async () => {
+        throw `publication failed with ${secret}`;
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'FILE_OPERATION_FAILED'},
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result)).toContain('[REDACTED]');
+    await expect(readFile(path, 'utf8')).resolves.toBe('before');
+    await expect(readdir(workspace)).resolves.toEqual(['redacted-error.txt']);
+  });
+
+  it.each([
+    ['null', null],
+    ['sensitive string', 'authorization: Bearer abort-secret'],
+  ])('returns a redacted ToolResult for %s abort reason', async (_name, reason) => {
+    const controller = new AbortController();
+    controller.abort(reason);
+
+    const result = await listFiles({}, context, controller.signal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    expect(JSON.stringify(result)).not.toContain('abort-secret');
+  });
+
+  it.each([
+    ['invalid UTF-8', Buffer.from([0xff, ...Buffer.from('before')])],
+    ['binary NUL', Buffer.from('before\0after')],
+  ])('rejects %s update without rewriting bytes', async (_name, original) => {
+    const path = join(workspace, 'binary-update.dat');
+    await writeFile(path, original);
+
+    const result = await applyPatch({
+      operations: [{
+        type: 'update',
+        path: 'binary-update.dat',
+        expected: 'before',
+        replacement: 'changed',
+      }],
+    }, context, signal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'BINARY_FILE'},
+    });
+    await expect(readFile(path)).resolves.toEqual(original);
   });
 
   it('rechecks update contents immediately before writing', async () => {

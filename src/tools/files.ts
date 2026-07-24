@@ -1,22 +1,29 @@
-import {createHash} from 'node:crypto';
+import {createHash, randomUUID} from 'node:crypto';
 import {constants} from 'node:fs';
 import {
+  link,
   lstat,
   open,
   realpath,
   readdir,
+  rename,
   unlink,
 } from 'node:fs/promises';
-import {dirname, join, relative, sep} from 'node:path';
+import {basename, dirname, join, relative, sep} from 'node:path';
 import {
   resolveWorkspacePath,
   type ResolvedPath,
 } from '../security/path-boundary.js';
+import {redactValue} from '../security/redact.js';
 import type {ToolContext, ToolResult} from './types.js';
 
 const MAX_SEARCH_MATCHES = 200;
 const MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_SEARCH_PREVIEW_CHARACTERS = 240;
 const MAX_READ_LINES = 400;
+const MAX_READ_BYTES = 2 * 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
+const MAX_READ_LINE_CHARACTERS = READ_CHUNK_BYTES;
 const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules']);
 const NO_FOLLOW = constants.O_NOFOLLOW;
 // Darwin's open(2) exposes O_NOFOLLOW_ANY, but Node does not export it.
@@ -83,6 +90,50 @@ export interface ApplyPatchOutput {
   changes: FileChange[];
 }
 
+type OpenFileHandle = Awaited<ReturnType<typeof open>>;
+
+export interface PatchFileOperations {
+  write(file: OpenFileHandle, contents: Buffer): Promise<void>;
+  truncate(file: OpenFileHandle, length: number): Promise<void>;
+  sync(file: OpenFileHandle): Promise<void>;
+  chmod(file: OpenFileHandle, mode: number): Promise<void>;
+  link(existingPath: string, newPath: string): Promise<void>;
+  rename(oldPath: string, newPath: string): Promise<void>;
+}
+
+const DEFAULT_PATCH_FILE_OPERATIONS: PatchFileOperations = {
+  async write(file, contents) {
+    let offset = 0;
+    while (offset < contents.length) {
+      const {bytesWritten} = await file.write(
+        contents,
+        offset,
+        contents.length - offset,
+        offset,
+      );
+      if (bytesWritten === 0) {
+        throw new FileToolError('FILE_OPERATION_FAILED', '无法写入临时文件');
+      }
+      offset += bytesWritten;
+    }
+  },
+  async truncate(file, length) {
+    await file.truncate(length);
+  },
+  async sync(file) {
+    await file.sync();
+  },
+  async chmod(file, mode) {
+    await file.chmod(mode);
+  },
+  async link(existingPath, newPath) {
+    await link(existingPath, newPath);
+  },
+  async rename(oldPath, newPath) {
+    await rename(oldPath, newPath);
+  },
+};
+
 class FileToolError extends Error {
   constructor(
     readonly code: string,
@@ -114,6 +165,9 @@ interface PlannedUpdate {
   expected: string;
   replacement: string;
   snapshotSha256: string;
+  mode: number;
+  parent: ResolvedPath;
+  parentIdentity: FileIdentity;
   additions: number;
   deletions: number;
 }
@@ -141,47 +195,84 @@ function success<T>(
   };
 }
 
-function failure<T>(error: unknown): ToolResult<T> {
-  if (error instanceof FileToolError) {
+function safeProperty(value: unknown, property: string): unknown {
+  if (value === null
+    || (typeof value !== 'object' && typeof value !== 'function')) {
+    return undefined;
+  }
+  try {
+    return Reflect.get(value, property);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeRedactedMessage(value: unknown, fallback: string): string {
+  try {
+    const messageProperty = safeProperty(value, 'message');
+    let raw: unknown = typeof messageProperty === 'string'
+      ? messageProperty
+      : value;
+    if (raw === null || raw === undefined || raw === '') raw = fallback;
+    const redacted = redactValue(raw);
+    if (typeof redacted === 'string') return redacted;
+    try {
+      return JSON.stringify(redacted) ?? fallback;
+    } catch {
+      try {
+        const stringValue = String(redacted);
+        const safeString = redactValue(stringValue);
+        return typeof safeString === 'string' ? safeString : fallback;
+      } catch {
+        return fallback;
+      }
+    }
+  } catch {
+    return fallback;
+  }
+}
+
+function failure<T>(
+  error: unknown,
+  signal?: AbortSignal,
+): ToolResult<T> {
+  try {
+    let code = 'FILE_OPERATION_FAILED';
+    let message = safeRedactedMessage(error, '文件操作失败');
+    const name = safeProperty(error, 'name');
+    const nodeCode = safeProperty(error, 'code');
+
+    if (signal?.aborted || name === 'AbortError') {
+      code = 'ABORTED';
+      const reason = signal?.aborted ? signal.reason : error;
+      const detail = safeRedactedMessage(reason, '');
+      message = detail ? `文件操作已取消：${detail}` : '文件操作已取消';
+    } else if (error instanceof FileToolError) {
+      code = error.code;
+    } else if (nodeCode === 'ENOENT') {
+      code = 'NOT_FOUND';
+      message = '文件或目录不存在';
+    } else if (nodeCode === 'EEXIST') {
+      code = 'FILE_EXISTS';
+      message = '文件已存在';
+    } else if (message.includes('工作区外') || message.includes('符号链接')) {
+      code = 'PATH_BOUNDARY';
+    }
+
+    const safeMessage = safeRedactedMessage(message, '文件操作失败');
     return {
       ok: false,
-      summary: error.message,
-      error: {code: error.code, message: error.message},
+      summary: safeMessage,
+      error: {code, message: safeMessage},
     };
-  }
-
-  if ((error as Error).name === 'AbortError') {
-    const message = '文件操作已取消';
+  } catch {
+    const message = '文件操作失败';
     return {
       ok: false,
       summary: message,
-      error: {code: 'ABORTED', message},
+      error: {code: 'FILE_OPERATION_FAILED', message},
     };
   }
-
-  const nodeError = error as NodeJS.ErrnoException;
-  if (nodeError.code === 'ENOENT') {
-    return {
-      ok: false,
-      summary: '文件或目录不存在',
-      error: {code: 'NOT_FOUND', message: '文件或目录不存在'},
-    };
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-  if (message.includes('工作区外') || message.includes('符号链接')) {
-    return {
-      ok: false,
-      summary: message,
-      error: {code: 'PATH_BOUNDARY', message},
-    };
-  }
-
-  return {
-    ok: false,
-    summary: message,
-    error: {code: 'FILE_OPERATION_FAILED', message},
-  };
 }
 
 function assertNotAborted(signal: AbortSignal): void {
@@ -285,13 +376,14 @@ async function openVerifiedRegularFile(
   context: ToolContext,
   flags: number,
 ): Promise<{
-  file: Awaited<ReturnType<typeof open>>;
+  file: OpenFileHandle;
   identity: FileIdentity;
+  mode: number;
 }> {
   const file = await open(resolved.absolute, flags | SECURE_OPEN_FLAGS);
   try {
-    const identity = await verifyOpenedRegularFile(file, resolved, context);
-    return {file, identity};
+    const verified = await verifyOpenedRegularFile(file, resolved, context);
+    return {file, ...verified};
   } catch (error) {
     await file.close();
     throw error;
@@ -299,10 +391,10 @@ async function openVerifiedRegularFile(
 }
 
 async function verifyOpenedRegularFile(
-  file: Awaited<ReturnType<typeof open>>,
+  file: OpenFileHandle,
   resolved: ResolvedPath,
   context: ToolContext,
-): Promise<FileIdentity> {
+): Promise<{identity: FileIdentity; mode: number}> {
   const openedStat = await file.stat();
   if (!openedStat.isFile()) {
     throw new FileToolError('NOT_A_FILE', '请求路径不是常规文件');
@@ -322,7 +414,10 @@ async function verifyOpenedRegularFile(
   if (!sameIdentity(openedIdentity, fileIdentity(currentStat))) {
     throw new FileToolError('FILE_CHANGED', '文件在操作前已被替换');
   }
-  return openedIdentity;
+  return {
+    identity: openedIdentity,
+    mode: openedStat.mode & 0o7777,
+  };
 }
 
 async function readVerifiedFile(
@@ -331,8 +426,9 @@ async function readVerifiedFile(
 ): Promise<{
   contents: Buffer;
   identity: FileIdentity;
+  mode: number;
 }> {
-  const {file, identity} = await openVerifiedRegularFile(
+  const {file, identity, mode} = await openVerifiedRegularFile(
     resolved,
     context,
     constants.O_RDONLY,
@@ -341,6 +437,7 @@ async function readVerifiedFile(
     return {
       contents: await file.readFile(),
       identity,
+      mode,
     };
   } finally {
     await file.close();
@@ -379,12 +476,12 @@ async function readSearchFile(
   }
 }
 
-function isBinary(contents: Buffer): boolean {
-  if (contents.includes(0)) return true;
+function decodeUtf8Text(contents: Buffer): string {
+  let text: string;
   try {
-    new TextDecoder('utf-8', {fatal: true}).decode(contents);
+    text = new TextDecoder('utf-8', {fatal: true}).decode(contents);
   } catch {
-    return true;
+    throw new FileToolError('BINARY_FILE', '文件不是有效的 UTF-8 文本');
   }
 
   let controlBytes = 0;
@@ -398,7 +495,191 @@ function isBinary(contents: Buffer): boolean {
       controlBytes += 1;
     }
   }
-  return contents.length > 0 && controlBytes / contents.length > 0.1;
+  if (contents.includes(0)
+    || (contents.length > 0 && controlBytes / contents.length > 0.1)) {
+    throw new FileToolError('BINARY_FILE', '文件包含二进制内容');
+  }
+  return text;
+}
+
+function isBinary(contents: Buffer): boolean {
+  try {
+    decodeUtf8Text(contents);
+    return false;
+  } catch (error) {
+    if (error instanceof FileToolError && error.code === 'BINARY_FILE') {
+      return true;
+    }
+    throw error;
+  }
+}
+
+interface TextLineState {
+  pending: string;
+}
+
+function consumeTextLines(
+  state: TextLineState,
+  text: string,
+  eof: boolean,
+  onLine: (line: string) => void,
+  maxLineCharacters?: number,
+): void {
+  state.pending += text;
+  let start = 0;
+  let index = 0;
+  while (index < state.pending.length) {
+    const character = state.pending[index];
+    if (character !== '\r' && character !== '\n') {
+      index += 1;
+      if (maxLineCharacters !== undefined
+        && index - start > maxLineCharacters) {
+        throw new FileToolError(
+          'READ_LIMIT_EXCEEDED',
+          `单行超过读取上限 ${maxLineCharacters} 字符`,
+        );
+      }
+      continue;
+    }
+    if (character === '\r'
+      && index + 1 === state.pending.length
+      && !eof) {
+      break;
+    }
+
+    onLine(state.pending.slice(start, index));
+    index += character === '\r' && state.pending[index + 1] === '\n' ? 2 : 1;
+    start = index;
+  }
+
+  state.pending = state.pending.slice(start);
+  const pendingLineLength = !eof && state.pending.endsWith('\r')
+    ? state.pending.length - 1
+    : state.pending.length;
+  if (maxLineCharacters !== undefined
+    && pendingLineLength > maxLineCharacters) {
+    throw new FileToolError(
+      'READ_LIMIT_EXCEEDED',
+      `单行超过读取上限 ${maxLineCharacters} 字符`,
+    );
+  }
+  if (eof && state.pending.length > 0) {
+    onLine(state.pending);
+    state.pending = '';
+  }
+}
+
+function splitTextLines(text: string): string[] {
+  const lines: string[] = [];
+  consumeTextLines({pending: ''}, text, true, (line) => lines.push(line));
+  return lines;
+}
+
+function searchPreview(
+  line: string,
+  matchIndex: number,
+  queryLength: number,
+): string {
+  if (line.length <= MAX_SEARCH_PREVIEW_CHARACTERS) return line;
+
+  const contentBudget = MAX_SEARCH_PREVIEW_CHARACTERS - 2;
+  const matchBudget = Math.min(queryLength, contentBudget);
+  const contextBefore = Math.floor((contentBudget - matchBudget) / 2);
+  let start = Math.max(0, matchIndex - contextBefore);
+  let end = Math.min(line.length, start + contentBudget);
+  if (end === line.length) start = Math.max(0, end - contentBudget);
+  end = Math.min(line.length, start + contentBudget);
+
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < line.length ? '…' : '';
+  return `${prefix}${line.slice(start, end)}${suffix}`;
+}
+
+async function readLinesWithinLimit(
+  resolved: ResolvedPath,
+  context: ToolContext,
+  signal: AbortSignal,
+  startLine: number,
+  endLine: number,
+): Promise<{lines: string[]; totalLines: number}> {
+  const {file} = await openVerifiedRegularFile(
+    resolved,
+    context,
+    constants.O_RDONLY,
+  );
+  try {
+    if ((await file.stat()).size > MAX_READ_BYTES) {
+      throw new FileToolError(
+        'READ_LIMIT_EXCEEDED',
+        `文件超过读取上限 ${MAX_READ_BYTES} 字节`,
+      );
+    }
+
+    const decoder = new TextDecoder('utf-8', {fatal: true});
+    const state: TextLineState = {pending: ''};
+    const selected: string[] = [];
+    let totalLines = 0;
+    let position = 0;
+    const accept = (line: string): void => {
+      totalLines += 1;
+      if (totalLines >= startLine && totalLines <= endLine) {
+        selected.push(line);
+      }
+    };
+
+    while (true) {
+      assertNotAborted(signal);
+      const remaining = MAX_READ_BYTES - position;
+      if (remaining < 0) {
+        throw new FileToolError(
+          'READ_LIMIT_EXCEEDED',
+          `文件超过读取上限 ${MAX_READ_BYTES} 字节`,
+        );
+      }
+      const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, remaining + 1));
+      const {bytesRead} = await file.read(
+        chunk,
+        0,
+        chunk.length,
+        position,
+      );
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      if (position > MAX_READ_BYTES) {
+        throw new FileToolError(
+          'READ_LIMIT_EXCEEDED',
+          `文件超过读取上限 ${MAX_READ_BYTES} 字节`,
+        );
+      }
+      try {
+        consumeTextLines(
+          state,
+          decoder.decode(chunk.subarray(0, bytesRead), {stream: true}),
+          false,
+          accept,
+          MAX_READ_LINE_CHARACTERS,
+        );
+      } catch (error) {
+        if (error instanceof FileToolError) throw error;
+        throw new FileToolError('BINARY_FILE', '文件不是有效的 UTF-8 文本');
+      }
+    }
+
+    try {
+      consumeTextLines(
+        state,
+        decoder.decode(),
+        true,
+        accept,
+        MAX_READ_LINE_CHARACTERS,
+      );
+    } catch {
+      throw new FileToolError('BINARY_FILE', '文件不是有效的 UTF-8 文本');
+    }
+    return {lines: selected, totalLines};
+  } finally {
+    await file.close();
+  }
 }
 
 export async function listFiles(
@@ -415,7 +696,7 @@ export async function listFiles(
     );
     return success(`找到 ${files.length} 个文件`, {files});
   } catch (error) {
-    return failure(error);
+    return failure(error, signal);
   }
 }
 
@@ -454,10 +735,10 @@ export async function searchText(
       const contents = await readSearchFile(resolved, context);
       if (contents === undefined || isBinary(contents)) continue;
 
-      const lines = contents.toString('utf8').split(/\r?\n/);
+      const lines = splitTextLines(contents.toString('utf8'));
       for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-        const preview = lines[lineIndex] ?? '';
-        let columnIndex = preview.indexOf(input.query);
+        const line = lines[lineIndex] ?? '';
+        let columnIndex = line.indexOf(input.query);
         while (columnIndex !== -1) {
           if (matches.length === limit) {
             truncated = true;
@@ -467,9 +748,13 @@ export async function searchText(
             path,
             line: lineIndex + 1,
             column: columnIndex + 1,
-            preview,
+            preview: searchPreview(
+              line,
+              columnIndex,
+              input.query.length,
+            ),
           });
-          columnIndex = preview.indexOf(input.query, columnIndex + 1);
+          columnIndex = line.indexOf(input.query, columnIndex + 1);
         }
       }
     }
@@ -480,7 +765,7 @@ export async function searchText(
       truncated,
     );
   } catch (error) {
-    return failure(error);
+    return failure(error, signal);
   }
 }
 
@@ -505,22 +790,40 @@ export async function readFileTool(
       input.path,
       'existing',
     );
-    const {contents} = await readVerifiedFile(resolved, context);
-    const text = contents.toString('utf8');
-    const lines = text.length === 0 ? [] : text.split(/\r?\n/);
-    if (startLine > Math.max(lines.length, 1)) {
+    const cappedEndLine = Math.min(
+      requestedEndLine,
+      startLine + MAX_READ_LINES - 1,
+    );
+    const {lines, totalLines} = await readLinesWithinLimit(
+      resolved,
+      context,
+      signal,
+      startLine,
+      cappedEndLine,
+    );
+    if (totalLines === 0) {
+      return success(
+        `读取 ${resolved.relative}：空文件`,
+        {
+          path: toWorkspacePath(resolved.relative),
+          content: '',
+          startLine: 0,
+          endLine: 0,
+          totalLines: 0,
+        },
+        false,
+      );
+    }
+    if (startLine > totalLines) {
       throw new FileToolError('INVALID_LINE_RANGE', '起始行超出文件范围');
     }
 
     const endLine = Math.min(
-      requestedEndLine,
-      startLine + MAX_READ_LINES - 1,
-      lines.length,
+      cappedEndLine,
+      totalLines,
     );
-    const content = endLine < startLine
-      ? ''
-      : lines.slice(startLine - 1, endLine).join('\n');
-    const truncated = startLine > 1 || endLine < lines.length;
+    const content = lines.join('\n');
+    const truncated = startLine > 1 || endLine < totalLines;
 
     return success(
       `读取 ${resolved.relative} 第 ${startLine}-${endLine} 行`,
@@ -529,12 +832,12 @@ export async function readFileTool(
         content,
         startLine,
         endLine,
-        totalLines: lines.length,
+        totalLines,
       },
       truncated,
     );
   } catch (error) {
-    return failure(error);
+    return failure(error, signal);
   }
 }
 
@@ -548,6 +851,26 @@ function countOccurrences(contents: string, expected: string): number {
     index = contents.indexOf(expected, index + 1);
   }
   return count;
+}
+
+async function resolveExistingParent(
+  resolved: ResolvedPath,
+  context: ToolContext,
+): Promise<{parent: ResolvedPath; identity: FileIdentity}> {
+  const parentRequested = relative(
+    await realpath(context.workspace),
+    dirname(resolved.absolute),
+  ) || '.';
+  const parent = await resolveWorkspacePath(
+    context.workspace,
+    parentRequested,
+    'existing',
+  );
+  const parentStat = await lstat(parent.absolute);
+  if (!parentStat.isDirectory()) {
+    throw new FileToolError('PARENT_NOT_DIRECTORY', '文件的父路径不是目录');
+  }
+  return {parent, identity: fileIdentity(parentStat)};
 }
 
 async function validateAdd(
@@ -568,19 +891,10 @@ async function validateAdd(
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 
-  const parentRequested = relative(
-    await realpath(context.workspace),
-    dirname(resolved.absolute),
-  ) || '.';
-  const parent = await resolveWorkspacePath(
-    context.workspace,
-    parentRequested,
-    'existing',
+  const {parent, identity: parentIdentity} = await resolveExistingParent(
+    resolved,
+    context,
   );
-  const parentStat = await lstat(parent.absolute);
-  if (!parentStat.isDirectory()) {
-    throw new FileToolError('PARENT_NOT_DIRECTORY', '新增文件的父路径不是目录');
-  }
   const content = operation.content;
   assertString(content, 'content');
 
@@ -590,7 +904,7 @@ async function validateAdd(
     resolved,
     content,
     parent,
-    parentIdentity: fileIdentity(parentStat),
+    parentIdentity,
   };
 }
 
@@ -605,8 +919,8 @@ async function validateUpdate(
     path,
     'existing',
   );
-  const {contents} = await readVerifiedFile(resolved, context);
-  const text = contents.toString('utf8');
+  const {contents, mode} = await readVerifiedFile(resolved, context);
+  const text = decodeUtf8Text(contents);
   const expected = operation.expected;
   const replacement = operation.replacement;
   assertString(expected, 'expected');
@@ -617,6 +931,10 @@ async function validateUpdate(
       `更新片段必须且只能出现一次：${resolved.relative}`,
     );
   }
+  const {parent, identity: parentIdentity} = await resolveExistingParent(
+    resolved,
+    context,
+  );
 
   return {
     type: 'update',
@@ -625,6 +943,9 @@ async function validateUpdate(
     expected,
     replacement,
     snapshotSha256: sha256(contents),
+    mode,
+    parent,
+    parentIdentity,
     additions: countLines(replacement),
     deletions: countLines(expected),
   };
@@ -739,14 +1060,91 @@ function assertPlansUnchanged(
       if (first.snapshotSha256 !== second.snapshotSha256) {
         throw new FileToolError('FILE_CHANGED', '文件内容在执行前已变化');
       }
+      if (first.type === 'update'
+        && second.type === 'update'
+        && (first.mode !== second.mode
+          || !sameIdentity(first.parentIdentity, second.parentIdentity))) {
+        throw new FileToolError('FILE_CHANGED', '文件权限或父目录在执行前已变化');
+      }
     }
   }
 }
 
-async function executeAdd(
+async function assertParentUnchanged(
+  parent: ResolvedPath,
+  expectedIdentity: FileIdentity,
+  context: ToolContext,
+): Promise<void> {
+  const current = await resolveWorkspacePath(
+    context.workspace,
+    parent.relative,
+    'existing',
+  );
+  if (current.absolute !== parent.absolute) {
+    throw new FileToolError('FILE_CHANGED', '文件父目录路径已变化');
+  }
+  const stat = await lstat(current.absolute);
+  if (!stat.isDirectory()
+    || !sameIdentity(expectedIdentity, fileIdentity(stat))) {
+    throw new FileToolError('FILE_CHANGED', '文件父目录已变化');
+  }
+}
+
+async function removeTempFile(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+async function prepareTempFile(
+  target: ResolvedPath,
+  parent: ResolvedPath,
+  parentIdentity: FileIdentity,
+  mode: number,
+  contents: Buffer,
+  context: ToolContext,
+  fileOperations: PatchFileOperations,
+): Promise<ResolvedPath> {
+  await assertParentUnchanged(parent, parentIdentity, context);
+  const name = `.${basename(target.absolute)}.haochen-${randomUUID()}.tmp`;
+  const requested = parent.relative === '.' ? name : join(parent.relative, name);
+  const temp = await resolveWorkspacePath(context.workspace, requested, 'new');
+  if (dirname(temp.absolute) !== parent.absolute) {
+    throw new FileToolError('PATH_BOUNDARY', '临时文件必须位于目标文件同目录');
+  }
+
+  const file = await open(
+    temp.absolute,
+    constants.O_CREAT
+      | constants.O_EXCL
+      | constants.O_WRONLY
+      | SECURE_OPEN_FLAGS,
+    mode,
+  );
+  try {
+    await verifyOpenedRegularFile(file, temp, context);
+    await fileOperations.write(file, contents);
+    await fileOperations.truncate(file, contents.length);
+    await fileOperations.chmod(file, mode);
+    await fileOperations.sync(file);
+    await file.close();
+    return temp;
+  } catch (error) {
+    try {
+      await file.close();
+    } finally {
+      await removeTempFile(temp.absolute);
+    }
+    throw error;
+  }
+}
+
+async function assertAddTargetUnchanged(
   operation: PlannedAdd,
   context: ToolContext,
-): Promise<FileChange> {
+): Promise<void> {
   const current = await resolveWorkspacePath(
     context.workspace,
     operation.path,
@@ -755,30 +1153,42 @@ async function executeAdd(
   if (current.absolute !== operation.resolved.absolute) {
     throw new FileToolError('FILE_CHANGED', '新增文件路径在执行前已变化');
   }
-  const parent = await resolveWorkspacePath(
-    context.workspace,
-    operation.parent.relative,
-    'existing',
-  );
-  const parentStat = await lstat(parent.absolute);
-  if (!sameIdentity(operation.parentIdentity, fileIdentity(parentStat))) {
-    throw new FileToolError('FILE_CHANGED', '新增文件的父目录已变化');
+  try {
+    await lstat(current.absolute);
+    throw new FileToolError('FILE_EXISTS', `文件已存在：${operation.path}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
+  await assertParentUnchanged(
+    operation.parent,
+    operation.parentIdentity,
+    context,
+  );
+}
 
-  const file = await open(
-    current.absolute,
-    constants.O_CREAT
-      | constants.O_EXCL
-      | constants.O_WRONLY
-      | SECURE_OPEN_FLAGS,
+async function executeAdd(
+  operation: PlannedAdd,
+  context: ToolContext,
+  fileOperations: PatchFileOperations,
+): Promise<FileChange> {
+  await assertAddTargetUnchanged(operation, context);
+  const temp = await prepareTempFile(
+    operation.resolved,
+    operation.parent,
+    operation.parentIdentity,
     0o644,
+    Buffer.from(operation.content, 'utf8'),
+    context,
+    fileOperations,
   );
   try {
-    await verifyOpenedRegularFile(file, current, context);
-    await file.writeFile(operation.content, 'utf8');
-  } finally {
-    await file.close();
+    await assertAddTargetUnchanged(operation, context);
+    await fileOperations.link(temp.absolute, operation.resolved.absolute);
+  } catch (error) {
+    await removeTempFile(temp.absolute);
+    throw error;
   }
+  await removeTempFile(temp.absolute);
   return {
     path: operation.path,
     type: 'add',
@@ -790,45 +1200,53 @@ async function executeAdd(
 async function executeUpdate(
   operation: PlannedUpdate,
   context: ToolContext,
+  fileOperations: PatchFileOperations,
 ): Promise<FileChange> {
-  const {file} = await openVerifiedRegularFile(
+  const before = await readVerifiedFile(operation.resolved, context);
+  if (sha256(before.contents) !== operation.snapshotSha256
+    || before.mode !== operation.mode) {
+    throw new FileToolError('FILE_CHANGED', '文件内容在更新前已变化');
+  }
+  const beforeText = decodeUtf8Text(before.contents);
+  if (countOccurrences(beforeText, operation.expected) !== 1) {
+    throw new FileToolError('FILE_CHANGED', '更新片段在执行前已变化');
+  }
+  const updated = Buffer.from(
+    beforeText.replace(operation.expected, operation.replacement),
+    'utf8',
+  );
+  const temp = await prepareTempFile(
     operation.resolved,
+    operation.parent,
+    operation.parentIdentity,
+    operation.mode,
+    updated,
     context,
-    constants.O_RDWR,
+    fileOperations,
   );
   try {
-    const current = await file.readFile();
-    if (sha256(current) !== operation.snapshotSha256) {
+    const current = await readVerifiedFile(operation.resolved, context);
+    if (sha256(current.contents) !== operation.snapshotSha256
+      || current.mode !== operation.mode) {
       throw new FileToolError('FILE_CHANGED', '文件内容在更新前已变化');
     }
 
-    const text = current.toString('utf8');
+    const text = decodeUtf8Text(current.contents);
     if (countOccurrences(text, operation.expected) !== 1) {
       throw new FileToolError(
         'FILE_CHANGED',
         '更新片段在执行前已变化',
       );
     }
-    const updated = Buffer.from(
-      text.replace(operation.expected, operation.replacement),
-      'utf8',
+    await assertParentUnchanged(
+      operation.parent,
+      operation.parentIdentity,
+      context,
     );
-    let offset = 0;
-    while (offset < updated.length) {
-      const {bytesWritten} = await file.write(
-        updated,
-        offset,
-        updated.length - offset,
-        offset,
-      );
-      if (bytesWritten === 0) {
-        throw new FileToolError('FILE_OPERATION_FAILED', '无法写入更新内容');
-      }
-      offset += bytesWritten;
-    }
-    await file.truncate(updated.length);
-  } finally {
-    await file.close();
+    await fileOperations.rename(temp.absolute, operation.resolved.absolute);
+  } catch (error) {
+    await removeTempFile(temp.absolute);
+    throw error;
   }
 
   return {
@@ -879,9 +1297,14 @@ export async function applyPatch(
   input: ApplyPatchInput,
   context: ToolContext,
   signal: AbortSignal,
+  fileOperationOverrides: Partial<PatchFileOperations> = {},
 ): Promise<ToolResult<ApplyPatchOutput>> {
   try {
     assertNotAborted(signal);
+    const fileOperations: PatchFileOperations = {
+      ...DEFAULT_PATCH_FILE_OPERATIONS,
+      ...fileOperationOverrides,
+    };
     await assertSecureWriteCapability(context);
     const initial = await validatePatch(input, context, signal);
     const checked = await validatePatch(input, context, signal);
@@ -891,15 +1314,15 @@ export async function applyPatch(
     for (const operation of checked) {
       assertNotAborted(signal);
       if (operation.type === 'add') {
-        changes.push(await executeAdd(operation, context));
+        changes.push(await executeAdd(operation, context, fileOperations));
       } else if (operation.type === 'update') {
-        changes.push(await executeUpdate(operation, context));
+        changes.push(await executeUpdate(operation, context, fileOperations));
       } else {
         changes.push(await executeDelete(operation, context));
       }
     }
     return success(`已应用 ${changes.length} 个文件补丁`, {changes});
   } catch (error) {
-    return failure(error);
+    return failure(error, signal);
   }
 }
