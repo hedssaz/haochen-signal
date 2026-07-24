@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
+import {realpath} from 'node:fs/promises';
 import {isIP} from 'node:net';
-import {basename, isAbsolute, sep, win32} from 'node:path';
+import {basename, isAbsolute, resolve, sep, win32} from 'node:path';
 import {resolveWorkspacePath, type WorkspacePathMode} from './path-boundary.js';
 import type {
   BoundaryAction,
@@ -75,9 +76,10 @@ function fingerprint(
   tool: string,
   input: JsonObject,
   normalizedScope: string[],
+  workspace = '<invalid-workspace>',
 ): string {
   return createHash('sha256')
-    .update(stableJson({tool, input, normalizedScope}))
+    .update(stableJson({workspace, tool, input, normalizedScope}))
     .digest('hex');
 }
 
@@ -93,13 +95,14 @@ function decision(
   normalized: NormalizedOperation,
   action: BoundaryAction,
   reasons: string[],
+  workspace: string,
 ): BoundaryDecision {
   return {
     action,
     risk: actionRisk(action),
     reasons,
     normalizedScope: normalized.scope,
-    fingerprint: fingerprint(tool, normalized.input, normalized.scope),
+    fingerprint: fingerprint(tool, normalized.input, normalized.scope, workspace),
   };
 }
 
@@ -187,6 +190,35 @@ function stringArray(value: unknown, field: string): string[] {
   return result;
 }
 
+function strictArray(value: unknown, field: string): unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    inputError(`${field} 必须是普通数组`);
+  }
+  const symbols = Object.getOwnPropertySymbols(value);
+  const expectedNames = new Set([
+    'length',
+    ...Array.from({length: value.length}, (_, index) => String(index)),
+  ]);
+  const unexpected = Object.getOwnPropertyNames(value).find(
+    (key) => !expectedNames.has(key),
+  );
+  if (symbols.length > 0 || unexpected !== undefined) {
+    inputError(`${field} 包含非法数组字段`);
+  }
+  const result: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.hasOwn(value, index)) inputError(`${field} 不能是稀疏数组`);
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (descriptor === undefined
+      || descriptor.get !== undefined
+      || descriptor.set !== undefined) {
+      inputError(`${field} 不能包含访问器元素`);
+    }
+    result.push(descriptor.value);
+  }
+  return result;
+}
+
 function optionalInteger(
   value: unknown,
   field: string,
@@ -248,10 +280,16 @@ function sensitivePath(path: string): boolean {
     '.aws',
     '.gnupg',
     '.kube',
+    '.docker',
     'keychains',
   ].includes(segment))
+    || segments.some((segment, index) => (
+      segment === '.config' && segments[index + 1] === 'gh'
+    ))
     || /^\.env(?:\.|$)/u.test(leaf)
+    || /(?:^|[._-])credentials?(?:[._-]|$)/u.test(leaf)
     || [
+      '.git-credentials',
       '.npmrc',
       '.pypirc',
       '.netrc',
@@ -371,13 +409,23 @@ function containsShellHazard(script: string, pattern: RegExp): boolean {
   return pattern.test(script);
 }
 
+function dequoteShellText(script: string): string {
+  return script
+    .replace(/\\([^\r\n])/gu, '$1')
+    .replace(/['"]/gu, '');
+}
+
 function commandConfirmationReasons(
   command: string,
   args: string[],
+  shell: boolean,
 ): string[] {
   const reasons: string[] = [];
   const effective = unwrapCommand(command, args);
-  const allText = [command, ...args].join(' ');
+  const rawText = [command, ...args].join(' ');
+  const allText = usesShellInterpreter(command, args, shell)
+    ? dequoteShellText(rawText)
+    : rawText;
   const lowerArgs = effective.args.map((argument) => argument.toLowerCase());
 
   if (effective.command === 'sudo'
@@ -400,6 +448,9 @@ function commandConfirmationReasons(
     }
     if (git.name === 'push') {
       reasons.push('命令会向外部 Git 远端发布内容');
+    }
+    if (git.name === 'send-pack') {
+      reasons.push('命令会直接向外部 Git 远端发送引用');
     }
   }
 
@@ -438,6 +489,7 @@ function commandConfirmationReasons(
       uploadFlags.has(argument.toLowerCase())
       || /^--(?:data|form|upload-file)=/iu.test(argument)
       || /^-[dft]$/iu.test(argument)
+      || /^-[dft].+/iu.test(argument)
     ))) {
     reasons.push('命令可能向外部服务发送项目内容');
   }
@@ -459,6 +511,10 @@ function commandConfirmationReasons(
     || effective.command === 'security'
     || effective.command === 'pass'
     || effective.command === 'op'
+    || containsShellHazard(
+      allText,
+      /(?:^|[\s;&|])(?:printenv|security|pass|op)(?:\s|$)/iu,
+    )
     || args.some((argument) => sensitivePath(argument))) {
     reasons.push('命令可能读取凭据或敏感配置');
   }
@@ -536,6 +592,19 @@ function commandReviewReasons(
   return [...new Set(reasons)];
 }
 
+function usesShellInterpreter(command: string, args: string[], shell: boolean): boolean {
+  const executable = normalizedExecutable(command);
+  return shell
+    || (['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'cmd', 'powershell', 'pwsh']
+      .includes(executable)
+      && args.some((argument) => [
+        '-c',
+        '/c',
+        '-command',
+        '-encodedcommand',
+      ].includes(argument.toLowerCase())));
+}
+
 function candidatePath(argument: string): string | undefined {
   if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(argument)) return undefined;
   if (argument.startsWith('file:')) return argument.slice('file:'.length);
@@ -583,22 +652,28 @@ function commandUrlCandidates(argument: string): string[] {
 async function normalizeCommandTargets(
   args: string[],
   context: BoundaryContext,
+  shellSemantics: boolean,
 ): Promise<string[]> {
   const scope: string[] = [];
   const seen = new Set<string>();
   for (const argument of args) {
-    for (const rawUrl of commandUrlCandidates(argument)) {
-      const url = normalizePublicUrl(rawUrl);
-      const target = `url:${url}`;
-      if (!seen.has(target)) {
-        seen.add(target);
-        scope.push(target);
+    const texts = shellSemantics
+      ? [argument, dequoteShellText(argument)]
+      : [argument];
+    for (const text of texts) {
+      for (const rawUrl of commandUrlCandidates(text)) {
+        const url = normalizePublicUrl(rawUrl);
+        const target = `url:${url}`;
+        if (!seen.has(target)) {
+          seen.add(target);
+          scope.push(target);
+        }
       }
     }
-    const direct = candidatePath(argument);
-    const candidates = direct === undefined
-      ? embeddedPathCandidates(argument)
-      : [direct];
+    const candidates = texts.flatMap((text) => {
+      const direct = candidatePath(text);
+      return direct === undefined ? embeddedPathCandidates(text) : [direct];
+    });
     for (const candidate of candidates) {
       if (candidate.startsWith('~/')
         || candidate.startsWith('~\\')
@@ -654,9 +729,13 @@ async function normalizeCommand(
     'existing',
     'cwd',
   );
-  const targets = await normalizeCommandTargets(args, context);
+  const targets = await normalizeCommandTargets(
+    args,
+    context,
+    usesShellInterpreter(command, args, shell),
+  );
 
-  const confirmReasons = commandConfirmationReasons(command, args);
+  const confirmReasons = commandConfirmationReasons(command, args, shell);
   const reviewReasons = commandReviewReasons(
     command,
     args,
@@ -776,6 +855,7 @@ function normalizePublicUrl(value: unknown): string {
   }
   const host = parsed.hostname.toLowerCase().replace(/\.$/u, '');
   if (host === ''
+    || /[{}[\]]/u.test(host)
     || host === 'localhost'
     || host.endsWith('.localhost')
     || host.endsWith('.local')
@@ -861,18 +941,19 @@ async function normalizePatch(
 ): Promise<NormalizedOperation> {
   const input = record(value, 'apply_patch input');
   onlyKeys(input, ['operations'], 'apply_patch input');
-  if (!Array.isArray(input.operations) || input.operations.length === 0) {
+  const rawOperations = strictArray(input.operations, 'operations');
+  if (rawOperations.length === 0) {
     inputError('operations 必须是非空数组');
   }
 
   const operations: JsonObject[] = [];
   const scope: string[] = [];
   const confirmReasons: string[] = [];
-  let requiresReview = input.operations.length > 1;
+  let requiresReview = rawOperations.length > 1;
   const seen = new Set<string>();
-  for (let index = 0; index < input.operations.length; index += 1) {
+  for (let index = 0; index < rawOperations.length; index += 1) {
     const operation = record(
-      input.operations[index],
+      rawOperations[index],
       `operations[${index}]`,
     );
     const type = requiredString(operation.type, `operations[${index}].type`);
@@ -1047,8 +1128,12 @@ export async function classifyOperation(
   }
 
   let normalized: NormalizedOperation;
+  let canonicalWorkspace: string;
   try {
-    normalized = await normalizeOperation(operation, context);
+    canonicalWorkspace = await realpath(resolve(context.workspace));
+    normalized = await normalizeOperation(operation, {
+      workspace: canonicalWorkspace,
+    });
   } catch (error) {
     const reason = error instanceof BoundaryInputError
       ? error.message
@@ -1062,6 +1147,7 @@ export async function classifyOperation(
       normalized,
       'confirm',
       normalized.confirmReasons,
+      canonicalWorkspace,
     );
   }
   if (normalized.reviewReasons.length > 0) {
@@ -1070,6 +1156,7 @@ export async function classifyOperation(
       normalized,
       'review',
       normalized.reviewReasons,
+      canonicalWorkspace,
     );
   }
   return decision(
@@ -1077,6 +1164,7 @@ export async function classifyOperation(
     normalized,
     'allow',
     [normalized.allowReason],
+    canonicalWorkspace,
   );
 }
 

