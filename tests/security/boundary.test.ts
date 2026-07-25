@@ -215,6 +215,20 @@ describe('classifyOperation', () => {
     expect(five.fingerprint).not.toBe(six.fingerprint);
   });
 
+  it('normalizes an omitted web search limit to the explicit default', async () => {
+    const omitted = await classifyOperation({
+      tool: 'web_search',
+      input: {query: '苏浩宸'},
+    }, context);
+    const explicit = await classifyOperation({
+      tool: 'web_search',
+      input: {query: '苏浩宸', limit: 10},
+    }, context);
+
+    expect(omitted.normalizedScope).toEqual(explicit.normalizedScope);
+    expect(omitted.fingerprint).toBe(explicit.fingerprint);
+  });
+
   it('normalizes public command URLs and denies encoded private targets', async () => {
     const publicTarget = await classifyOperation({
       tool: 'run_command',
