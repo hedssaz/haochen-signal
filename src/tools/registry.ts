@@ -481,6 +481,12 @@ export class ToolRegistry {
         {
           workspace: executionContext.workspace,
           tempDir: executionContext.tempDir,
+          ...(finalClassification.executableIdentity === undefined
+            ? {}
+            : {
+              approvedExecutableIdentity:
+                finalClassification.executableIdentity,
+            }),
         },
         executionContext.signal,
       );

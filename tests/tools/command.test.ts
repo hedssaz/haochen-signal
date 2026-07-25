@@ -18,6 +18,7 @@ import {Writable} from 'node:stream';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {
   createWindowsProcessController,
+  executableSearchCandidates,
   runCommand,
   type ProcessController,
   type WindowsProcessRecord,
@@ -77,6 +78,35 @@ async function waitForProcessExit(
   }
   throw new Error(`进程仍在运行：${pid}`);
 }
+
+describe('executable identity resolution', () => {
+  it.each(['npm', 'git'])(
+    'does not let win32 implicitly select a forged cwd %s.cmd shim',
+    (command) => {
+      const cwd = 'C:\\repo';
+      const candidates = executableSearchCandidates(
+        command,
+        cwd,
+        {
+          Path: [
+            'C:\\Program Files\\nodejs',
+            'C:\\Program Files\\Git\\cmd',
+          ].join(';'),
+          PATHEXT: '.COM;.EXE;.BAT;.CMD',
+        },
+        'win32',
+      );
+
+      expect(candidates).not.toContain(`C:\\repo\\${command}.cmd`);
+      expect(candidates.some(candidate => (
+        candidate.toLowerCase() === `c:\\repo\\${command}.cmd`
+      ))).toBe(false);
+      expect(candidates.some(candidate => (
+        candidate.toLowerCase().endsWith(`\\${command}.cmd`)
+      ))).toBe(true);
+    },
+  );
+});
 
 describe('foreground command tool', () => {
   let root: string;

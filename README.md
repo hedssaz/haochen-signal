@@ -3,7 +3,7 @@
 > 本仓库只用于玩梗和实验，不保证正确性、安全性、数据完整性或兼容性。不要让它接触生产项目、重要代码、真实凭据或任何无法恢复的数据。
 >
 > **PARODY PROJECT — DO NOT USE FOR REAL WORK.**
-> This repository is a joke and experiment. Do not use it with production projects, important source code, real credentials, or irreplaceable data.
+> This repository is a joke and experiment. No guarantees of correctness, security, data integrity, or compatibility are provided. Do not use it with production projects, important source code, real credentials, or irreplaceable data.
 
 # 浩宸信号
 
@@ -15,11 +15,11 @@
 
 需要 Node.js 20 或更高版本。本包尚未发布到 npm，以下从源码全局安装的方式是有意设计。
 
-| 平台 | 终端 | 安装命令 | API Key 环境变量 |
-|---|---|---|---|
-| macOS | POSIX Shell | `npm install --global .` | `export HAOCHEN_API_KEY='...'` |
-| Linux | POSIX Shell | `npm install --global .` | `export HAOCHEN_API_KEY='...'` |
-| Windows | Windows PowerShell | `npm install --global .` | `$env:HAOCHEN_API_KEY='...'` |
+| 平台 | 终端 | 安装命令 | 自动化验证 | 凭据方式 |
+|---|---|---|---|---|
+| macOS | POSIX Shell | `npm install --global .` | `macos-latest` | 环境变量、Keychain 或本次隐藏输入 |
+| Linux | POSIX Shell | `npm install --global .` | `ubuntu-latest` | 环境变量或本次隐藏输入 |
+| Windows | Windows PowerShell | `npm install --global .` | `windows-latest` | 环境变量或本次隐藏输入 |
 
 ### macOS / Linux（POSIX Shell）
 

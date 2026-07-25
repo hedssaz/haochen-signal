@@ -1,7 +1,8 @@
 import {createHash} from 'node:crypto';
 import {realpath} from 'node:fs/promises';
 import {isIP} from 'node:net';
-import {basename, isAbsolute, resolve, sep, win32} from 'node:path';
+import {basename, isAbsolute, relative, resolve, sep, win32} from 'node:path';
+import {resolveExecutableIdentity} from './executable-identity.js';
 import {
   resolveWorkspacePath,
   toPortableRelativePath,
@@ -56,6 +57,7 @@ interface NormalizedOperation {
   confirmReasons: string[];
   reviewReasons: string[];
   allowReason: string;
+  executableIdentity?: string;
 }
 
 class BoundaryInputError extends Error {
@@ -119,6 +121,9 @@ function decision(
     reasons,
     normalizedScope: normalized.scope,
     fingerprint: fingerprint(tool, normalized.input, normalized.scope, workspace),
+    ...(normalized.executableIdentity === undefined
+      ? {}
+      : {executableIdentity: normalized.executableIdentity}),
   };
 }
 
@@ -338,8 +343,9 @@ function isWhitelistedCommand(
   args: string[],
   argsWereExplicit: boolean,
   shell: boolean,
+  hasTrustedExecutableIdentity: boolean,
 ): boolean {
-  if (!argsWereExplicit || shell) return false;
+  if (!argsWereExplicit || shell || !hasTrustedExecutableIdentity) return false;
   if (command === 'npm') {
     return exactArgs(args, ['test'])
       || exactArgs(args, ['run', 'test'])
@@ -612,6 +618,7 @@ function commandReviewReasons(
   args: string[],
   argsWereExplicit: boolean,
   shell: boolean,
+  hasTrustedExecutableIdentity: boolean,
 ): string[] {
   const reasons: string[] = [];
   const executable = normalizedExecutable(command);
@@ -640,7 +647,13 @@ function commandReviewReasons(
     ))) {
     reasons.push('命令可能启动长期进程、后台任务或端口监听');
   }
-  if (!isWhitelistedCommand(command, args, argsWereExplicit, shell)) {
+  if (!isWhitelistedCommand(
+    command,
+    args,
+    argsWereExplicit,
+    shell,
+    hasTrustedExecutableIdentity,
+  )) {
     reasons.push('命令不在固定测试、检查或构建白名单内');
   }
   return [...new Set(reasons)];
@@ -1092,6 +1105,29 @@ async function normalizeCommand(
     'existing',
     'cwd',
   );
+  const absoluteCwd = resolve(context.workspace, cwd);
+  const executableIdentity = shell
+    ? undefined
+    : await resolveExecutableIdentity(
+      command,
+      absoluteCwd,
+      process.env,
+      process.platform,
+    );
+  const executableRelativeToWorkspace = executableIdentity === undefined
+    ? undefined
+    : relative(context.workspace, executableIdentity);
+  const executableIsInsideWorkspace = executableRelativeToWorkspace !== undefined
+    && (
+      executableRelativeToWorkspace === ''
+      || (
+        !isAbsolute(executableRelativeToWorkspace)
+        && executableRelativeToWorkspace !== '..'
+        && !executableRelativeToWorkspace.startsWith(`..${sep}`)
+      )
+    );
+  const hasTrustedExecutableIdentity = executableIdentity !== undefined
+    && !executableIsInsideWorkspace;
   const shellSemantics = usesShellInterpreter(command, args, shell);
   const targets = await normalizeCommandTargets(
     command,
@@ -1123,6 +1159,7 @@ async function normalizeCommand(
     args,
     argsWereExplicit,
     shell,
+    hasTrustedExecutableIdentity,
   );
   return {
     input: {
@@ -1132,10 +1169,16 @@ async function normalizeCommand(
       shell,
       timeoutMs,
       maxOutputBytes,
+      ...(executableIdentity === undefined
+        ? {}
+        : {executableIdentity}),
     },
     scope: [
       `cwd:${cwd}`,
       `command:${[command, ...args].join(' ')}`,
+      ...(executableIdentity === undefined
+        ? []
+        : [`executable:${executableIdentity}`]),
       ...targets,
       ...curlFileTargets,
       ...networkOverrides,
@@ -1143,6 +1186,7 @@ async function normalizeCommand(
     confirmReasons,
     reviewReasons,
     allowReason: '命令匹配固定的低风险测试、检查或构建白名单',
+    ...(executableIdentity === undefined ? {} : {executableIdentity}),
   };
 }
 

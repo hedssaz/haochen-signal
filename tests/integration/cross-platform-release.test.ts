@@ -12,9 +12,16 @@ describe('跨平台发布契约', () => {
 
     expect(readme.slice(0, 1_500)).toContain('纯恶搞');
     expect(readme.slice(0, 1_500)).toContain('DO NOT USE');
-    expect(readme).toContain('macOS');
-    expect(readme).toContain('Linux');
-    expect(readme).toContain('Windows PowerShell');
+    expect(readme).toContain(
+      'No guarantees of correctness, security, data integrity, or compatibility are provided.',
+    );
+    for (const row of [
+      "| macOS | POSIX Shell | `npm install --global .` | `macos-latest` | 环境变量、Keychain 或本次隐藏输入 |",
+      "| Linux | POSIX Shell | `npm install --global .` | `ubuntu-latest` | 环境变量或本次隐藏输入 |",
+      "| Windows | Windows PowerShell | `npm install --global .` | `windows-latest` | 环境变量或本次隐藏输入 |",
+    ]) {
+      expect(readme).toContain(row);
+    }
     expect(workflow).toContain('ubuntu-latest');
     expect(workflow).toContain('windows-latest');
     expect(workflow).toContain('macos-latest');

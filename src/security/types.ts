@@ -17,4 +17,5 @@ export interface BoundaryDecision {
   reasons: string[];
   normalizedScope: string[];
   fingerprint: string;
+  executableIdentity?: string;
 }

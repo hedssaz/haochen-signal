@@ -14,8 +14,11 @@ import {finished} from 'node:stream/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import {TextDecoder} from 'node:util';
 import crossSpawn from 'cross-spawn';
+import {resolveExecutableIdentity} from '../security/executable-identity.js';
 import {resolveWorkspacePath} from '../security/path-boundary.js';
 import type {ToolContext, ToolResult} from './types.js';
+
+export {executableSearchCandidates} from '../security/executable-identity.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024;
@@ -727,6 +730,27 @@ export async function runCommand(
     return failure('ABORTED', '命令执行已取消');
   }
 
+  let executable = input.command;
+  if (!(input.shell ?? false)) {
+    const resolvedExecutable = await resolveExecutableIdentity(
+      input.command,
+      cwd,
+      runtime.env ?? process.env,
+      process.platform,
+    );
+    if (resolvedExecutable === undefined) {
+      return failure('COMMAND_NOT_FOUND', '无法解析命令的可信可执行文件');
+    }
+    if (context.approvedExecutableIdentity !== undefined
+      && resolvedExecutable !== context.approvedExecutableIdentity) {
+      return failure(
+        'SCOPE_CHANGED',
+        '命令可执行文件身份在审批后发生变化',
+      );
+    }
+    executable = context.approvedExecutableIdentity ?? resolvedExecutable;
+  }
+
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const processController = runtime.processController
@@ -784,7 +808,7 @@ export async function runCommand(
   let child: ChildProcess;
 
   try {
-    child = crossSpawn(input.command, input.args ?? [], {
+    child = crossSpawn(executable, input.args ?? [], {
       cwd,
       shell: input.shell ?? false,
       detached: process.platform !== 'win32',

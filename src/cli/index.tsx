@@ -9,7 +9,7 @@ import {runAgentTask} from '../agent/loop.js';
 import {compactHistory} from '../agent/context.js';
 import {loadConfig, saveConfig} from '../config/load.js';
 import {getAppPaths} from '../config/paths.js';
-import {readMacOsKeychain, resolveApiKey, saveMacOsKeychain} from '../config/credentials.js';
+import {readMacOsKeychain, saveMacOsKeychain} from '../config/credentials.js';
 import {createOpenAiCompatibleClient} from '../providers/openai-compatible.js';
 import {classifyOperation} from '../security/boundary.js';
 import {reviewOperation} from '../security/reviewer.js';
@@ -27,6 +27,7 @@ import {InteractiveConfirmationBroker} from './confirmation.js';
 import {runFirstRunWithCredentials} from './first-run.js';
 import {credentialSaverForPlatform, resolveUserHome} from './platform.js';
 import {createFirstRunInput} from './terminal-input.js';
+import {resolveStartupApiKey} from './startup-credentials.js';
 import {clearTerminalScreen} from './terminal-screen.js';
 import {GateReporter} from './gate-reporter.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
@@ -81,7 +82,12 @@ async function main(): Promise<void> {
   }
   if (config === undefined) throw new Error('无法创建配置。');
   let activeConfig = config;
-  apiKey ??= await resolveApiKey({env: process.env, readKeychain: readMacOsKeychain, prompt: async () => undefined});
+  apiKey ??= await resolveStartupApiKey({
+    env: process.env,
+    readKeychain: readMacOsKeychain,
+    createInput: () => createFirstRunInput(process.stdin, process.stdout),
+    write: text => process.stdout.write(text),
+  });
   if (!apiKey) throw new Error('未提供 API Key；请设置 HAOCHEN_API_KEY 或重新首次配置。');
   const workspace = process.cwd();
   const currentWorkspaceId = workspaceId(workspace);

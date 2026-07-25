@@ -170,6 +170,13 @@ describe('tool execution registry', () => {
     expect(review).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     expect(executeTool).toHaveBeenCalledOnce();
+    expect(executeTool).toHaveBeenCalledWith(
+      {command: 'npm', args: ['test']},
+      expect.objectContaining({
+        approvedExecutableIdentity: expect.any(String),
+      }),
+      executionContext.signal,
+    );
   });
 
   it('automatically executes a review operation approved by red-eye review', async () => {

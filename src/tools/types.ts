@@ -3,6 +3,7 @@ import type {ZodType} from 'zod';
 export interface ToolContext {
   workspace: string;
   tempDir: string;
+  approvedExecutableIdentity?: string;
 }
 
 export type ToolGateSource =
