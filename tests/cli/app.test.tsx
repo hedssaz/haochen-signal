@@ -4,6 +4,7 @@ import {render} from 'ink-testing-library';
 import {App} from '../../src/cli/app.js';
 import type {AgentUiEvent} from '../../src/cli/reducer.js';
 import type {ToolResult} from '../../src/tools/types.js';
+import {GateReporter} from '../../src/cli/gate-reporter.js';
 
 async function* scriptedEvents(): AsyncIterable<AgentUiEvent> {
   yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
@@ -37,7 +38,8 @@ describe('App', () => {
     app.stdin.write('读取 README');
     app.stdin.write('\r');
     await vi.waitFor(() => {
-      expect(app.lastFrame()).toContain('浩宸 › README 描述了浩宸信号');
+      expect(app.lastFrame()).toContain('浩宸 ›');
+      expect(app.lastFrame()).toContain('README 描述了浩宸信号');
     });
 
     expect(app.lastFrame()).toContain('工具 › read_file');
@@ -61,7 +63,10 @@ describe('App', () => {
       expect.any(AbortSignal),
     ));
 
-    await vi.waitFor(() => expect(app.lastFrame()).toContain('你 › 修复登录问题'));
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('你 ›');
+      expect(app.lastFrame()).toContain('修复登录问题');
+    });
   });
 
   it('shows matching slash commands while the user types', async () => {
@@ -174,6 +179,69 @@ describe('App', () => {
     await vi.waitFor(() => expect(resumeSession).toHaveBeenCalledWith('legacy-1'));
     await vi.waitFor(() => {
       expect(app.lastFrame()).not.toContain('恢复对话 · 当前工作区');
+    });
+  });
+
+  it('separates user, assistant, tool, approval and result entries', async () => {
+    const gateReporter = new GateReporter();
+    const app = render(<App
+      runTask={() => scriptedEvents()}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      gateReporter={gateReporter}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取 README');
+    app.stdin.write('\r');
+    gateReporter.report({
+      type: 'gate_finished',
+      tool: 'read_file',
+      outcome: 'execute',
+      source: 'boundary_allow',
+      summary: '无需 AI 审查，确定性边界直接放行',
+    });
+
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('你 ›');
+      expect(frame).toContain('浩宸 ›');
+      expect(frame).toContain('工具 › read_file');
+      expect(frame).toContain('参数  {"path":"README.md"}');
+      expect(frame).toContain('审批 › read_file');
+      expect(frame).toContain('无需 AI 审查');
+      expect(frame).toContain('结果 › read_file');
+    });
+  });
+
+  it('shows a persistent running status until the task finishes', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
+      await blocked;
+      yield {type: 'assistant_text', text: '完成'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取 README');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain(
+        '状态 › 运行中 · 正在调用 read_file · Ctrl+C 中止',
+      );
+    });
+
+    release();
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).not.toContain('状态 › 运行中');
     });
   });
 

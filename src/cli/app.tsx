@@ -10,6 +10,7 @@ import {
   visibleResumeItems,
   type ResumePickerState,
 } from './resume-picker.js';
+import type {GateReporter} from './gate-reporter.js';
 
 export interface SessionSummary {
   id: string;
@@ -46,6 +47,7 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   onModelChange?: (model: string) => void;
   onExit?: () => Promise<void> | void;
   confirmation?: ConfirmationBroker;
+  gateReporter?: GateReporter;
 }
 
 const banner = [
@@ -85,6 +87,20 @@ function entryLabel(item: UiEntry): string {
   }
 }
 
+function entryColor(kind: UiEntry['kind']): 'cyan' | 'white' | 'magenta' | 'green' | 'yellow' | 'red' | 'gray' {
+  switch (kind) {
+    case 'user': return 'cyan';
+    case 'assistant': return 'white';
+    case 'tool': return 'magenta';
+    case 'result':
+    case 'success': return 'green';
+    case 'approval':
+    case 'review': return 'yellow';
+    case 'error': return 'red';
+    case 'status': return 'gray';
+  }
+}
+
 export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<Event>): React.JSX.Element {
   const {exit} = useApp();
   const [state, setState] = useState(initialUiState);
@@ -94,6 +110,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     () => props.confirmation?.getPending(),
   );
   const [resumePicker, setResumePicker] = useState<ResumePickerState | undefined>();
+  const [runtimeStatus, setRuntimeStatus] = useState<string | undefined>();
   const resumePickerRef = useRef<ResumePickerState | undefined>(undefined);
   const inputRef = useRef('');
   const activeController = useRef<AbortController | undefined>(undefined);
@@ -112,6 +129,36 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   useEffect(() => props.confirmation?.subscribe(() => {
     setPendingConfirmation(props.confirmation?.getPending());
   }), [props.confirmation]);
+
+  useEffect(() => props.gateReporter?.subscribe(event => {
+    if (event.type === 'review_started') {
+      if (activeController.current !== undefined) {
+        setRuntimeStatus(`AI 自动审查 ${event.tool}`);
+      }
+      return;
+    }
+    if (event.type === 'classified' && event.action === 'confirm') {
+      if (activeController.current !== undefined) {
+        setRuntimeStatus(`等待确认 ${event.tool}`);
+      }
+      return;
+    }
+    if (event.type === 'gate_finished') {
+      dispatch({
+        type: 'notice',
+        entry: {
+          kind: 'approval',
+          title: event.tool,
+          text: event.summary,
+        },
+      });
+      if (activeController.current !== undefined) {
+        setRuntimeStatus(event.outcome === 'execute'
+          ? `正在执行 ${event.tool}`
+          : `审批拒绝 ${event.tool}`);
+      }
+    }
+  }), [dispatch, props.gateReporter]);
 
   const persistInterrupted = useCallback(async (reason: string) => {
     if (interruptedPersisted.current) return;
@@ -145,9 +192,21 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     abortRequested.current = false;
     interruptedPersisted.current = false;
     dispatch({type: 'status', text: '正在理解任务'});
+    setRuntimeStatus('正在理解任务');
     try {
       for await (const event of props.runTask(task, controller.signal)) {
         if (event.type === 'interrupted') interruptedPersisted.current = true;
+        if (event.type === 'assistant_delta' || event.type === 'assistant_message') {
+          setRuntimeStatus('正在规划');
+        } else if (event.type === 'tool_started') {
+          setRuntimeStatus(`正在调用 ${event.name}`);
+        } else if (event.type === 'tool_finished') {
+          setRuntimeStatus('正在整理结果');
+        } else if (event.type === 'review') {
+          setRuntimeStatus('正在审查操作');
+        } else if (event.type === 'status') {
+          setRuntimeStatus(event.text);
+        }
         dispatch(event);
       }
     } catch (error) {
@@ -158,6 +217,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       }
     } finally {
       if (activeController.current === controller) activeController.current = undefined;
+      setRuntimeStatus(undefined);
       abortRequested.current = false;
       setState(previous => previous.phase === 'idle' || previous.phase === 'error'
         ? previous
@@ -352,9 +412,15 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   return <Box flexDirection="column">
     <Text>{banner}</Text>
     <Box flexDirection="column" marginTop={1}>
-      {state.transcript.map((item, index) => <Text key={`${index}-${item.text}`}>
-        {`${entryLabel(item)} ${item.text}${item.detail === undefined ? '' : `\n参数  ${item.detail}`}`}
-      </Text>)}
+      {state.transcript.map((item, index) => <Box
+        key={`${index}-${item.text}`}
+        flexDirection="column"
+        marginBottom={1}
+      >
+        <Text color={entryColor(item.kind)} bold>{entryLabel(item)}</Text>
+        <Text>{item.text}</Text>
+        {item.detail === undefined ? null : <Text dimColor>{`参数  ${item.detail}`}</Text>}
+      </Box>)}
     </Box>
     {pendingConfirmation === undefined ? null : <Box flexDirection="column" marginTop={1}>
       <Text color="yellow">◉ 确认请求 · {pendingConfirmation.operation.tool}</Text>
@@ -387,6 +453,9 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       })}
       <Text dimColor>↑/↓ 选择 · Enter 恢复 · Esc 取消</Text>
     </Box>}
+    {runtimeStatus === undefined ? null : <Text color="yellow">
+      {`状态 › 运行中 · ${runtimeStatus} · Ctrl+C 中止`}
+    </Text>}
     <Box marginTop={1}>
       <Text color="cyan">浩宸 › </Text><Text>{state.input}</Text>
     </Box>
