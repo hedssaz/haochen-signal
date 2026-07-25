@@ -189,6 +189,32 @@ describe('main agent loop', () => {
     });
   });
 
+  it('streams reasoning separately and preserves it in a tool-call assistant message', async () => {
+    const model = recordingModel([[
+      {type: 'reasoning_delta', text: '检查协议'},
+      {type: 'text_delta', text: '开始回答'},
+      {
+        type: 'tool_call_delta',
+        index: 0,
+        id: 'c1',
+        name: 'read_file',
+        arguments: '{"path":"README.md"}',
+      },
+      {type: 'finish', reason: 'tool_calls', usage: undefined},
+    ], textResponse('已读取 README。')]);
+
+    const events = await collect(runAgentTask(options(model.client)));
+
+    expect(events).toContainEqual({type: 'reasoning_delta', text: '检查协议'});
+    expect(events).toContainEqual({type: 'assistant_delta', text: '开始回答'});
+    expect(model.requests[1]?.messages).toContainEqual({
+      role: 'assistant',
+      reasoning_content: '检查协议',
+      content: '开始回答',
+      tool_calls: expect.any(Array),
+    });
+  });
+
   it('sends only registered tool definitions to the model', async () => {
     const model = recordingModel([textResponse('完成')]);
 

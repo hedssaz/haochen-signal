@@ -12,6 +12,30 @@ describe('uiReducer', () => {
     expect(state.transcript).toEqual([]);
   });
 
+  it('keeps reasoning and assistant deltas in separate live buffers', () => {
+    const withReasoning = uiReducer(initialUiState, {
+      type: 'reasoning_delta',
+      text: '检查协议',
+    });
+    const streaming = uiReducer(withReasoning, {
+      type: 'assistant_delta',
+      text: '开始回答',
+    });
+
+    expect(streaming).toMatchObject({
+      liveReasoning: '检查协议',
+      liveAssistant: '开始回答',
+    });
+    expect(streaming.transcript).toEqual([]);
+
+    const complete = uiReducer(streaming, {
+      type: 'assistant_message',
+      text: '开始回答',
+    });
+
+    expect(complete).toMatchObject({liveReasoning: '', liveAssistant: ''});
+  });
+
   it('maps a read tool event to a stable scan entry', () => {
     const state = uiReducer(initialUiState, {
       type: 'tool_started',

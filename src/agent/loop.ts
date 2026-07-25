@@ -15,6 +15,7 @@ import type {ToolGateEvent, ToolResult} from '../tools/types.js';
 
 export type AgentEvent =
   | {type: 'status'; text: string}
+  | {type: 'reasoning_delta'; text: string}
   | {type: 'assistant_delta'; text: string}
   | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
@@ -348,6 +349,7 @@ export async function* runAgentTask(
       }
       turns += 1;
 
+      let reasoningText = '';
       let assistantText = '';
       let finishReason: string | undefined;
       let finishCount = 0;
@@ -365,7 +367,10 @@ export async function* runAgentTask(
         const next = await nextModelEvent(iterator, options.signal);
         if (next.done) break;
         const event = next.value;
-        if (event.type === 'text_delta') {
+        if (event.type === 'reasoning_delta') {
+          reasoningText += event.text;
+          yield {type: 'reasoning_delta', text: event.text};
+        } else if (event.type === 'text_delta') {
           assistantText += event.text;
           yield {type: 'assistant_delta', text: event.text};
         } else if (event.type === 'tool_call_delta') {
@@ -440,6 +445,7 @@ export async function* runAgentTask(
         if (batch.idsUsable) {
           messages.push({
             role: 'assistant',
+            ...(reasoningText === '' ? {} : {reasoning_content: reasoningText}),
             content: assistantText === '' ? null : assistantText,
             tool_calls: toolCalls,
           });
@@ -492,6 +498,7 @@ export async function* runAgentTask(
       toolProtocolCorrectionPending = false;
       messages.push({
         role: 'assistant',
+        ...(reasoningText === '' ? {} : {reasoning_content: reasoningText}),
         content: assistantText === '' ? null : assistantText,
         tool_calls: toolCalls,
       });

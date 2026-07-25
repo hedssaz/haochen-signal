@@ -32,6 +32,8 @@ export interface UiState {
   phase: UiPhase;
   input: string;
   transcript: UiEntry[];
+  liveReasoning: string;
+  liveAssistant: string;
   activeTool?: {name: string; summary: string};
   error?: string;
 }
@@ -42,6 +44,7 @@ export interface UiState {
  */
 export type AgentUiEvent =
   | {type: 'status'; text: string}
+  | {type: 'reasoning_delta'; text: string}
   | {type: 'assistant_delta'; text: string}
   | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
@@ -60,6 +63,8 @@ export const initialUiState: UiState = {
   phase: 'idle',
   input: '',
   transcript: [],
+  liveReasoning: '',
+  liveAssistant: '',
 };
 
 const toolSummary: Record<string, string> = {
@@ -116,18 +121,34 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
   switch (event.type) {
     case 'status':
       return {...state, phase: 'thinking', error: undefined};
+    case 'reasoning_delta':
+      return {
+        ...state,
+        phase: 'thinking',
+        error: undefined,
+        liveReasoning: state.liveReasoning + event.text,
+      };
     case 'assistant_delta':
-      return {...state, phase: 'thinking', error: undefined};
+      return {
+        ...state,
+        phase: 'thinking',
+        error: undefined,
+        liveAssistant: state.liveAssistant + event.text,
+      };
     case 'assistant_message':
       return append(state, entry('assistant', '浩宸', event.text), {
         phase: 'thinking',
         error: undefined,
+        liveReasoning: '',
+        liveAssistant: '',
       });
     case 'assistant_text':
       return append(state, entry('assistant', '浩宸', event.text), {
         phase: 'idle',
         activeTool: undefined,
         error: undefined,
+        liveReasoning: '',
+        liveAssistant: '',
       });
     case 'tool_started': {
       const summary = describeTool(event.name);
