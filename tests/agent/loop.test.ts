@@ -16,6 +16,7 @@ import type {
 import {classifyOperation} from '../../src/security/boundary.js';
 import {AuditStore} from '../../src/sessions/audit.js';
 import {SessionStore} from '../../src/sessions/store.js';
+import type {SessionEvent} from '../../src/sessions/types.js';
 import {ToolRegistry} from '../../src/tools/registry.js';
 import type {
   ToolDefinitionSpec,
@@ -247,6 +248,61 @@ describe('main agent loop', () => {
     });
   });
 
+  it.each(['length', 'content_filter'])(
+    'rejects incomplete text finished with %s without publishing completed text',
+    async (reason) => {
+      const events = await collect(runAgentTask(options(scriptedModel([[
+        {type: 'text_delta', text: '未完成回答'},
+        {type: 'finish', reason},
+      ]]))));
+
+      expect(events).toContainEqual({
+        type: 'assistant_delta',
+        text: '未完成回答',
+      });
+      expect(events.some(event => event.type === 'assistant_text')).toBe(false);
+      expect(events.at(-1)).toEqual({
+        type: 'error',
+        message: `模型响应未正常完成：${reason}`,
+      });
+      await expect(sessionStore.read('session-1')).resolves.not.toContainEqual(
+        expect.objectContaining({type: 'assistant'}),
+      );
+    },
+  );
+
+  it.each([
+    {
+      name: 'tool calls finished with stop',
+      response: [
+        {
+          type: 'tool_call_delta' as const,
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+        {type: 'finish' as const, reason: 'stop'},
+      ],
+    },
+    {
+      name: 'plain text finished with tool_calls',
+      response: [
+        {type: 'text_delta' as const, text: '错误结束原因'},
+        {type: 'finish' as const, reason: 'tool_calls'},
+      ],
+    },
+  ])('rejects inconsistent completion protocol: $name', async ({response}) => {
+    const events = await collect(runAgentTask(options(scriptedModel([response]))));
+
+    expect(executeRead).not.toHaveBeenCalled();
+    expect(events.some(event => event.type === 'assistant_text')).toBe(false);
+    expect(events.at(-1)).toEqual({
+      type: 'error',
+      message: expect.stringContaining('模型响应协议不一致'),
+    });
+  });
+
   it('allows the model to summarize after using exactly the tool-call budget', async () => {
     const events = await collect(runAgentTask(options(scriptedModel([
       toolResponse([{
@@ -366,6 +422,164 @@ describe('main agent loop', () => {
     });
   });
 
+  it('counts multiple malformed calls in one response as one correction round', async () => {
+    const malformed: ModelEvent[] = [
+      {
+        type: 'tool_call_delta',
+        index: 0,
+        id: 'call_bad_1',
+        name: 'read_file',
+        arguments: '{',
+      },
+      {
+        type: 'tool_call_delta',
+        index: 1,
+        id: 'call_bad_2',
+        name: 'read_file',
+        arguments: '{"path":',
+      },
+      {type: 'finish', reason: 'tool_calls'},
+    ];
+    const model = recordingModel([
+      malformed,
+      toolResponse([
+        {id: 'call_fixed_1', name: 'read_file', arguments: {path: 'README.md'}},
+        {id: 'call_fixed_2', name: 'read_file', arguments: {path: 'README.md'}},
+      ]),
+      textResponse('整轮参数修正后完成。'),
+    ]);
+
+    const events = await collect(runAgentTask(options(model.client)));
+
+    expect(model.requests).toHaveLength(3);
+    expect(executeRead).toHaveBeenCalledTimes(2);
+    expect(events.at(-1)).toEqual({
+      type: 'assistant_text',
+      text: '整轮参数修正后完成。',
+    });
+  });
+
+  it('validates all arguments before executing any call in a batch', async () => {
+    const mixedBatch: ModelEvent[] = [
+      {
+        type: 'tool_call_delta',
+        index: 0,
+        id: 'call_valid',
+        name: 'read_file',
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: 'tool_call_delta',
+        index: 1,
+        id: 'call_bad',
+        name: 'read_file',
+        arguments: '{',
+      },
+      {type: 'finish', reason: 'tool_calls'},
+    ];
+
+    const events = await collect(runAgentTask(options(scriptedModel([
+      mixedBatch,
+      textResponse('放弃整批后重新规划。'),
+    ]))));
+
+    expect(executeRead).not.toHaveBeenCalled();
+    expect(events).toContainEqual({
+      type: 'assistant_text',
+      text: '放弃整批后重新规划。',
+    });
+  });
+
+  it('resets the malformed-response correction budget after a valid tool round', async () => {
+    const malformed = (id: string): ModelEvent[] => [
+      {
+        type: 'tool_call_delta',
+        index: 0,
+        id,
+        name: 'read_file',
+        arguments: '{',
+      },
+      {type: 'finish', reason: 'tool_calls'},
+    ];
+    const model = recordingModel([
+      malformed('call_bad_1'),
+      toolResponse([{
+        id: 'call_fixed_1',
+        name: 'read_file',
+        arguments: {path: 'README.md'},
+      }]),
+      malformed('call_bad_2'),
+      toolResponse([{
+        id: 'call_fixed_2',
+        name: 'read_file',
+        arguments: {path: 'README.md'},
+      }]),
+      textResponse('两次独立修正后完成。'),
+    ]);
+
+    const events = await collect(runAgentTask(options(model.client)));
+
+    expect(model.requests).toHaveLength(5);
+    expect(executeRead).toHaveBeenCalledTimes(2);
+    expect(events.at(-1)).toEqual({
+      type: 'assistant_text',
+      text: '两次独立修正后完成。',
+    });
+  });
+
+  it.each([
+    {
+      name: 'missing id',
+      response: [
+        {
+          type: 'tool_call_delta' as const,
+          index: 0,
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+        {type: 'finish' as const, reason: 'tool_calls'},
+      ],
+    },
+    {
+      name: 'duplicate ids',
+      response: [
+        {
+          type: 'tool_call_delta' as const,
+          index: 0,
+          id: 'call_duplicate',
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+        {
+          type: 'tool_call_delta' as const,
+          index: 1,
+          id: 'call_duplicate',
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+        {type: 'finish' as const, reason: 'tool_calls'},
+      ],
+    },
+  ])('rejects $name before executing any tool', async ({response}) => {
+    const events = await collect(runAgentTask(options(scriptedModel([
+      response,
+      textResponse('协议修正后重新规划。'),
+    ]))));
+
+    expect(executeRead).not.toHaveBeenCalled();
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_finished',
+      result: expect.objectContaining({
+        ok: false,
+        error: expect.objectContaining({code: 'INVALID_TOOL_CALL_PROTOCOL'}),
+      }),
+    }));
+    expect(events.at(-1)).toEqual({
+      type: 'assistant_text',
+      text: '协议修正后重新规划。',
+    });
+  });
+
   it('bounds cancellation even when the model stream ignores AbortSignal', async () => {
     const controller = new AbortController();
     const model: ModelClient = {
@@ -436,6 +650,47 @@ describe('main agent loop', () => {
     await expect(sessionStore.read('session-1')).resolves.toContainEqual(
       expect.objectContaining({type: 'interrupted', reason: '停止工具'}),
     );
+  });
+
+  it('serializes an interrupted event after an already-started session append', async () => {
+    const controller = new AbortController();
+    const persistedTypes: SessionEvent['type'][] = [];
+    let releaseAssistantAppend: (() => void) | undefined;
+    const assistantAppendStarted = new Promise<void>((resolveStarted) => {
+      releaseAssistantAppend = undefined;
+      const append = async (_id: string, event: SessionEvent): Promise<void> => {
+        if (event.type === 'assistant') {
+          resolveStarted();
+          await new Promise<void>((resolveAppend) => {
+            releaseAssistantAppend = resolveAppend;
+          });
+        }
+        persistedTypes.push(event.type);
+      };
+      sessionStore = {append, read: async () => []} as unknown as SessionStore;
+    });
+    const running = collect(runAgentTask(options(
+      scriptedModel([textResponse('已生成但尚未写完')]),
+      {
+        signal: controller.signal,
+        session: {id: 'serialized-session', store: sessionStore},
+      },
+    )));
+
+    await assistantAppendStarted;
+    controller.abort('写入期间取消');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(persistedTypes).toEqual(['user']);
+
+    releaseAssistantAppend?.();
+    const events = await running;
+
+    expect(persistedTypes).toEqual(['user', 'assistant', 'interrupted']);
+    expect(events.some(event => event.type === 'assistant_text')).toBe(false);
+    expect(events.at(-1)).toEqual({
+      type: 'interrupted',
+      reason: '写入期间取消',
+    });
   });
 });
 

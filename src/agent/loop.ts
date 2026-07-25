@@ -56,6 +56,24 @@ interface PendingToolCall {
   arguments: string;
 }
 
+interface PreparedToolCall {
+  toolCall: AssistantToolCall;
+  input: unknown;
+}
+
+interface InvalidToolCall {
+  toolCall: AssistantToolCall;
+  input: unknown;
+  result: ToolResult;
+}
+
+interface ToolBatchValidation {
+  prepared: PreparedToolCall[];
+  invalid: InvalidToolCall[];
+  idsUsable: boolean;
+  onlyInvalidJson: boolean;
+}
+
 function serializeResult(result: ToolResult): string {
   try {
     return JSON.stringify(result);
@@ -142,6 +160,28 @@ function invalidArgumentsResult(): ToolResult {
   };
 }
 
+function invalidToolCallProtocolResult(message: string): ToolResult {
+  return {
+    ok: false,
+    summary: '模型工具调用协议无效',
+    error: {
+      code: 'INVALID_TOOL_CALL_PROTOCOL',
+      message,
+    },
+  };
+}
+
+function rejectedBatchResult(): ToolResult {
+  return {
+    ok: false,
+    summary: '同批工具调用包含协议错误，本调用未执行',
+    error: {
+      code: 'TOOL_BATCH_REJECTED',
+      message: '请修正整批工具调用后重试一次',
+    },
+  };
+}
+
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return String(redactValue(message));
@@ -157,24 +197,88 @@ async function appendInterrupted(
   session: AgentSession,
   reason: string,
 ): Promise<void> {
-  const append = session.store.append(session.id, {
-    type: 'interrupted',
-    at: Date.now(),
-    reason,
-  });
-  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      append,
-      new Promise<void>((resolve) => {
-        timeout = setTimeout(resolve, 100);
-      }),
-    ]);
+    await session.store.append(session.id, {
+      type: 'interrupted',
+      at: Date.now(),
+      reason,
+    });
   } catch {
     // The interruption event is still emitted even if persistence is unavailable.
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
   }
+}
+
+async function appendSessionEvent(
+  session: AgentSession,
+  event: SessionEvent,
+  signal: AbortSignal,
+): Promise<void> {
+  throwIfAborted(signal);
+  await session.store.append(session.id, event);
+  throwIfAborted(signal);
+}
+
+function validateToolBatch(
+  toolCalls: readonly AssistantToolCall[],
+): ToolBatchValidation {
+  const prepared: PreparedToolCall[] = [];
+  const invalidByCall = new Map<AssistantToolCall, ToolResult>();
+  const idCounts = new Map<string, number>();
+
+  for (const toolCall of toolCalls) {
+    idCounts.set(toolCall.id, (idCounts.get(toolCall.id) ?? 0) + 1);
+  }
+
+  let idsUsable = true;
+  let onlyInvalidJson = true;
+  for (const toolCall of toolCalls) {
+    let protocolMessage: string | undefined;
+    if (toolCall.id.trim() === '') {
+      protocolMessage = '工具调用 id 不能为空';
+    } else if ((idCounts.get(toolCall.id) ?? 0) > 1) {
+      protocolMessage = '同一响应中的工具调用 id 必须唯一';
+    } else if (toolCall.function.name.trim() === '') {
+      protocolMessage = '工具调用名称不能为空';
+    }
+
+    if (protocolMessage !== undefined) {
+      idsUsable = false;
+      onlyInvalidJson = false;
+      invalidByCall.set(
+        toolCall,
+        invalidToolCallProtocolResult(protocolMessage),
+      );
+      continue;
+    }
+
+    try {
+      prepared.push({
+        toolCall,
+        input: JSON.parse(toolCall.function.arguments),
+      });
+    } catch {
+      invalidByCall.set(toolCall, invalidArgumentsResult());
+    }
+  }
+
+  const parsedInputs = new Map(
+    prepared.map(entry => [entry.toolCall, entry.input]),
+  );
+  const invalid = invalidByCall.size === 0
+    ? []
+    : toolCalls.map((toolCall): InvalidToolCall => ({
+      toolCall,
+      input: parsedInputs.get(toolCall)
+        ?? {arguments: toolCall.function.arguments},
+      result: invalidByCall.get(toolCall) ?? rejectedBatchResult(),
+    }));
+
+  return {
+    prepared,
+    invalid,
+    idsUsable,
+    onlyInvalidJson,
+  };
 }
 
 export async function* runAgentTask(
@@ -190,7 +294,7 @@ export async function* runAgentTask(
     const maxToolCalls = normalizeLimit(options.limits.maxToolCalls);
     let turns = 0;
     let toolCallCount = 0;
-    let invalidJsonCount = 0;
+    let toolProtocolCorrectionPending = false;
 
     let history: SessionEvent[];
     try {
@@ -205,11 +309,11 @@ export async function* runAgentTask(
         throw error;
       }
     }
-    await abortableCall(() => options.session.store.append(options.session.id, {
+    await appendSessionEvent(options.session, {
       type: 'user',
       at: Date.now(),
       text: options.task,
-    }), options.signal);
+    }, options.signal);
     const messages = await abortableCall(() => buildContext({
       systemPrompt: buildAgentSystemPrompt({
         workspace,
@@ -229,6 +333,8 @@ export async function* runAgentTask(
       turns += 1;
 
       let assistantText = '';
+      let finishReason: string | undefined;
+      let finishCount = 0;
       const calls = new Map<number, PendingToolCall>();
       const callOrder: number[] = [];
       throwIfAborted(options.signal);
@@ -261,19 +367,47 @@ export async function* runAgentTask(
           call.id += event.id ?? '';
           call.name += event.name ?? '';
           call.arguments += event.arguments ?? '';
+        } else if (event.type === 'finish') {
+          finishReason = event.reason;
+          finishCount += 1;
         }
       }
 
+      const hasToolCalls = callOrder.length > 0;
+      if (finishCount !== 1 || finishReason === undefined) {
+        yield {
+          type: 'error',
+          message: '模型响应协议不一致：必须且只能包含一个 finish 事件',
+        };
+        return;
+      }
+      if (!hasToolCalls && finishReason !== 'stop') {
+        yield {
+          type: 'error',
+          message: finishReason === 'length' || finishReason === 'content_filter'
+            ? `模型响应未正常完成：${finishReason}`
+            : `模型响应协议不一致：纯文本响应以 ${finishReason} 结束`,
+        };
+        return;
+      }
+      if (hasToolCalls && finishReason !== 'tool_calls') {
+        yield {
+          type: 'error',
+          message: `模型响应协议不一致：工具调用响应以 ${finishReason} 结束`,
+        };
+        return;
+      }
+
       if (assistantText !== '') {
-        await abortableCall(() => options.session.store.append(options.session.id, {
+        await appendSessionEvent(options.session, {
           type: 'assistant',
           at: Date.now(),
           text: assistantText,
-        }), options.signal);
+        }, options.signal);
         yield {type: 'assistant_text', text: assistantText};
       }
 
-      if (callOrder.length === 0) return;
+      if (!hasToolCalls) return;
 
       const toolCalls: AssistantToolCall[] = callOrder.map((index) => {
         const call = calls.get(index)!;
@@ -283,50 +417,71 @@ export async function* runAgentTask(
           function: {name: call.name, arguments: call.arguments},
         };
       });
+      const batch = validateToolBatch(toolCalls);
+      if (batch.invalid.length > 0) {
+        if (batch.idsUsable) {
+          messages.push({
+            role: 'assistant',
+            content: assistantText === '' ? null : assistantText,
+            tool_calls: toolCalls,
+          });
+        }
+
+        for (const invalidCall of batch.invalid) {
+          yield {
+            type: 'tool_finished',
+            name: invalidCall.toolCall.function.name,
+            result: invalidCall.result,
+          };
+          await appendSessionEvent(options.session, {
+            type: 'tool',
+            at: Date.now(),
+            tool: invalidCall.toolCall.function.name,
+            input: invalidCall.input,
+            result: invalidCall.result,
+          }, options.signal);
+          if (batch.idsUsable) {
+            messages.push({
+              role: 'tool',
+              tool_call_id: invalidCall.toolCall.id,
+              content: serializeResult(invalidCall.result),
+            });
+          }
+        }
+
+        if (!batch.idsUsable) {
+          messages.push({
+            role: 'system',
+            content: [
+              '上一轮工具调用协议无效，整批均未执行。',
+              '请确保每个工具调用都有非空且唯一的 id、非空名称和合法 JSON 参数，然后仅修正一次。',
+            ].join('\n'),
+          });
+        }
+        if (toolProtocolCorrectionPending) {
+          yield {
+            type: 'error',
+            message: batch.onlyInvalidJson
+              ? '模型连续两次提供了无效的工具调用 JSON'
+              : '模型连续两次提供了无效的工具调用协议',
+          };
+          return;
+        }
+        toolProtocolCorrectionPending = true;
+        continue;
+      }
+
+      toolProtocolCorrectionPending = false;
       messages.push({
         role: 'assistant',
         content: assistantText === '' ? null : assistantText,
         tool_calls: toolCalls,
       });
 
-      for (const toolCall of toolCalls) {
+      for (const {toolCall, input} of batch.prepared) {
         if (toolCallCount >= maxToolCalls) {
           yield {type: 'limit_reached', limit: 'tools'};
           return;
-        }
-
-        let input: unknown;
-        try {
-          input = JSON.parse(toolCall.function.arguments);
-        } catch {
-          invalidJsonCount += 1;
-          const result = invalidArgumentsResult();
-          const invalidInput = {arguments: toolCall.function.arguments};
-          yield {
-            type: 'tool_finished',
-            name: toolCall.function.name,
-            result,
-          };
-          await abortableCall(() => options.session.store.append(options.session.id, {
-            type: 'tool',
-            at: Date.now(),
-            tool: toolCall.function.name,
-            input: invalidInput,
-            result,
-          }), options.signal);
-          messages.push({
-            role: 'tool',
-            tool_call_id: toolCall.id,
-            content: serializeResult(result),
-          });
-          if (invalidJsonCount > 1) {
-            yield {
-              type: 'error',
-              message: '模型连续两次提供了无效的工具调用 JSON',
-            };
-            return;
-          }
-          continue;
         }
 
         toolCallCount += 1;
@@ -352,13 +507,13 @@ export async function* runAgentTask(
           name: toolCall.function.name,
           result,
         };
-        await abortableCall(() => options.session.store.append(options.session.id, {
+        await appendSessionEvent(options.session, {
           type: 'tool',
           at: Date.now(),
           tool: toolCall.function.name,
           input,
           result,
-        }), options.signal);
+        }, options.signal);
         const toolMessage: ModelMessage = {
           role: 'tool',
           tool_call_id: toolCall.id,
