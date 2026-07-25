@@ -143,6 +143,40 @@ describe('App', () => {
     });
   });
 
+  it('opens a workspace resume picker and restores the selected conversation', async () => {
+    const resumeSession = vi.fn(async (id: string) => ({id, message: `已恢复 ${id}`}));
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      workspaceId="workspace-a"
+      sessionId="signal-1"
+      model="wolf-2"
+      listSessions={vi.fn(async () => [
+        {id: 'current-1', updatedAt: 30, preview: '当前项目', workspaceId: 'workspace-a'},
+        {id: 'legacy-1', updatedAt: 20, preview: '旧版会话'},
+        {id: 'other-1', updatedAt: 40, preview: '其他项目', workspaceId: 'workspace-b'},
+      ])}
+      resumeSession={resumeSession}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/resume');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('恢复对话 · 当前工作区');
+      expect(app.lastFrame()).toContain('当前项目');
+      expect(app.lastFrame()).toContain('工作区未知');
+      expect(app.lastFrame()).not.toContain('其他项目');
+    });
+
+    app.stdin.write('\u001B[B');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(resumeSession).toHaveBeenCalledWith('legacy-1'));
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).not.toContain('恢复对话 · 当前工作区');
+    });
+  });
+
   it('aborts once and exits after the second Ctrl+C while a task runs', async () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });

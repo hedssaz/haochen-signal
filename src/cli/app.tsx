@@ -4,10 +4,18 @@ import {parseSlashCommand, suggestSlashCommands} from './commands.js';
 import {initialUiState, uiReducer, type AgentUiEvent, type UiEntry} from './reducer.js';
 import type {ToolResult} from '../tools/types.js';
 import type {ConfirmationBroker, PendingConfirmation} from './confirmation.js';
+import {
+  createResumePicker,
+  moveResumeSelection,
+  visibleResumeItems,
+  type ResumePickerState,
+} from './resume-picker.js';
 
 export interface SessionSummary {
   id: string;
-  updatedAt?: number;
+  updatedAt: number;
+  preview: string;
+  workspaceId?: string;
 }
 
 export interface CompactResult {
@@ -23,6 +31,7 @@ export interface ResumeResult {
 export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   runTask: (task: string, signal: AbortSignal) => AsyncIterable<Event>;
   workspace: string;
+  workspaceId?: string;
   sessionId: string;
   model: string;
   contextTokens?: number;
@@ -84,6 +93,8 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | undefined>(
     () => props.confirmation?.getPending(),
   );
+  const [resumePicker, setResumePicker] = useState<ResumePickerState | undefined>();
+  const resumePickerRef = useRef<ResumePickerState | undefined>(undefined);
   const inputRef = useRef('');
   const activeController = useRef<AbortController | undefined>(undefined);
   const abortRequested = useRef(false);
@@ -222,9 +233,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       case 'resume': {
         if (command.args.length === 0) {
           const sessions = await props.listSessions?.() ?? [];
-          appendNotice('◆', sessions.length === 0
-            ? '没有可恢复的历史会话。'
-            : `最近会话：\n${sessions.slice(0, 10).map(item => item.id).join('\n')}`);
+          const picker = createResumePicker(sessions, props.workspaceId ?? '');
+          if (picker.items.length === 0) {
+            appendNotice('◆', '当前工作区没有可恢复的会话。');
+          } else {
+            resumePickerRef.current = picker;
+            setResumePicker(picker);
+          }
           return;
         }
         if (props.resumeSession === undefined) {
@@ -266,6 +281,43 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       else if (input === 'd' || key.escape) props.confirmation?.respond('deny');
       return;
     }
+    if (resumePicker !== undefined) {
+      if (key.escape) {
+        resumePickerRef.current = undefined;
+        setResumePicker(undefined);
+        return;
+      }
+      if (key.upArrow || key.downArrow) {
+        const currentPicker = resumePickerRef.current ?? resumePicker;
+        const next = moveResumeSelection(
+          currentPicker,
+          key.upArrow ? -1 : 1,
+          8,
+        );
+        resumePickerRef.current = next;
+        setResumePicker(next);
+        return;
+      }
+      if (key.return) {
+        const currentPicker = resumePickerRef.current ?? resumePicker;
+        const selected = currentPicker.items[currentPicker.selectedIndex]?.session;
+        if (selected !== undefined && props.resumeSession !== undefined) {
+          void (async () => {
+            try {
+              const restored = await props.resumeSession!(selected.id);
+              setSessionId(restored.id);
+              resumePickerRef.current = undefined;
+              setResumePicker(undefined);
+              appendNotice('✓', restored.message);
+            } catch (error) {
+              appendNotice('✗', error instanceof Error ? error.message : '恢复会话失败');
+            }
+          })();
+        }
+        return;
+      }
+      return;
+    }
     if (key.tab) {
       const suggestion = suggestSlashCommands(inputRef.current)[0];
       if (suggestion !== undefined) {
@@ -293,6 +345,9 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   });
 
   const commandSuggestions = suggestSlashCommands(state.input);
+  const resumeItems = resumePicker === undefined
+    ? []
+    : visibleResumeItems(resumePicker, 8);
 
   return <Box flexDirection="column">
     <Text>{banner}</Text>
@@ -305,6 +360,32 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       <Text color="yellow">◉ 确认请求 · {pendingConfirmation.operation.tool}</Text>
       <Text>{`风险：${pendingConfirmation.boundary.risk}\n范围：${pendingConfirmation.boundary.normalizedScope.join(', ')}\n${pendingConfirmation.boundary.reasons.join('；')}`}</Text>
       <Text color="yellow">a 仅本次允许 · s 本会话允许 · d 拒绝</Text>
+    </Box>}
+    {resumePicker === undefined ? null : <Box
+      borderStyle="round"
+      borderColor="cyan"
+      flexDirection="column"
+      marginTop={1}
+      paddingX={1}
+    >
+      <Text color="cyan">恢复对话 · 当前工作区</Text>
+      {resumeItems.map((item, visibleIndex) => {
+        const index = resumePicker.windowStart + visibleIndex;
+        const previous = resumeItems[visibleIndex - 1];
+        const showGroup = previous === undefined || previous.group !== item.group;
+        const date = item.session.updatedAt <= 0
+          ? '-- --'
+          : new Date(item.session.updatedAt).toISOString().slice(5, 16).replace('T', ' ');
+        return <React.Fragment key={item.session.id}>
+          {showGroup ? <Text dimColor>
+            {item.group === 'current' ? '当前工作区' : '工作区未知'}
+          </Text> : null}
+          <Text color={index === resumePicker.selectedIndex ? 'cyan' : undefined}>
+            {`${index === resumePicker.selectedIndex ? '›' : ' '} ${date}  ${item.session.preview} · ${item.session.id.slice(0, 8)}`}
+          </Text>
+        </React.Fragment>;
+      })}
+      <Text dimColor>↑/↓ 选择 · Enter 恢复 · Esc 取消</Text>
     </Box>}
     <Box marginTop={1}>
       <Text color="cyan">浩宸 › </Text><Text>{state.input}</Text>

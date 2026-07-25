@@ -87,6 +87,7 @@ async function main(): Promise<void> {
   clearTerminalScreen(process.stdout);
   const instance = render(<App
     workspace={workspace} sessionId={sessionId} model={activeConfig.model} contextTokens={activeConfig.contextWindow} sessionGrants={grants}
+    workspaceId={currentWorkspaceId}
     runTask={(task, signal) => {
       const taskSessionId = sessionId;
       let interruptedWrite: Promise<void> | undefined;
