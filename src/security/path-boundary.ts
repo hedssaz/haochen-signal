@@ -14,6 +14,13 @@ export interface ResolvedPath {
   relative: string;
 }
 
+export function toPortableRelativePath(
+  path: string,
+  platformSeparator = sep,
+): string {
+  return path.replaceAll(platformSeparator, '/');
+}
+
 function isInside(root: string, candidate: string): boolean {
   const fromRoot = relative(root, candidate);
   return !isAbsolute(fromRoot)

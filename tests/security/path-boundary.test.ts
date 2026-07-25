@@ -9,7 +9,10 @@ import {
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
-import {resolveWorkspacePath} from '../../src/security/path-boundary.js';
+import {
+  resolveWorkspacePath,
+  toPortableRelativePath,
+} from '../../src/security/path-boundary.js';
 
 describe('resolveWorkspacePath', () => {
   let tempDirectory: string;
@@ -46,12 +49,23 @@ describe('resolveWorkspacePath', () => {
       resolveWorkspacePath(root, 'src/new.ts', 'new'),
     ).resolves.toMatchObject({
       absolute: join(realRoot, 'src/new.ts'),
-      relative: 'src/new.ts',
+      relative: join('src', 'new.ts'),
     });
 
     await symlink(tempDirectory, join(root, 'outside-parent'));
     await expect(
       resolveWorkspacePath(root, 'outside-parent/new.ts', 'new'),
     ).rejects.toThrow('符号链接');
+  });
+});
+
+describe('toPortableRelativePath', () => {
+  it('normalizes only the active platform separator', () => {
+    expect(toPortableRelativePath('src\\nested\\new.ts', '\\')).toBe(
+      'src/nested/new.ts',
+    );
+    expect(toPortableRelativePath('src\\literal.ts', '/')).toBe(
+      'src\\literal.ts',
+    );
   });
 });

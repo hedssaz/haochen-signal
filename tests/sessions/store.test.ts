@@ -22,10 +22,11 @@ it('creates unique UUID session IDs', () => {
 });
 
 it('keeps safe session IDs inside the store and rejects unsafe IDs', () => {
-  const store = new SessionStore('/tmp/haochen-session-root');
+  const root = join(tmpdir(), 'haochen-session-root');
+  const store = new SessionStore(root);
 
   expect(store.pathFor('session-1')).toBe(
-    '/tmp/haochen-session-root/session-1.jsonl',
+    join(root, 'session-1.jsonl'),
   );
   for (const id of ['', '.', '..', '../escape', 'nested/id', 'nested\\id', '/tmp/escape']) {
     expect(() => store.pathFor(id)).toThrow(/invalid session id/i);

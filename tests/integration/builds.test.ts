@@ -21,6 +21,12 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }
 
+function npmCliArguments(args: string[]): string[] {
+  const npmExecPath = process.env.npm_execpath;
+  if (!npmExecPath) throw new Error('npm_execpath is unavailable');
+  return [npmExecPath, ...args];
+}
+
 describe.sequential('发布构建', () => {
   beforeAll(async () => {
     npmCache = await mkdtemp(join(tmpdir(), 'haochen-npm-cache-'));
@@ -31,12 +37,15 @@ describe.sequential('发布构建', () => {
     await rm(npmCache, {recursive: true, force: true});
   });
 
-  it('生成两个权限为 0755 的可执行构建', async () => {
-    for (const file of buildFiles) {
-      const fileStat = await stat(new URL(file, root));
-      expect(fileStat.mode & 0o777, file).toBe(0o755);
-    }
-  });
+  it.skipIf(process.platform === 'win32')(
+    '生成两个权限为 0755 的可执行构建',
+    async () => {
+      for (const file of buildFiles) {
+        const fileStat = await stat(new URL(file, root));
+        expect(fileStat.mode & 0o777, file).toBe(0o755);
+      }
+    },
+  );
 
   it('重新构建时清除 dist 中的过期文件', async () => {
     const staleFile = new URL('dist/stale-build.txt', root);
@@ -50,7 +59,7 @@ describe.sequential('发布构建', () => {
   it('两个构建都只有一个位于首行的 shebang', async () => {
     for (const file of buildFiles) {
       const source = await readFile(new URL(file, root), 'utf8');
-      expect(source.split('\n')[0], file).toBe('#!/usr/bin/env node');
+      expect(source.split(/\r?\n/u)[0], file).toBe('#!/usr/bin/env node');
       expect(source.match(/^#!/gm), file).toHaveLength(1);
     }
   });
@@ -103,8 +112,8 @@ describe.sequential('发布构建', () => {
 
   it('npm 发布包只包含白名单文件', async () => {
     const {stdout, stderr} = await execFileAsync(
-      'npm',
-      ['pack', '--dry-run', '--json', '--silent'],
+      process.execPath,
+      npmCliArguments(['pack', '--dry-run', '--json', '--silent']),
       {
         cwd: root,
         encoding: 'utf8',

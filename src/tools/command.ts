@@ -13,6 +13,7 @@ import type {Writable} from 'node:stream';
 import {finished} from 'node:stream/promises';
 import {setTimeout as delay} from 'node:timers/promises';
 import {TextDecoder} from 'node:util';
+import crossSpawn from 'cross-spawn';
 import {resolveWorkspacePath} from '../security/path-boundary.js';
 import type {ToolContext, ToolResult} from './types.js';
 
@@ -783,7 +784,7 @@ export async function runCommand(
   let child: ChildProcess;
 
   try {
-    child = spawn(input.command, input.args ?? [], {
+    child = crossSpawn(input.command, input.args ?? [], {
       cwd,
       shell: input.shell ?? false,
       detached: process.platform !== 'win32',

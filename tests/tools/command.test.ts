@@ -19,12 +19,30 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {
   createWindowsProcessController,
   runCommand,
+  type ProcessController,
   type WindowsProcessRecord,
   type WindowsProcessRunner,
 } from '../../src/tools/command.js';
 import type {ToolContext} from '../../src/tools/types.js';
 
 const TEST_TIMEOUT_MS = 10_000;
+const ROOT_PROCESS_CONTROLLER: ProcessController = {
+  terminateTree(child) {
+    child.kill('SIGTERM');
+  },
+  forceKillTree(child) {
+    child.kill('SIGKILL');
+  },
+  treeExists() {
+    return false;
+  },
+  async waitForTreeExit() {},
+};
+
+async function expectPosixMode(path: string, mode: number): Promise<void> {
+  if (process.platform === 'win32') return;
+  expect((await stat(path)).mode & 0o777).toBe(mode);
+}
 
 async function waitForFile(path: string): Promise<void> {
   const deadline = Date.now() + 5_000;
@@ -200,6 +218,7 @@ describe('foreground command tool', () => {
         ],
         maxOutputBytes: 1_024,
       }, context, AbortSignal.timeout(TEST_TIMEOUT_MS), {
+        processController: ROOT_PROCESS_CONTROLLER,
         async createOutputLog(path) {
           logPath = path;
           await mkdir(dirname(path), {recursive: true});
@@ -234,6 +253,7 @@ describe('foreground command tool', () => {
       args: ['-e', 'process.stdout.write("secret-output")'],
       maxOutputBytes: 1,
     }, context, AbortSignal.timeout(TEST_TIMEOUT_MS), {
+      processController: ROOT_PROCESS_CONTROLLER,
       async createOutputLog(path) {
         logPath = path;
         await mkdir(dirname(path), {recursive: true});
@@ -263,7 +283,7 @@ describe('foreground command tool', () => {
     expect(closedBeforeRemove).toEqual([true, true, true]);
     expect(logPath).toBeDefined();
     await expect(readFile(logPath ?? '', 'utf8')).resolves.toBe('');
-    expect((await stat(logPath ?? '')).mode & 0o777).toBe(0o600);
+    await expectPosixMode(logPath ?? '', 0o600);
   });
 
   it('reports sanitized cleanup status when output-log creation fails early', async () => {
@@ -289,7 +309,7 @@ describe('foreground command tool', () => {
     });
     expect(JSON.stringify(result)).not.toContain(logPath);
     await expect(readFile(logPath ?? '', 'utf8')).resolves.toBe('');
-    expect((await stat(logPath ?? '')).mode & 0o777).toBe(0o600);
+    await expectPosixMode(logPath ?? '', 0o600);
   });
 
   it('cancels the bounded output-log close timer after normal completion', async () => {
@@ -318,41 +338,44 @@ describe('foreground command tool', () => {
     }
   });
 
-  it('cancels with SIGTERM and waits for graceful process cleanup', async () => {
-    const pidPath = join(workspace, 'cancel.pid');
-    const termPath = join(workspace, 'cancel.term');
-    const controller = new AbortController();
-    const command = runCommand({
-      command: process.execPath,
-      args: [
-        '-e',
-        [
-          'const fs = require("node:fs");',
-          'fs.writeFileSync(process.argv[1], String(process.pid));',
-          'process.on("SIGTERM", () => {',
-          '  fs.writeFileSync(process.argv[2], "term");',
-          '  process.exit(0);',
-          '});',
-          'setInterval(() => {}, 1000);',
-        ].join('\n'),
-        pidPath,
-        termPath,
-      ],
-    }, context, controller.signal);
+  it.skipIf(process.platform === 'win32')(
+    'cancels with SIGTERM and waits for graceful process cleanup',
+    async () => {
+      const pidPath = join(workspace, 'cancel.pid');
+      const termPath = join(workspace, 'cancel.term');
+      const controller = new AbortController();
+      const command = runCommand({
+        command: process.execPath,
+        args: [
+          '-e',
+          [
+            'const fs = require("node:fs");',
+            'fs.writeFileSync(process.argv[1], String(process.pid));',
+            'process.on("SIGTERM", () => {',
+            '  fs.writeFileSync(process.argv[2], "term");',
+            '  process.exit(0);',
+            '});',
+            'setInterval(() => {}, 1000);',
+          ].join('\n'),
+          pidPath,
+          termPath,
+        ],
+      }, context, controller.signal);
 
-    await waitForFile(pidPath);
-    const pid = Number(await readFile(pidPath, 'utf8'));
-    controller.abort();
-    const result = await command;
+      await waitForFile(pidPath);
+      const pid = Number(await readFile(pidPath, 'utf8'));
+      controller.abort();
+      const result = await command;
 
-    expect(result).toMatchObject({
-      ok: false,
-      error: {code: 'ABORTED'},
-      data: {exitCode: 0},
-    });
-    await expect(readFile(termPath, 'utf8')).resolves.toBe('term');
-    await waitForProcessExit(pid);
-  });
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'ABORTED'},
+        data: {exitCode: 0},
+      });
+      await expect(readFile(termPath, 'utf8')).resolves.toBe('term');
+      await waitForProcessExit(pid);
+    },
+  );
 
   it('keeps a Windows tree force-kill timer after the parent closes', async () => {
     const readyPath = join(workspace, 'windows-controller.ready');

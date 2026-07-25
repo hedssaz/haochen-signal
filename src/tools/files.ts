@@ -12,6 +12,7 @@ import {
 import {basename, dirname, join, relative, sep} from 'node:path';
 import {
   resolveWorkspacePath,
+  toPortableRelativePath,
   type ResolvedPath,
 } from '../security/path-boundary.js';
 import {redactValue} from '../security/redact.js';
@@ -306,7 +307,16 @@ function assertNotAborted(signal: AbortSignal): void {
 }
 
 function toWorkspacePath(path: string): string {
-  return path.split(sep).join('/');
+  return toPortableRelativePath(path);
+}
+
+export function hasExcludedDirectory(
+  path: string,
+  platformSeparator = sep,
+): boolean {
+  return path.split(platformSeparator).some(
+    segment => EXCLUDED_DIRECTORIES.has(segment),
+  );
 }
 
 function comparePaths(left: string, right: string): number {
@@ -353,9 +363,7 @@ async function collectRegularFiles(
     inputPath,
     'existing',
   );
-  if (root.relative.split(sep).some(
-    (segment) => EXCLUDED_DIRECTORIES.has(segment),
-  )) {
+  if (hasExcludedDirectory(root.relative)) {
     return {files: [], truncated: false};
   }
   const rootStat = await lstat(root.absolute);
@@ -841,7 +849,7 @@ export async function readFileTool(
     );
     if (totalLines === 0) {
       return success(
-        `读取 ${resolved.relative}：空文件`,
+        `读取 ${toWorkspacePath(resolved.relative)}：空文件`,
         {
           path: toWorkspacePath(resolved.relative),
           content: '',
@@ -864,7 +872,9 @@ export async function readFileTool(
     const truncated = startLine > 1 || endLine < totalLines;
 
     return success(
-      `读取 ${resolved.relative} 第 ${startLine}-${endLine} 行`,
+      `读取 ${
+        toWorkspacePath(resolved.relative)
+      } 第 ${startLine}-${endLine} 行`,
       {
         path: toWorkspacePath(resolved.relative),
         content,
@@ -924,7 +934,10 @@ async function validateAdd(
   );
   try {
     await lstat(resolved.absolute);
-    throw new FileToolError('FILE_EXISTS', `文件已存在：${resolved.relative}`);
+    throw new FileToolError(
+      'FILE_EXISTS',
+      `文件已存在：${toWorkspacePath(resolved.relative)}`,
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
@@ -966,7 +979,9 @@ async function validateUpdate(
   if (countOccurrences(text, expected) !== 1) {
     throw new FileToolError(
       'EXPECTED_NOT_UNIQUE',
-      `更新片段必须且只能出现一次：${resolved.relative}`,
+      `更新片段必须且只能出现一次：${
+        toWorkspacePath(resolved.relative)
+      }`,
     );
   }
   const {parent, identity: parentIdentity} = await resolveExistingParent(
@@ -1010,7 +1025,7 @@ async function validateDelete(
   if (currentSha256 !== expectedSha256.toLowerCase()) {
     throw new FileToolError(
       'SHA256_MISMATCH',
-      `文件内容已变化，拒绝删除：${resolved.relative}`,
+      `文件内容已变化，拒绝删除：${toWorkspacePath(resolved.relative)}`,
     );
   }
 

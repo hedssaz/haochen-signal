@@ -19,6 +19,7 @@ import {join} from 'node:path';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {
   applyPatch,
+  hasExcludedDirectory,
   listFiles,
   readFileTool,
   searchText,
@@ -27,6 +28,21 @@ import type {PatchFileOperations} from '../../src/tools/files.js';
 import type {ToolContext} from '../../src/tools/types.js';
 
 const signal = AbortSignal.timeout(10_000);
+
+async function expectPosixMode(path: string, mode: number): Promise<void> {
+  if (process.platform === 'win32') return;
+  expect((await stat(path)).mode & 0o777).toBe(mode);
+}
+
+describe('hasExcludedDirectory', () => {
+  it('recognizes excluded directory segments with Windows separators', () => {
+    expect(hasExcludedDirectory('node_modules\\package\\index.js', '\\')).toBe(
+      true,
+    );
+    expect(hasExcludedDirectory('.git\\config', '\\')).toBe(true);
+    expect(hasExcludedDirectory('src\\index.ts', '\\')).toBe(false);
+  });
+});
 
 describe('workspace file tools', () => {
   let tempDirectory: string;
@@ -562,7 +578,7 @@ describe('workspace file tools', () => {
         error: {code: 'FILE_OPERATION_FAILED'},
       });
       await expect(readFile(path)).resolves.toEqual(original);
-      expect((await stat(path)).mode & 0o777).toBe(0o640);
+      await expectPosixMode(path, 0o640);
       await expect(readdir(workspace)).resolves.toEqual(['atomic-update.txt']);
     },
   );
@@ -600,25 +616,28 @@ describe('workspace file tools', () => {
     await expect(readdir(workspace)).resolves.toEqual(['committed-update.txt']);
   });
 
-  it('atomically updates a file while preserving its mode', async () => {
-    const path = join(workspace, 'mode-update.txt');
-    await writeFile(path, 'before');
-    await chmod(path, 0o640);
+  it.skipIf(process.platform === 'win32')(
+    'atomically updates a file while preserving its mode',
+    async () => {
+      const path = join(workspace, 'mode-update.txt');
+      await writeFile(path, 'before');
+      await chmod(path, 0o640);
 
-    const result = await applyPatch({
-      operations: [{
-        type: 'update',
-        path: 'mode-update.txt',
-        expected: 'before',
-        replacement: 'after',
-      }],
-    }, context, signal);
+      const result = await applyPatch({
+        operations: [{
+          type: 'update',
+          path: 'mode-update.txt',
+          expected: 'before',
+          replacement: 'after',
+        }],
+      }, context, signal);
 
-    expect(result.ok).toBe(true);
-    await expect(readFile(path, 'utf8')).resolves.toBe('after');
-    expect((await stat(path)).mode & 0o777).toBe(0o640);
-    await expect(readdir(workspace)).resolves.toEqual(['mode-update.txt']);
-  });
+      expect(result.ok).toBe(true);
+      await expect(readFile(path, 'utf8')).resolves.toBe('after');
+      expect((await stat(path)).mode & 0o777).toBe(0o640);
+      await expect(readdir(workspace)).resolves.toEqual(['mode-update.txt']);
+    },
+  );
 
   it('returns a ToolResult when a file operation throws null', async () => {
     const result = await applyPatch({

@@ -24,10 +24,11 @@ it('derives stable workspace IDs from normalized absolute paths', () => {
 });
 
 it('keeps safe workspace IDs inside the store and rejects unsafe IDs', () => {
-  const store = new AuditStore('/tmp/haochen-audit-root');
+  const root = join(tmpdir(), 'haochen-audit-root');
+  const store = new AuditStore(root);
 
   expect(store.pathFor('workspace-1')).toBe(
-    '/tmp/haochen-audit-root/workspace-1.jsonl',
+    join(root, 'workspace-1.jsonl'),
   );
   for (const id of ['', '.', '..', '../escape', 'nested/id', 'nested\\id', '/tmp/escape']) {
     expect(() => store.pathFor(id)).toThrow(/invalid workspace id/i);

@@ -2,7 +2,11 @@ import {createHash} from 'node:crypto';
 import {realpath} from 'node:fs/promises';
 import {isIP} from 'node:net';
 import {basename, isAbsolute, resolve, sep, win32} from 'node:path';
-import {resolveWorkspacePath, type WorkspacePathMode} from './path-boundary.js';
+import {
+  resolveWorkspacePath,
+  toPortableRelativePath,
+  type WorkspacePathMode,
+} from './path-boundary.js';
 import type {
   BoundaryAction,
   BoundaryContext,
@@ -263,7 +267,7 @@ function optionalBoolean(
 }
 
 function workspacePath(path: string): string {
-  return path.split(sep).join('/');
+  return toPortableRelativePath(path);
 }
 
 async function normalizePath(

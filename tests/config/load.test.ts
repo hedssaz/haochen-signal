@@ -81,7 +81,7 @@ describe('config files', () => {
     }
   });
 
-  it('creates parent directories and saves a private complete config', async () => {
+  it('creates parent directories and saves a complete config', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
     const path = join(directory, 'nested', 'config.json');
     const config = parseConfig({baseUrl: 'https://example.test/v1', model: 'wolf-1'});
@@ -90,12 +90,30 @@ describe('config files', () => {
       await saveConfig(path, config);
 
       await expect(readFile(path, 'utf8')).resolves.toBe(`${JSON.stringify(config, null, 2)}\n`);
-      expect((await stat(path)).mode & 0o777).toBe(0o600);
       expect(await readdir(join(directory, 'nested'))).toEqual(['config.json']);
     } finally {
       await rm(directory, {recursive: true, force: true});
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'saves the config with mode 0600 on POSIX',
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'haochen-config-mode-'));
+      const path = join(directory, 'config.json');
+      const config = parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+      });
+
+      try {
+        await saveConfig(path, config);
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      } finally {
+        await rm(directory, {recursive: true, force: true});
+      }
+    },
+  );
 
   it('writes a private temporary file beside the target before renaming it', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
