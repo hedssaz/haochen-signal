@@ -21,6 +21,7 @@ import {
   type ToolRegistryOptions,
 } from '../../src/tools/registry.js';
 import type {
+  ToolGateEvent,
   ToolDefinitionSpec,
   ToolResult,
 } from '../../src/tools/types.js';
@@ -145,26 +146,54 @@ describe('tool execution registry', () => {
   });
 
   it('executes allow operations without invoking reviewer or confirmation', async () => {
+    const gateEvents: ToolGateEvent[] = [];
     const result = await registry().execute(
       'run_command',
       {command: 'npm', args: ['test']},
-      executionContext,
+      {...executionContext, reportGate: event => gateEvents.push(event)},
     );
 
     expect(result).toMatchObject({ok: true});
+    expect(gateEvents).toEqual([
+      expect.objectContaining({
+        type: 'classified',
+        tool: 'run_command',
+        action: 'allow',
+      }),
+      expect.objectContaining({
+        type: 'gate_finished',
+        tool: 'run_command',
+        outcome: 'execute',
+        source: 'boundary_allow',
+      }),
+    ]);
     expect(review).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     expect(executeTool).toHaveBeenCalledOnce();
   });
 
   it('automatically executes a review operation approved by red-eye review', async () => {
+    const gateEvents: ToolGateEvent[] = [];
     const result = await registry().execute(
       'run_command',
       {command: 'npm', args: ['install', '--ignore-scripts', 'vitest']},
-      executionContext,
+      {...executionContext, reportGate: event => gateEvents.push(event)},
     );
 
     expect(result).toMatchObject({ok: true});
+    expect(gateEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({type: 'review_started', tool: 'run_command'}),
+      expect.objectContaining({
+        type: 'review_finished',
+        tool: 'run_command',
+        verdict: 'approve',
+      }),
+      expect.objectContaining({
+        type: 'gate_finished',
+        outcome: 'execute',
+        source: 'ai_review',
+      }),
+    ]));
     expect(review).toHaveBeenCalledOnce();
     expect(confirm).not.toHaveBeenCalled();
     expect(executeTool).toHaveBeenCalledOnce();
@@ -272,15 +301,38 @@ describe('tool execution registry', () => {
   });
 
   it('sends forced-confirm operations directly to the user without AI review', async () => {
+    const gateEvents: ToolGateEvent[] = [];
     const result = await registry().execute(
       'run_command',
       {command: 'sudo', args: ['npm', 'test']},
-      executionContext,
+      {...executionContext, reportGate: event => gateEvents.push(event)},
     );
 
     expect(result).toMatchObject({ok: true});
+    expect(gateEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'confirmation_finished',
+        result: 'allow_once',
+      }),
+      expect.objectContaining({
+        type: 'gate_finished',
+        outcome: 'execute',
+        source: 'user_confirmation',
+      }),
+    ]));
     expect(review).not.toHaveBeenCalled();
     expect(confirm).toHaveBeenCalledOnce();
+    expect(executeTool).toHaveBeenCalledOnce();
+  });
+
+  it('does not change execution when a gate reporter throws', async () => {
+    const result = await registry().execute(
+      'run_command',
+      {command: 'npm', args: ['test']},
+      {...executionContext, reportGate: () => { throw new Error('UI offline'); }},
+    );
+
+    expect(result).toMatchObject({ok: true});
     expect(executeTool).toHaveBeenCalledOnce();
   });
 

@@ -11,7 +11,7 @@ import type {ReviewDecision} from '../security/reviewer.js';
 import type {SessionStore} from '../sessions/store.js';
 import type {SessionEvent} from '../sessions/types.js';
 import type {ToolRegistry} from '../tools/registry.js';
-import type {ToolResult} from '../tools/types.js';
+import type {ToolGateEvent, ToolResult} from '../tools/types.js';
 
 export type AgentEvent =
   | {type: 'status'; text: string}
@@ -49,6 +49,7 @@ export interface RunAgentTaskOptions {
   signal: AbortSignal;
   maxContextTokens?: number;
   appendInterrupted?: (reason: string) => Promise<void>;
+  reportGate?: (event: ToolGateEvent) => void;
 }
 
 interface PendingToolCall {
@@ -508,6 +509,7 @@ export async function* runAgentTask(
             reviewClient: options.reviewClient,
             reviewModel,
             signal: options.signal,
+            reportGate: options.reportGate,
           },
         ), options.signal);
         yield {

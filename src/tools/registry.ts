@@ -17,6 +17,8 @@ import type {AuditEntry} from '../sessions/types.js';
 import type {
   ToolContext,
   ToolDefinitionSpec,
+  ToolGateEvent,
+  ToolGateSource,
   ToolResult,
 } from './types.js';
 
@@ -31,6 +33,7 @@ export interface ToolExecutionContext extends ToolContext {
   reviewClient?: ModelClient;
   reviewModel: string;
   signal: AbortSignal;
+  reportGate?: (event: ToolGateEvent) => void;
 }
 
 export type ExecutionContext = ToolExecutionContext;
@@ -61,6 +64,32 @@ function failure(code: string, message: string): ToolResult {
     summary: message,
     error: {code, message},
   };
+}
+
+function reportGate(
+  context: ToolExecutionContext,
+  event: ToolGateEvent,
+): void {
+  try {
+    context.reportGate?.(event);
+  } catch {
+    // UI reporting is observational and must never alter the execution gate.
+  }
+}
+
+function reportDenied(
+  context: ToolExecutionContext,
+  tool: string,
+  source: ToolGateSource,
+  summary: string,
+): void {
+  reportGate(context, {
+    type: 'gate_finished',
+    tool,
+    outcome: 'deny',
+    source,
+    summary,
+  });
 }
 
 function fallbackReview(boundary: BoundaryDecision): ReviewDecision {
@@ -183,6 +212,7 @@ export class ToolRegistry {
   ): Promise<ToolResult> {
     const definition = this.options.tools.get(name);
     if (definition === undefined || definition.name !== name) {
+      reportDenied(executionContext, name, 'validation', '工具不存在或注册信息无效');
       return this.auditResult(name, executionContext, {
         input,
         decision: 'unknown_tool',
@@ -194,6 +224,7 @@ export class ToolRegistry {
     try {
       const parsed = await definition.inputSchema.safeParseAsync(input);
       if (!parsed.success) {
+        reportDenied(executionContext, name, 'validation', '工具输入不符合固定结构');
         return this.auditResult(name, executionContext, {
           input,
           decision: 'invalid_input',
@@ -202,6 +233,7 @@ export class ToolRegistry {
       }
       validatedInput = parsed.data;
     } catch {
+      reportDenied(executionContext, name, 'validation', '工具输入无法安全校验');
       return this.auditResult(name, executionContext, {
         input,
         decision: 'invalid_input',
@@ -216,6 +248,7 @@ export class ToolRegistry {
         {workspace: executionContext.workspace},
       );
     } catch {
+      reportDenied(executionContext, name, 'validation', '确定性边界分类失败');
       return this.auditResult(name, executionContext, {
         input: validatedInput,
         decision: 'classification_failed',
@@ -226,7 +259,21 @@ export class ToolRegistry {
       });
     }
 
+    reportGate(executionContext, {
+      type: 'classified',
+      tool: name,
+      action: classification.action,
+      risk: classification.risk,
+      reason: classification.reasons[0] ?? '确定性边界已完成分类',
+    });
+
     if (classification.action === 'deny') {
+      reportDenied(
+        executionContext,
+        name,
+        'boundary_deny',
+        classification.reasons[0] ?? '确定性边界拒绝此操作',
+      );
       return this.auditResult(name, executionContext, {
         input: validatedInput,
         decision: 'deny',
@@ -243,6 +290,7 @@ export class ToolRegistry {
     let addSessionGrant = false;
 
     if (!hasSessionGrant && classification.action === 'review') {
+      reportGate(executionContext, {type: 'review_started', tool: name});
       try {
         const rawReview = await this.options.review(
           executionContext.reviewClient ?? FAILING_REVIEW_CLIENT,
@@ -262,8 +310,16 @@ export class ToolRegistry {
       } catch {
         review = fallbackReview(classification);
       }
+      reportGate(executionContext, {
+        type: 'review_finished',
+        tool: name,
+        verdict: review.verdict,
+        risk: review.risk,
+        summary: review.summary,
+      });
 
       if (review.verdict === 'deny') {
+        reportDenied(executionContext, name, 'ai_review', review.summary);
         return this.auditResult(name, executionContext, {
           input: validatedInput,
           decision: 'review_deny',
@@ -298,6 +354,7 @@ export class ToolRegistry {
       }
 
       if (!['allow_once', 'allow_session', 'deny'].includes(confirmation)) {
+        reportDenied(executionContext, name, 'user_confirmation', '用户确认结果无效');
         return this.auditResult(name, executionContext, {
           input: validatedInput,
           decision: 'confirmation_failed',
@@ -309,7 +366,13 @@ export class ToolRegistry {
           ),
         });
       }
+      reportGate(executionContext, {
+        type: 'confirmation_finished',
+        tool: name,
+        result: confirmation,
+      });
       if (confirmation === 'deny') {
+        reportDenied(executionContext, name, 'user_confirmation', '用户拒绝此操作');
         return this.auditResult(name, executionContext, {
           input: validatedInput,
           decision: 'user_deny',
@@ -329,6 +392,7 @@ export class ToolRegistry {
         {workspace: executionContext.workspace},
       );
     } catch {
+      reportDenied(executionContext, name, 'scope_changed', '执行前边界复核失败');
       return this.auditResult(name, executionContext, {
         input: validatedInput,
         decision: 'reclassification_failed',
@@ -345,6 +409,7 @@ export class ToolRegistry {
     if (finalClassification.action === 'deny'
       || finalClassification.fingerprint !== approvedFingerprint
       || finalClassification.action !== approvedAction) {
+      reportDenied(executionContext, name, 'scope_changed', '执行前操作范围发生变化');
       return this.auditResult(name, executionContext, {
         input: validatedInput,
         decision: 'scope_changed',
@@ -360,6 +425,7 @@ export class ToolRegistry {
     }
 
     if (executionContext.signal.aborted) {
+      reportDenied(executionContext, name, 'validation', '工具执行已取消');
       return this.auditResult(name, executionContext, {
         input: validatedInput,
         decision: 'aborted',
@@ -374,6 +440,7 @@ export class ToolRegistry {
     try {
       await this.options.audit.prepare(workspaceId(executionContext.workspace));
     } catch {
+      reportDenied(executionContext, name, 'audit', '执行前无法准备脱敏审计记录');
       return failure(
         'AUDIT_FAILED',
         '执行前无法准备脱敏审计记录，操作未执行',
@@ -383,6 +450,29 @@ export class ToolRegistry {
     if (addSessionGrant) {
       this.options.sessionGrants.add(approvedFingerprint);
     }
+
+    const gateSource: ToolGateSource = hasSessionGrant
+      ? 'session_grant'
+      : confirmation !== undefined
+        ? 'user_confirmation'
+        : review !== undefined
+          ? 'ai_review'
+          : 'boundary_allow';
+    reportGate(executionContext, {
+      type: 'gate_finished',
+      tool: name,
+      outcome: 'execute',
+      source: gateSource,
+      summary: gateSource === 'boundary_allow'
+        ? '无需 AI 审查，确定性边界直接放行'
+        : gateSource === 'session_grant'
+          ? '本会话许可命中，无需重复审查'
+          : gateSource === 'ai_review'
+            ? `AI 自动审查通过：${review?.summary ?? ''}`
+            : confirmation === 'allow_session'
+              ? '用户允许本会话'
+              : '用户仅本次允许',
+    });
 
     let result: ToolResult;
     try {
