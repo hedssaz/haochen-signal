@@ -1,4 +1,7 @@
-import type {ModelClient} from '../providers/types.js';
+import type {
+  ModelClient,
+  ToolDefinition,
+} from '../providers/types.js';
 import {classifyOperation} from '../security/boundary.js';
 import {redactValue} from '../security/redact.js';
 import {
@@ -108,6 +111,22 @@ function enforceReviewBoundary(
 
 export class ToolRegistry {
   constructor(private readonly options: ToolRegistryOptions) {}
+
+  modelToolDefinitions(): ToolDefinition[] {
+    const definitions: ToolDefinition[] = [];
+    for (const [registeredName, definition] of this.options.tools) {
+      if (registeredName !== definition.name) continue;
+      definitions.push({
+        type: 'function',
+        function: {
+          name: definition.name,
+          description: definition.description,
+          parameters: definition.jsonSchema,
+        },
+      });
+    }
+    return definitions;
+  }
 
   private async auditResult(
     name: string,
