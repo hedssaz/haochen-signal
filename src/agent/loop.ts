@@ -17,6 +17,7 @@ export type AgentEvent =
   | {type: 'status'; text: string}
   | {type: 'reasoning_delta'; text: string}
   | {type: 'assistant_delta'; text: string}
+  | {type: 'assistant_turn_finished'}
   | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
   | {type: 'tool_started'; name: string; input: unknown}
@@ -428,6 +429,8 @@ export async function* runAgentTask(
         yield hasToolCalls
           ? {type: 'assistant_message', text: assistantText}
           : {type: 'assistant_text', text: assistantText};
+      } else {
+        yield {type: 'assistant_turn_finished'};
       }
 
       if (!hasToolCalls) return;

@@ -36,6 +36,39 @@ describe('uiReducer', () => {
     expect(complete).toMatchObject({liveReasoning: '', liveAssistant: ''});
   });
 
+  it('clears a reasoning-only tool turn before the next round starts', () => {
+    const firstRound = uiReducer(initialUiState, {
+      type: 'reasoning_delta',
+      text: '第一轮推理',
+    });
+    const finished = uiReducer(firstRound, {type: 'assistant_turn_finished'});
+    const secondRound = uiReducer(finished, {
+      type: 'reasoning_delta',
+      text: '第二轮推理',
+    });
+
+    expect(secondRound).toMatchObject({
+      liveReasoning: '第二轮推理',
+      liveAssistant: '',
+    });
+    expect(secondRound.transcript).toEqual([]);
+  });
+
+  it.each([
+    {type: 'error', message: '协议错误'} as const,
+    {type: 'interrupted', reason: '用户中止'} as const,
+    {type: 'limit_reached', limit: 'turns'} as const,
+  ])('clears live buffers on terminal $type', (event) => {
+    const state = uiReducer({
+      ...initialUiState,
+      phase: 'thinking',
+      liveReasoning: '未完成推理',
+      liveAssistant: '未完成回答',
+    }, event);
+
+    expect(state).toMatchObject({liveReasoning: '', liveAssistant: ''});
+  });
+
   it('maps a read tool event to a stable scan entry', () => {
     const state = uiReducer(initialUiState, {
       type: 'tool_started',

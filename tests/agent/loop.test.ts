@@ -213,6 +213,60 @@ describe('main agent loop', () => {
       content: '开始回答',
       tool_calls: expect.any(Array),
     });
+    await expect(sessionStore.read('session-1')).resolves.not.toContainEqual(
+      expect.objectContaining({text: '检查协议'}),
+    );
+  });
+
+  it('finishes a reasoning-only tool turn before the next model round', async () => {
+    const events = await collect(runAgentTask(options(scriptedModel([[
+      {type: 'reasoning_delta', text: '第一轮推理'},
+      {
+        type: 'tool_call_delta',
+        index: 0,
+        id: 'c1',
+        name: 'read_file',
+        arguments: '{"path":"README.md"}',
+      },
+      {type: 'finish', reason: 'tool_calls', usage: undefined},
+    ], [
+      {type: 'reasoning_delta', text: '第二轮推理'},
+      {type: 'text_delta', text: '完成'},
+      {type: 'finish', reason: 'stop', usage: undefined},
+    ]]))));
+
+    expect(events.map(event => event.type)).toEqual([
+      'reasoning_delta',
+      'assistant_turn_finished',
+      'tool_started',
+      'tool_finished',
+      'reasoning_delta',
+      'assistant_delta',
+      'assistant_text',
+    ]);
+  });
+
+  it('omits reasoning_content when a tool-call turn has no reasoning', async () => {
+    const model = recordingModel([
+      toolResponse([{
+        id: 'c1',
+        name: 'read_file',
+        arguments: {path: 'README.md'},
+      }]),
+      textResponse('完成'),
+    ]);
+
+    await collect(runAgentTask(options(model.client)));
+
+    expect(model.requests[1]?.messages).toContainEqual({
+      role: 'assistant',
+      content: null,
+      tool_calls: expect.any(Array),
+    });
+    const toolCallMessage = model.requests[1]?.messages.find(message => (
+      message.role === 'assistant' && message.tool_calls !== undefined
+    ));
+    expect(toolCallMessage).not.toHaveProperty('reasoning_content');
   });
 
   it('sends only registered tool definitions to the model', async () => {

@@ -46,6 +46,7 @@ export type AgentUiEvent =
   | {type: 'status'; text: string}
   | {type: 'reasoning_delta'; text: string}
   | {type: 'assistant_delta'; text: string}
+  | {type: 'assistant_turn_finished'}
   | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
   | {type: 'tool_started'; name: string; input: unknown}
@@ -135,6 +136,8 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
         error: undefined,
         liveAssistant: state.liveAssistant + event.text,
       };
+    case 'assistant_turn_finished':
+      return {...state, liveReasoning: '', liveAssistant: ''};
     case 'assistant_message':
       return append(state, entry('assistant', '浩宸', event.text), {
         phase: 'thinking',
@@ -184,17 +187,23 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
     case 'limit_reached':
       return append(state, entry('error', '达到上限', `已达到${event.limit === 'turns' ? '轮次' : '工具调用'}上限`), {
         phase: 'idle',
+        liveReasoning: '',
+        liveAssistant: '',
       });
     case 'interrupted':
       return append(state, entry('error', '已中止', event.reason), {
         phase: 'idle',
         activeTool: undefined,
+        liveReasoning: '',
+        liveAssistant: '',
       });
     case 'error':
       return append(state, entry('error', '错误', event.message), {
         phase: 'error',
         activeTool: undefined,
         error: event.message,
+        liveReasoning: '',
+        liveAssistant: '',
       });
   }
 }
