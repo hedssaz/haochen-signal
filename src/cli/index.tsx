@@ -16,6 +16,7 @@ import {classifyOperation} from '../security/boundary.js';
 import {reviewOperation} from '../security/reviewer.js';
 import {AuditStore} from '../sessions/audit.js';
 import {createSessionId, SessionStore} from '../sessions/store.js';
+import {createSerializedSessionStore} from '../sessions/serialized-store.js';
 import {ToolRegistry} from '../tools/registry.js';
 import type {ToolDefinitionSpec} from '../tools/types.js';
 import {listFiles, searchText, readFileTool, applyPatch} from '../tools/files.js';
@@ -109,18 +110,33 @@ async function main(): Promise<void> {
   const workspace = process.cwd();
   const tempDir = join(tmpdir(), 'haochen'); await mkdir(tempDir, {recursive: true});
   const model = createOpenAiCompatibleClient(activeConfig, apiKey);
-  const store = new SessionStore(paths.sessionsDir); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
+  const store = new SessionStore(paths.sessionsDir); const sessionStore = createSerializedSessionStore(store); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
   const confirmations = new InteractiveConfirmationBroker(
     process.stdin.isTTY === true && process.stdout.isTTY === true,
   );
   const registry = new ToolRegistry({tools: toolDefinitions(), classify: classifyOperation, review: reviewOperation, confirm: request => confirmations.request(request), sessionGrants: grants, audit});
   let sessionId = createSessionId();
+  let activeInterruptionWriter: ((reason: string) => Promise<void>) | undefined;
   const instance = render(<App
     workspace={workspace} sessionId={sessionId} model={activeConfig.model} contextTokens={activeConfig.contextWindow} sessionGrants={grants.size}
-    runTask={(task, signal) => runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: sessionId, store}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow})}
+    runTask={(task, signal) => {
+      const taskSessionId = sessionId;
+      let interruptedWrite: Promise<void> | undefined;
+      const appendInterrupted = (reason: string): Promise<void> => {
+        interruptedWrite ??= sessionStore.append(taskSessionId, {
+          type: 'interrupted', at: Date.now(), reason,
+        });
+        return interruptedWrite;
+      };
+      activeInterruptionWriter = appendInterrupted;
+      return runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow, appendInterrupted});
+    }}
     executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, signal})}
-    compact={async () => { const events = await store.read(sessionId).catch(() => []); const result = await compactHistory(events, async prompt => { let text = ''; for await (const event of model.stream({model: activeConfig.model, messages: [{role: 'user', content: prompt}], toolChoice: 'none'}, new AbortController().signal)) if (event.type === 'text_delta') text += event.text; return text; }); if (result.compacted) { await store.append(sessionId, result.summaryEvent); return {ok: true, message: '已压缩历史。'}; } return {ok: false, message: result.reason}; }}
-    saveSession={async () => { await store.read(sessionId).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }} createSession={async () => { sessionId = createSessionId(); return sessionId; }} listSessions={() => store.list()} resumeSession={async id => { await store.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined} confirmation={confirmations}
+    compact={async () => { const events = await sessionStore.read(sessionId).catch(() => []); const result = await compactHistory(events, async prompt => { let text = ''; for await (const event of model.stream({model: activeConfig.model, messages: [{role: 'user', content: prompt}], toolChoice: 'none'}, new AbortController().signal)) if (event.type === 'text_delta') text += event.text; return text; }); if (result.compacted) { await sessionStore.append(sessionId, result.summaryEvent); return {ok: true, message: '已压缩历史。'}; } return {ok: false, message: result.reason}; }}
+    saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
+      if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
+      await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});
+    }} createSession={async () => { sessionId = createSessionId(); return sessionId; }} listSessions={() => store.list()} resumeSession={async id => { await sessionStore.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined} confirmation={confirmations}
   />);
   await instance.waitUntilExit();
 }

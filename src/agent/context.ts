@@ -32,6 +32,8 @@ function messageForEvent(event: SessionEvent): ModelMessage {
       return {role: 'user', content: event.text};
     case 'assistant':
       return {role: 'assistant', content: event.text};
+    case 'checkpoint':
+      return {role: 'system', content: `会话检查点：${event.reason}`};
     case 'tool':
       return {
         role: 'user',

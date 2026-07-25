@@ -29,7 +29,7 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   sessionGrants?: number;
   executeTool?: (name: string, input: unknown, signal: AbortSignal) => Promise<ToolResult>;
   compact?: () => Promise<CompactResult>;
-  saveSession?: () => Promise<void>;
+  saveSession?: (reason: 'clear' | 'exit') => Promise<void>;
   appendInterrupted?: (reason: string) => Promise<void>;
   createSession?: () => Promise<string>;
   listSessions?: () => Promise<SessionSummary[]>;
@@ -91,13 +91,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const leave = useCallback(async (interrupted = false) => {
     if (exiting.current) return;
     exiting.current = true;
-    if (interrupted) {
-      await persistInterrupted('用户中止');
-      dispatch({type: 'interrupted', reason: '用户中止'});
-    }
     try {
+      if (interrupted) {
+        await persistInterrupted('用户中止');
+        dispatch({type: 'interrupted', reason: '用户中止'});
+      }
       props.confirmation?.close();
-      await props.saveSession?.();
+      await props.saveSession?.('exit');
       await props.onExit?.();
     } finally {
       exit();
@@ -192,7 +192,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         return;
       }
       case 'clear': {
-        await props.saveSession?.();
+        await props.saveSession?.('clear');
         const id = await props.createSession?.();
         if (id !== undefined) setSessionId(id);
         setState({...initialUiState, transcript: [localEntry('✓', `已创建新会话${id === undefined ? '' : `：${id}`}`)]});
@@ -225,12 +225,6 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   }, [appendNotice, dispatch, leave, model, props, runTask, sessionId, state.phase]);
 
   useInput((input, key) => {
-    if (pendingConfirmation !== undefined) {
-      if (input === 'a') props.confirmation?.respond('allow_once');
-      else if (input === 's') props.confirmation?.respond('allow_session');
-      else if (input === 'd' || key.escape) props.confirmation?.respond('deny');
-      return;
-    }
     if (key.ctrl && input.toLowerCase() === 'c') {
       const controller = activeController.current;
       if (controller === undefined) {
@@ -239,9 +233,16 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         void leave(true);
       } else {
         abortRequested.current = true;
+        props.confirmation?.respond('deny');
         controller.abort(new DOMException('用户中止', 'AbortError'));
         appendNotice('✗', '正在中止当前任务。再次 Ctrl+C 将直接退出。');
       }
+      return;
+    }
+    if (pendingConfirmation !== undefined) {
+      if (input === 'a') props.confirmation?.respond('allow_once');
+      else if (input === 's') props.confirmation?.respond('allow_session');
+      else if (input === 'd' || key.escape) props.confirmation?.respond('deny');
       return;
     }
     if (key.return) {

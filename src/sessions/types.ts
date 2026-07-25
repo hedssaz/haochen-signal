@@ -6,6 +6,11 @@ export const SessionEventSchema = z.discriminatedUnion('type', [
   z.strictObject({type: z.literal('user'), at: timestamp, text: z.string()}),
   z.strictObject({type: z.literal('assistant'), at: timestamp, text: z.string()}),
   z.strictObject({
+    type: z.literal('checkpoint'),
+    at: timestamp,
+    reason: z.enum(['clear', 'exit']),
+  }),
+  z.strictObject({
     type: z.literal('tool'),
     at: timestamp,
     tool: z.string(),

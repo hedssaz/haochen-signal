@@ -237,7 +237,8 @@ describe('signal compaction', () => {
     });
     for (const event of recentEvents) {
       expect(JSON.stringify(messages)).toContain(
-        event.type === 'interrupted' ? event.reason : event.type === 'tool'
+        event.type === 'interrupted' ? event.reason : event.type === 'checkpoint'
+          ? event.reason : event.type === 'tool'
           ? event.tool
           : event.text,
       );
@@ -296,7 +297,8 @@ describe('signal compaction', () => {
     expect(JSON.stringify(messages)).not.toContain('recent-1');
     for (const event of [...recentEvents.slice(2), event7, event8]) {
       expect(JSON.stringify(messages)).toContain(
-        event.type === 'interrupted' ? event.reason : event.type === 'tool'
+        event.type === 'interrupted' ? event.reason : event.type === 'checkpoint'
+          ? event.reason : event.type === 'tool'
           ? event.tool
           : event.text,
       );

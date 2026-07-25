@@ -653,6 +653,23 @@ describe('main agent loop', () => {
     expect(events).toEqual([{type: 'interrupted', reason: '预先取消'}]);
   });
 
+  it('uses the caller interruption writer instead of appending a duplicate session event', async () => {
+    const controller = new AbortController();
+    controller.abort('应用已持久化中断');
+    const append = vi.fn(async () => undefined);
+    const appendInterrupted = vi.fn(async () => undefined);
+
+    const events = await collect(runAgentTask(options(recordingModel([]).client, {
+      signal: controller.signal,
+      session: {id: 'delegated-interruption', store: {read: async () => [], append}},
+      appendInterrupted,
+    })));
+
+    expect(appendInterrupted).toHaveBeenCalledWith('应用已持久化中断');
+    expect(append).not.toHaveBeenCalled();
+    expect(events).toEqual([{type: 'interrupted', reason: '应用已持久化中断'}]);
+  });
+
   it('bounds cancellation while a tool ignores AbortSignal and never retries it', async () => {
     const controller = new AbortController();
     executeRead.mockImplementation(async () => new Promise<never>(() => undefined));

@@ -175,4 +175,73 @@ describe('App', () => {
     await vi.waitFor(() => expect(respond).toHaveBeenCalledWith('allow_once'));
     expect(idleTask).not.toHaveBeenCalled();
   });
+
+  it('cancels a pending confirmation when Ctrl+C aborts its running task', async () => {
+    let listener: (() => void) | undefined;
+    let pending: ReturnType<typeof pendingRequest> | undefined;
+    const respond = vi.fn();
+    const confirmation = {
+      getPending: () => pending,
+      subscribe: (next: () => void) => { listener = next; return () => undefined; },
+      respond,
+      request: vi.fn(async () => 'deny' as const),
+      close: vi.fn(),
+    };
+    const runTask = vi.fn(async function* (_task: string, signal: AbortSignal): AsyncIterable<AgentUiEvent> {
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), {once: true}));
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      confirmation={confirmation}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('修改 README');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(runTask).toHaveBeenCalled());
+    pending = pendingRequest();
+    listener?.();
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('确认请求'));
+    app.stdin.write('\u0003');
+
+    await vi.waitFor(() => expect(runTask.mock.calls[0]?.[1].aborted).toBe(true));
+    expect(respond).toHaveBeenCalledWith('deny');
+  });
+
+  it('saves an explicit exit checkpoint before leaving', async () => {
+    const saveSession = vi.fn(async () => undefined);
+    const onExit = vi.fn(async () => undefined);
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      saveSession={saveSession}
+      onExit={onExit}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/exit');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(onExit).toHaveBeenCalled());
+
+    expect(saveSession).toHaveBeenCalledWith('exit');
+  });
 });
+
+function pendingRequest() {
+  return {
+    id: 1,
+    operation: {tool: 'apply_patch', input: {operations: []}},
+    boundary: {
+      action: 'confirm' as const,
+      risk: 'high' as const,
+      reasons: ['补丁涉及敏感配置'],
+      normalizedScope: ['update:.env'],
+      fingerprint: 'fingerprint',
+    },
+  };
+}
