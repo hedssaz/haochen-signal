@@ -360,6 +360,73 @@ describe('App', () => {
     });
   });
 
+  it('completes each model turn before tools and re-enters streaming phases on later deltas', async () => {
+    let releaseTool!: () => void;
+    let releaseReasoning!: () => void;
+    let releaseAnswer!: () => void;
+    let releaseTask!: () => void;
+    const toolGate = new Promise<void>(resolve => { releaseTool = resolve; });
+    const reasoningGate = new Promise<void>(resolve => { releaseReasoning = resolve; });
+    const answerGate = new Promise<void>(resolve => { releaseAnswer = resolve; });
+    const taskGate = new Promise<void>(resolve => { releaseTask = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'reasoning_delta', text: '工具前分析'};
+      yield {type: 'assistant_turn_finished'};
+      yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
+      await toolGate;
+      yield {
+        type: 'tool_finished',
+        name: 'read_file',
+        result: {ok: true, summary: 'README.md'},
+      };
+      yield {type: 'reasoning_delta', text: '继续分析'};
+      await reasoningGate;
+      yield {type: 'assistant_delta', text: '最终回答'};
+      await answerGate;
+      yield {type: 'assistant_message', text: '最终回答'};
+      await taskGate;
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取后回答');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('状态 › 运行中 · 正在调用 read_file');
+      expect(frame).toContain('↓ 1 tokens · 思考完成');
+      expect(frame).not.toContain('正在回答');
+    });
+
+    releaseTool();
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('↓ 2 tokens · 思考中');
+    });
+
+    releaseReasoning();
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('↓ 3 tokens · 思考完成 · 正在回答');
+    });
+
+    releaseAnswer();
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('输入已锁定');
+      expect(frame).toContain('↓ 3 tokens · 思考完成');
+      expect(frame).not.toContain('正在回答');
+    });
+
+    releaseTask();
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).not.toContain('输入已锁定');
+    });
+  });
+
   it('ignores text input while a task is running', async () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });

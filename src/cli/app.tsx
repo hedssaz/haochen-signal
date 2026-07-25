@@ -224,6 +224,8 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         } else if (event.type === 'assistant_delta' && event.text.length > 0) {
           setStreamTokenCount(count => count + 1);
           setStreamPhase('answering');
+        } else if (event.type === 'assistant_turn_finished' || event.type === 'assistant_message') {
+          setStreamPhase('complete');
         }
         if (event.type === 'assistant_delta' || event.type === 'assistant_message') {
           setRuntimeStatus('正在规划');
