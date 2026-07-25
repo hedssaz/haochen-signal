@@ -1,14 +1,124 @@
 #!/usr/bin/env node
 import process from 'node:process';
+import {mkdir} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createInterface} from 'node:readline/promises';
+import {render} from 'ink';
+import {z} from 'zod';
+import {runAgentTask} from '../agent/loop.js';
+import {compactHistory} from '../agent/context.js';
+import {loadConfig, saveConfig} from '../config/load.js';
+import {getAppPaths} from '../config/paths.js';
+import {readMacOsKeychain, resolveApiKey, saveMacOsKeychain} from '../config/credentials.js';
+import {createOpenAiCompatibleClient} from '../providers/openai-compatible.js';
+import {classifyOperation} from '../security/boundary.js';
+import {reviewOperation} from '../security/reviewer.js';
+import {AuditStore} from '../sessions/audit.js';
+import {createSessionId, SessionStore} from '../sessions/store.js';
+import {ToolRegistry} from '../tools/registry.js';
+import type {ToolDefinitionSpec} from '../tools/types.js';
+import {listFiles, searchText, readFileTool, applyPatch} from '../tools/files.js';
+import {runCommand} from '../tools/command.js';
+import {gitStatus, gitDiff, gitLog} from '../tools/git.js';
+import {webSearch, webFetch} from '../tools/web.js';
+import {App} from './app.js';
+import {runFirstRunWithCredentials} from './first-run.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
 
 const args = new Set(process.argv.slice(2));
-if (args.has('--version') || args.has('-v')) {
-  process.stdout.write(`${VERSION}\n`);
-} else if (args.has('--help') || args.has('-h')) {
-  process.stdout.write(
-    `${PRODUCT_NAME} · ${PRODUCT_ENGLISH_NAME}\n\nUsage: ${CLI_NAME} [--help] [--version]\n`,
-  );
-} else {
-  process.stdout.write('身份确认——浩宸代理，已进入信号场。\n');
+
+function showHelp(): void {
+  process.stdout.write(`${PRODUCT_NAME} · ${PRODUCT_ENGLISH_NAME}\n\nUsage: ${CLI_NAME} [--help] [--version]\n`);
 }
+
+function objectSchema(properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> {
+  return {type: 'object', properties, required, additionalProperties: false};
+}
+
+function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unknown>> {
+  const specs: ToolDefinitionSpec<unknown, unknown>[] = [
+    {name: 'list_files', description: '列出工作区文件', inputSchema: z.object({path: z.string().optional()}).strict(), jsonSchema: objectSchema({path: {type: 'string'}}), execute: (i, c, s) => listFiles(i as {path?: string}, c, s)},
+    {name: 'search_text', description: '搜索工作区文本', inputSchema: z.object({query: z.string(), path: z.string().optional(), maxMatches: z.number().int().optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string'}, path: {type: 'string'}, maxMatches: {type: 'integer'}}, ['query']), execute: (i, c, s) => searchText(i as {query: string; path?: string; maxMatches?: number}, c, s)},
+    {name: 'read_file', description: '读取工作区文本文件', inputSchema: z.object({path: z.string(), startLine: z.number().int().optional(), endLine: z.number().int().optional()}).strict(), jsonSchema: objectSchema({path: {type: 'string'}, startLine: {type: 'integer'}, endLine: {type: 'integer'}}, ['path']), execute: (i, c, s) => readFileTool(i as {path: string; startLine?: number; endLine?: number}, c, s)},
+    {name: 'apply_patch', description: '通过结构化补丁修改工作区文件', inputSchema: z.object({operations: z.array(z.discriminatedUnion('type', [z.object({type: z.literal('add'), path: z.string(), content: z.string()}).strict(), z.object({type: z.literal('update'), path: z.string(), expected: z.string(), replacement: z.string()}).strict(), z.object({type: z.literal('delete'), path: z.string(), sha256: z.string()}).strict()]))}).strict(), jsonSchema: objectSchema({operations: {type: 'array'}}, ['operations']), execute: (i, c, s) => applyPatch(i as never, c, s)},
+    {name: 'run_command', description: '执行前台命令', inputSchema: z.object({command: z.string(), args: z.array(z.string()).optional(), cwd: z.string().optional(), shell: z.boolean().optional(), timeoutMs: z.number().int().optional(), maxOutputBytes: z.number().int().optional()}).strict(), jsonSchema: objectSchema({command: {type: 'string'}, args: {type: 'array', items: {type: 'string'}}, cwd: {type: 'string'}, shell: {type: 'boolean'}, timeoutMs: {type: 'integer'}, maxOutputBytes: {type: 'integer'}}, ['command']), execute: (i, c, s) => runCommand(i as never, c, s)},
+    {name: 'git_status', description: '读取 Git 状态', inputSchema: z.object({}).strict(), jsonSchema: objectSchema({}), execute: (_i, c, s) => gitStatus(c, s)},
+    {name: 'git_diff', description: '读取 Git 差异', inputSchema: z.object({staged: z.boolean().optional()}).strict(), jsonSchema: objectSchema({staged: {type: 'boolean'}}), execute: (i, c, s) => gitDiff(i as {staged?: boolean}, c, s)},
+    {name: 'git_log', description: '读取近期 Git 记录', inputSchema: z.object({limit: z.number().int().optional()}).strict(), jsonSchema: objectSchema({limit: {type: 'integer'}}), execute: (i, c, s) => gitLog(i as {limit?: number}, c, s)},
+    {name: 'web_search', description: '搜索公开技术资料', inputSchema: z.object({query: z.string(), limit: z.number().int().optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string'}, limit: {type: 'integer'}}, ['query']), execute: (i, c, s) => webSearch(i as {query: string; limit?: number}, c, s)},
+    {name: 'web_fetch', description: '提取公开网页正文', inputSchema: z.object({url: z.string()}).strict(), jsonSchema: objectSchema({url: {type: 'string'}}, ['url']), execute: (i, c, s) => webFetch(i as {url: string}, c, s)},
+  ];
+  return new Map(specs.map(spec => [spec.name, spec]));
+}
+
+async function firstRunInput() {
+  const terminal = createInterface({input: process.stdin, output: process.stdout});
+  return {
+    read: async (prompt: string, options?: {hidden?: boolean}): Promise<string> => {
+      if (!options?.hidden || !process.stdin.isTTY) return terminal.question(prompt);
+      terminal.pause();
+      process.stdout.write(prompt);
+      return new Promise(resolve => {
+        let value = '';
+        const onData = (chunk: Buffer | string) => {
+          const text = chunk.toString();
+          if (text === '\r' || text === '\n') {
+            process.stdin.off('data', onData);
+            process.stdin.setRawMode(false);
+            process.stdout.write('\n');
+            terminal.resume();
+            resolve(value);
+          } else if (text === '\u0003') {
+            process.stdin.off('data', onData);
+            process.stdin.setRawMode(false);
+            terminal.resume();
+            resolve('');
+          } else if (text === '\u007f') {
+            value = value.slice(0, -1);
+          } else {
+            value += text;
+          }
+        };
+        process.stdin.setRawMode(true);
+        process.stdin.on('data', onData);
+      });
+    },
+    close: () => terminal.close(),
+  };
+}
+
+async function main(): Promise<void> {
+  if (args.has('--version') || args.has('-v')) { process.stdout.write(`${VERSION}\n`); return; }
+  if (args.has('--help') || args.has('-h')) { showHelp(); return; }
+  const paths = getAppPaths(process.env, process.env.HOME ?? process.cwd());
+  let config = await loadConfig(paths.configFile);
+  let apiKey: string | undefined;
+  if (config === undefined) {
+    const input = await firstRunInput();
+    try {
+      const created = await runFirstRunWithCredentials(input, {write: text => process.stdout.write(text), saveKey: saveMacOsKeychain});
+      config = created.config; apiKey = created.apiKey; await saveConfig(paths.configFile, config);
+    } finally { input.close(); }
+  }
+  if (config === undefined) throw new Error('无法创建配置。');
+  let activeConfig = config;
+  apiKey ??= await resolveApiKey({env: process.env, readKeychain: readMacOsKeychain, prompt: async () => undefined});
+  if (!apiKey) throw new Error('未提供 API Key；请设置 HAOCHEN_API_KEY 或重新首次配置。');
+  const workspace = process.cwd();
+  const tempDir = join(tmpdir(), 'haochen'); await mkdir(tempDir, {recursive: true});
+  const model = createOpenAiCompatibleClient(activeConfig, apiKey);
+  const store = new SessionStore(paths.sessionsDir); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
+  const registry = new ToolRegistry({tools: toolDefinitions(), classify: classifyOperation, review: reviewOperation, confirm: async () => 'deny', sessionGrants: grants, audit});
+  let sessionId = createSessionId();
+  const instance = render(<App
+    workspace={workspace} sessionId={sessionId} model={activeConfig.model} contextTokens={activeConfig.contextWindow} sessionGrants={grants.size}
+    runTask={(task, signal) => runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: sessionId, store}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow})}
+    executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, signal})}
+    compact={async () => { const events = await store.read(sessionId).catch(() => []); const result = await compactHistory(events, async prompt => { let text = ''; for await (const event of model.stream({model: activeConfig.model, messages: [{role: 'user', content: prompt}], toolChoice: 'none'}, new AbortController().signal)) if (event.type === 'text_delta') text += event.text; return text; }); if (result.compacted) { await store.append(sessionId, result.summaryEvent); return {ok: true, message: '已压缩历史。'}; } return {ok: false, message: result.reason}; }}
+    saveSession={async () => undefined} createSession={async () => { sessionId = createSessionId(); return sessionId; }} listSessions={() => store.list()} resumeSession={async id => { await store.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined}
+  />);
+  await instance.waitUntilExit();
+}
+
+void main().catch(error => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; });
