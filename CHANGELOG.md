@@ -6,6 +6,7 @@
 
 ### 新增
 
+- 新增可续读超长单行文件、统一联网搜索参数、锁定上下文压缩、分离思考/回答流和底部 token 状态的中文设计规格。
 - README 首屏纯恶搞警告，以及 macOS、Linux 和 Windows PowerShell 的源码安装与凭据说明。
 - 跨平台可靠解析用户主目录，并按平台提供首次 API Key 隐藏输入与 macOS Keychain 保存提示。
 - 三平台 GitHub Actions 验证矩阵，覆盖 Node 20 的测试、类型检查、构建和版本入口。
