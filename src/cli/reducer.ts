@@ -29,6 +29,7 @@ export interface UiState {
 export type AgentUiEvent =
   | {type: 'status'; text: string}
   | {type: 'assistant_delta'; text: string}
+  | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
   | {type: 'tool_started'; name: string; input: unknown}
   | {type: 'tool_finished'; name: string; result: ToolResult}
@@ -98,6 +99,11 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       return append(state, entry('◆', event.text), {phase: 'thinking', error: undefined});
     case 'assistant_delta':
       return {...state, phase: 'thinking', error: undefined};
+    case 'assistant_message':
+      return append(state, entry('◆', event.text), {
+        phase: 'thinking',
+        error: undefined,
+      });
     case 'assistant_text':
       return append(state, entry('✓', `任务完成\n${event.text}`), {
         phase: 'idle',

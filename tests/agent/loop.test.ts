@@ -163,6 +163,32 @@ describe('main agent loop', () => {
     );
   });
 
+  it('does not report an intermediate tool-planning message as task completion', async () => {
+    const events = await collect(runAgentTask(options(scriptedModel([
+      [
+        {type: 'text_delta', text: '我先读取 README。'},
+        {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'call_1',
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+        {type: 'finish', reason: 'tool_calls'},
+      ],
+      textResponse('README 已读取。'),
+    ]))));
+
+    expect(events).not.toContainEqual({
+      type: 'assistant_text',
+      text: '我先读取 README。',
+    });
+    expect(events).toContainEqual({
+      type: 'assistant_text',
+      text: 'README 已读取。',
+    });
+  });
+
   it('sends only registered tool definitions to the model', async () => {
     const model = recordingModel([textResponse('完成')]);
 

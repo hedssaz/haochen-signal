@@ -16,6 +16,7 @@ import type {ToolResult} from '../tools/types.js';
 export type AgentEvent =
   | {type: 'status'; text: string}
   | {type: 'assistant_delta'; text: string}
+  | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
   | {type: 'tool_started'; name: string; input: unknown}
   | {type: 'tool_finished'; name: string; result: ToolResult}
@@ -404,7 +405,9 @@ export async function* runAgentTask(
           at: Date.now(),
           text: assistantText,
         }, options.signal);
-        yield {type: 'assistant_text', text: assistantText};
+        yield hasToolCalls
+          ? {type: 'assistant_message', text: assistantText}
+          : {type: 'assistant_text', text: assistantText};
       }
 
       if (!hasToolCalls) return;

@@ -23,6 +23,7 @@ import {runCommand} from '../tools/command.js';
 import {gitStatus, gitDiff, gitLog} from '../tools/git.js';
 import {webSearch, webFetch} from '../tools/web.js';
 import {App} from './app.js';
+import {InteractiveConfirmationBroker} from './confirmation.js';
 import {runFirstRunWithCredentials} from './first-run.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
 
@@ -109,14 +110,17 @@ async function main(): Promise<void> {
   const tempDir = join(tmpdir(), 'haochen'); await mkdir(tempDir, {recursive: true});
   const model = createOpenAiCompatibleClient(activeConfig, apiKey);
   const store = new SessionStore(paths.sessionsDir); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
-  const registry = new ToolRegistry({tools: toolDefinitions(), classify: classifyOperation, review: reviewOperation, confirm: async () => 'deny', sessionGrants: grants, audit});
+  const confirmations = new InteractiveConfirmationBroker(
+    process.stdin.isTTY === true && process.stdout.isTTY === true,
+  );
+  const registry = new ToolRegistry({tools: toolDefinitions(), classify: classifyOperation, review: reviewOperation, confirm: request => confirmations.request(request), sessionGrants: grants, audit});
   let sessionId = createSessionId();
   const instance = render(<App
     workspace={workspace} sessionId={sessionId} model={activeConfig.model} contextTokens={activeConfig.contextWindow} sessionGrants={grants.size}
     runTask={(task, signal) => runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: sessionId, store}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow})}
     executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, signal})}
     compact={async () => { const events = await store.read(sessionId).catch(() => []); const result = await compactHistory(events, async prompt => { let text = ''; for await (const event of model.stream({model: activeConfig.model, messages: [{role: 'user', content: prompt}], toolChoice: 'none'}, new AbortController().signal)) if (event.type === 'text_delta') text += event.text; return text; }); if (result.compacted) { await store.append(sessionId, result.summaryEvent); return {ok: true, message: '已压缩历史。'}; } return {ok: false, message: result.reason}; }}
-    saveSession={async () => undefined} createSession={async () => { sessionId = createSessionId(); return sessionId; }} listSessions={() => store.list()} resumeSession={async id => { await store.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined}
+    saveSession={async () => { await store.read(sessionId).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }); }} createSession={async () => { sessionId = createSessionId(); return sessionId; }} listSessions={() => store.list()} resumeSession={async id => { await store.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined} confirmation={confirmations}
   />);
   await instance.waitUntilExit();
 }

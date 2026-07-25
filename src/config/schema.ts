@@ -1,7 +1,12 @@
 import {z} from 'zod';
 
 const ConfigSchema = z.object({
-  baseUrl: z.string().url().transform(value => value.replace(/\/+$/, '')),
+  baseUrl: z.string().url().transform(value => value.replace(/\/+$/, '')).refine(value => {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:')
+      && url.username === ''
+      && url.password === '';
+  }, 'API 地址必须是没有凭据的 HTTP(S) 地址'),
   model: z.string().min(1),
   reviewModel: z.string().min(1).optional(),
   headers: z.record(z.string(), z.string()).default({}),

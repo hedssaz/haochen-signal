@@ -101,4 +101,78 @@ describe('App', () => {
     await vi.waitFor(() => expect(onExit).toHaveBeenCalled());
     release();
   });
+
+  it('persists one interruption before exiting on the second Ctrl+C', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const steps: string[] = [];
+    const appendInterrupted = vi.fn(async () => {
+      steps.push('append');
+      await Promise.resolve();
+      steps.push('persisted');
+    });
+    const onExit = vi.fn(async () => { steps.push('exit'); });
+    const runTask = vi.fn(async function* (_task: string, signal: AbortSignal): AsyncIterable<AgentUiEvent> {
+      await Promise.race([
+        blocked,
+        new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), {once: true})),
+      ]);
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      appendInterrupted={appendInterrupted}
+      onExit={onExit}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取 README');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(runTask).toHaveBeenCalled());
+    app.stdin.write('\u0003');
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => expect(onExit).toHaveBeenCalled());
+
+    expect(appendInterrupted).toHaveBeenCalledOnce();
+    expect(steps).toEqual(['append', 'persisted', 'exit']);
+    release();
+  });
+
+  it('renders a pending confirmation and forwards an allow-once response locally', async () => {
+    const respond = vi.fn();
+    const confirmation = {
+      getPending: () => ({
+        id: 1,
+        operation: {tool: 'apply_patch', input: {operations: []}},
+        boundary: {
+          action: 'confirm' as const,
+          risk: 'high' as const,
+          reasons: ['补丁涉及敏感配置'],
+          normalizedScope: ['update:.env'],
+          fingerprint: 'fingerprint',
+        },
+      }),
+      subscribe: () => () => undefined,
+      respond,
+      request: vi.fn(async () => 'deny' as const),
+      close: vi.fn(),
+    };
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      confirmation={confirmation}
+    />);
+
+    await waitForInputListener();
+    expect(app.lastFrame()).toContain('确认请求');
+    expect(app.lastFrame()).toContain('apply_patch');
+    app.stdin.write('a');
+
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledWith('allow_once'));
+    expect(idleTask).not.toHaveBeenCalled();
+  });
 });

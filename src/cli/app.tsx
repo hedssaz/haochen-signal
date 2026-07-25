@@ -1,8 +1,9 @@
-import React, {useCallback, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {Box, Text, useApp, useInput} from 'ink';
 import {parseSlashCommand} from './commands.js';
 import {initialUiState, uiReducer, type AgentUiEvent, type UiEntry} from './reducer.js';
 import type {ToolResult} from '../tools/types.js';
+import type {ConfirmationBroker, PendingConfirmation} from './confirmation.js';
 
 export interface SessionSummary {
   id: string;
@@ -29,11 +30,13 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   executeTool?: (name: string, input: unknown, signal: AbortSignal) => Promise<ToolResult>;
   compact?: () => Promise<CompactResult>;
   saveSession?: () => Promise<void>;
+  appendInterrupted?: (reason: string) => Promise<void>;
   createSession?: () => Promise<string>;
   listSessions?: () => Promise<SessionSummary[]>;
   resumeSession?: (id: string) => Promise<ResumeResult>;
   onModelChange?: (model: string) => void;
   onExit?: () => Promise<void> | void;
+  confirmation?: ConfirmationBroker;
 }
 
 const banner = [
@@ -58,9 +61,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const [state, setState] = useState(initialUiState);
   const [model, setModel] = useState(props.model);
   const [sessionId, setSessionId] = useState(props.sessionId);
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | undefined>(
+    () => props.confirmation?.getPending(),
+  );
   const inputRef = useRef('');
   const activeController = useRef<AbortController | undefined>(undefined);
   const abortRequested = useRef(false);
+  const interruptedPersisted = useRef(false);
   const exiting = useRef(false);
 
   const dispatch = useCallback((event: Parameters<typeof uiReducer>[1]) => {
@@ -71,17 +78,31 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     dispatch({type: 'notice', entry: localEntry(prefix, text)});
   }, [dispatch]);
 
+  useEffect(() => props.confirmation?.subscribe(() => {
+    setPendingConfirmation(props.confirmation?.getPending());
+  }), [props.confirmation]);
+
+  const persistInterrupted = useCallback(async (reason: string) => {
+    if (interruptedPersisted.current) return;
+    interruptedPersisted.current = true;
+    await props.appendInterrupted?.(reason);
+  }, [props.appendInterrupted]);
+
   const leave = useCallback(async (interrupted = false) => {
     if (exiting.current) return;
     exiting.current = true;
-    if (interrupted) dispatch({type: 'interrupted', reason: '用户中止'});
+    if (interrupted) {
+      await persistInterrupted('用户中止');
+      dispatch({type: 'interrupted', reason: '用户中止'});
+    }
     try {
+      props.confirmation?.close();
       await props.saveSession?.();
       await props.onExit?.();
     } finally {
       exit();
     }
-  }, [dispatch, exit, props]);
+  }, [dispatch, exit, persistInterrupted, props]);
 
   const runTask = useCallback(async (task: string) => {
     if (activeController.current !== undefined) {
@@ -91,9 +112,11 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     const controller = new AbortController();
     activeController.current = controller;
     abortRequested.current = false;
+    interruptedPersisted.current = false;
     dispatch({type: 'status', text: '正在理解任务'});
     try {
       for await (const event of props.runTask(task, controller.signal)) {
+        if (event.type === 'interrupted') interruptedPersisted.current = true;
         dispatch(event);
       }
     } catch (error) {
@@ -202,6 +225,12 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   }, [appendNotice, dispatch, leave, model, props, runTask, sessionId, state.phase]);
 
   useInput((input, key) => {
+    if (pendingConfirmation !== undefined) {
+      if (input === 'a') props.confirmation?.respond('allow_once');
+      else if (input === 's') props.confirmation?.respond('allow_session');
+      else if (input === 'd' || key.escape) props.confirmation?.respond('deny');
+      return;
+    }
     if (key.ctrl && input.toLowerCase() === 'c') {
       const controller = activeController.current;
       if (controller === undefined) {
@@ -238,6 +267,11 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     <Box flexDirection="column" marginTop={1}>
       {state.transcript.map((item, index) => <Text key={`${index}-${item.text}`}>{`${item.prefix} ${item.text}`}</Text>)}
     </Box>
+    {pendingConfirmation === undefined ? null : <Box flexDirection="column" marginTop={1}>
+      <Text color="yellow">◉ 确认请求 · {pendingConfirmation.operation.tool}</Text>
+      <Text>{`风险：${pendingConfirmation.boundary.risk}\n范围：${pendingConfirmation.boundary.normalizedScope.join(', ')}\n${pendingConfirmation.boundary.reasons.join('；')}`}</Text>
+      <Text color="yellow">a 仅本次允许 · s 本会话允许 · d 拒绝</Text>
+    </Box>}
     <Box marginTop={1}>
       <Text color="cyan">浩宸 › </Text><Text>{state.input}</Text>
     </Box>

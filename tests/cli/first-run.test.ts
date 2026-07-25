@@ -37,6 +37,24 @@ describe('runFirstRun', () => {
     expect(input.seen.filter(value => value.prompt.includes('API 地址'))).toHaveLength(2);
   });
 
+  it.each([
+    'ftp://api.example.test/v1',
+    'https://key:secret@api.example.test/v1',
+  ])('rejects a non-HTTP(S) or credential-bearing endpoint: %s', async invalidUrl => {
+    const input = scriptedInput([
+      invalidUrl,
+      'https://api.example.test/v1',
+      'wolf-2',
+      'temp-key',
+      'n',
+    ]);
+
+    const config = await runFirstRun(input, {write: () => undefined});
+
+    expect(config.baseUrl).toBe('https://api.example.test/v1');
+    expect(input.seen.filter(value => value.prompt.includes('API 地址'))).toHaveLength(2);
+  });
+
   it('requests the API key without echoing it', async () => {
     const input = scriptedInput(['https://api.example.test/v1', 'wolf-2', 'temp-key', 'n']);
 
