@@ -22,7 +22,7 @@ import {listFiles, searchText, readFileTool, applyPatch} from '../tools/files.js
 import {runCommand} from '../tools/command.js';
 import {gitStatus, gitDiff, gitLog} from '../tools/git.js';
 import {webSearch, webFetch} from '../tools/web.js';
-import {App} from './app.js';
+import {App, type CompactResult} from './app.js';
 import {InteractiveConfirmationBroker} from './confirmation.js';
 import {runFirstRunWithCredentials} from './first-run.js';
 import {credentialSaverForPlatform, resolveUserHome} from './platform.js';
@@ -32,6 +32,7 @@ import {clearTerminalScreen} from './terminal-screen.js';
 import {GateReporter} from './gate-reporter.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
 import type {ModelClient} from '../providers/types.js';
+import type {SessionEvent} from '../sessions/types.js';
 
 const args = new Set(process.argv.slice(2));
 
@@ -81,6 +82,39 @@ export async function streamCompactSummary(
     if (event.type === 'text_delta') text += event.text;
   }
   return {text, streamTokens};
+}
+
+export async function compactSessionHistory(options: {
+  readEvents: () => Promise<readonly SessionEvent[]>;
+  appendSummary: (
+    event: Extract<SessionEvent, {type: 'summary'}>,
+  ) => Promise<void>;
+  model: ModelClient;
+  modelName: string;
+  signal: AbortSignal;
+}): Promise<CompactResult> {
+  const events = await options.readEvents().catch((): readonly SessionEvent[] => []);
+  options.signal.throwIfAborted();
+  let streamTokens = 0;
+  const result = await compactHistory(events, async prompt => {
+    const summary = await streamCompactSummary(
+      options.model,
+      options.modelName,
+      prompt,
+      options.signal,
+    );
+    options.signal.throwIfAborted();
+    streamTokens += summary.streamTokens;
+    return summary.text;
+  });
+  options.signal.throwIfAborted();
+  if (result.compacted) {
+    options.signal.throwIfAborted();
+    await options.appendSummary(result.summaryEvent);
+    options.signal.throwIfAborted();
+    return {ok: true, message: '已压缩历史。', streamTokens};
+  }
+  return {ok: false, message: result.reason, streamTokens};
 }
 
 async function main(): Promise<void> {
@@ -144,7 +178,7 @@ async function main(): Promise<void> {
       return runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
     }}
     executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, signal, reportGate: event => gateReporter.report(event)})}
-    compact={async signal => { const events = await sessionStore.read(sessionId).catch(() => []); let streamTokens = 0; const result = await compactHistory(events, async prompt => { const summary = await streamCompactSummary(model, activeConfig.model, prompt, signal); streamTokens += summary.streamTokens; return summary.text; }); if (result.compacted) { await sessionStore.append(sessionId, result.summaryEvent); return {ok: true, message: '已压缩历史。', streamTokens}; } return {ok: false, message: result.reason, streamTokens}; }}
+    compact={signal => compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model, modelName: activeConfig.model, signal})}
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
       if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
       await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});

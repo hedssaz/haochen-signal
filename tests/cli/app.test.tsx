@@ -299,8 +299,9 @@ describe('App', () => {
     await vi.waitFor(() => expect(compactSignal?.aborted).toBe(true));
     await vi.waitFor(() => {
       expect(app.lastFrame()).not.toContain('输入已锁定');
-      expect(app.lastFrame()).toContain('↓ 3 tokens · 思考完成');
+      expect(app.lastFrame()).toContain('↓ 0 tokens · 思考完成');
     });
+    expect(app.lastFrame()).not.toContain('已压缩历史。');
     expect(onExit).not.toHaveBeenCalled();
     expect(appendInterrupted).not.toHaveBeenCalled();
   });

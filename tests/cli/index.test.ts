@@ -1,6 +1,7 @@
 import {readFile} from 'node:fs/promises';
 import {describe, expect, it, vi} from 'vitest';
 import type {ModelClient} from '../../src/providers/types.js';
+import type {SessionEvent} from '../../src/sessions/types.js';
 
 describe('CLI entrypoint', () => {
   it('passes the live session grant set to the App instead of its startup size', async () => {
@@ -139,6 +140,64 @@ describe('CLI entrypoint', () => {
         controller.signal,
       )).resolves.toEqual({text: '摘要完成', streamTokens: 3});
       expect(receivedSignal).toBe(controller.signal);
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+    }
+  });
+
+  it('does not append a summary when compact is aborted after streaming', async () => {
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
+
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        compactSessionHistory?: (options: {
+          readEvents: () => Promise<readonly SessionEvent[]>;
+          appendSummary: (
+            event: Extract<SessionEvent, {type: 'summary'}>,
+          ) => Promise<void>;
+          model: ModelClient;
+          modelName: string;
+          signal: AbortSignal;
+        }) => Promise<unknown>;
+      };
+      expect(cli.compactSessionHistory).toBeTypeOf('function');
+      if (typeof cli.compactSessionHistory !== 'function') return;
+
+      const controller = new AbortController();
+      const summary = JSON.stringify({
+        goal: '完成任务',
+        changes: [],
+        remaining: [],
+        keyFiles: [],
+        decisions: [],
+        errors: [],
+        verification: [],
+      });
+      const model: ModelClient = {
+        async *stream() {
+          yield {type: 'text_delta', text: summary};
+          controller.abort(new DOMException('用户中止', 'AbortError'));
+        },
+      };
+      const appendSummary = vi.fn(async () => undefined);
+      const events: SessionEvent[] = Array.from({length: 7}, (_, index) => ({
+        type: 'user' as const,
+        at: index,
+        text: `消息 ${index}`,
+      }));
+
+      await expect(cli.compactSessionHistory({
+        readEvents: async () => events,
+        appendSummary,
+        model,
+        modelName: 'wolf-2',
+        signal: controller.signal,
+      })).rejects.toMatchObject({name: 'AbortError'});
+      expect(appendSummary).not.toHaveBeenCalled();
     } finally {
       process.argv = originalArgv;
       write.mockRestore();

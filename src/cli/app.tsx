@@ -324,6 +324,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         setRuntimeStatus('正在压缩历史');
         try {
           const result = await props.compact(controller.signal);
+          controller.signal.throwIfAborted();
           setStreamTokenCount(result.streamTokens ?? 0);
           appendNotice(result.ok ? '✓' : '✗', result.message);
         } catch (error) {
