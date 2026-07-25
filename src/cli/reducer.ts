@@ -10,7 +10,7 @@ export type UiPhase =
   | 'error';
 
 export interface UiEntry {
-  prefix: '◆' | '◇' | '◉' | '✓' | '✗';
+  prefix: '◆' | '◇' | '◉' | '✓' | '✗' | '浩宸 ›';
   text: string;
 }
 

@@ -1,6 +1,6 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {Box, Text, useApp, useInput} from 'ink';
-import {parseSlashCommand} from './commands.js';
+import {parseSlashCommand, suggestSlashCommands} from './commands.js';
 import {initialUiState, uiReducer, type AgentUiEvent, type UiEntry} from './reducer.js';
 import type {ToolResult} from '../tools/types.js';
 import type {ConfirmationBroker, PendingConfirmation} from './confirmation.js';
@@ -135,6 +135,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   }, [appendNotice, dispatch, props]);
 
   const submitCommand = useCallback(async (input: string) => {
+    appendNotice('浩宸 ›', input);
     const command = parseSlashCommand(input);
     if (command === undefined) {
       await runTask(input);
@@ -245,6 +246,14 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       else if (input === 'd' || key.escape) props.confirmation?.respond('deny');
       return;
     }
+    if (key.tab) {
+      const suggestion = suggestSlashCommands(inputRef.current)[0];
+      if (suggestion !== undefined) {
+        inputRef.current = `/${suggestion.name}`;
+        dispatch({type: 'input', input: inputRef.current});
+      }
+      return;
+    }
     if (key.return) {
       const text = inputRef.current.trim();
       inputRef.current = '';
@@ -263,6 +272,8 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     }
   });
 
+  const commandSuggestions = suggestSlashCommands(state.input);
+
   return <Box flexDirection="column">
     <Text>{banner}</Text>
     <Box flexDirection="column" marginTop={1}>
@@ -276,5 +287,17 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     <Box marginTop={1}>
       <Text color="cyan">浩宸 › </Text><Text>{state.input}</Text>
     </Box>
+    {commandSuggestions.length === 0 ? null : <Box
+      borderStyle="round"
+      borderColor="cyan"
+      flexDirection="column"
+      paddingX={1}
+    >
+      <Text color="cyan">斜杠命令 · Tab 补全</Text>
+      {commandSuggestions.map(command => <Text key={command.name}>
+        <Text color="cyan">{command.usage.padEnd(20)}</Text>
+        <Text dimColor>{command.description}</Text>
+      </Text>)}
+    </Box>}
   </Box>;
 }

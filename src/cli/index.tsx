@@ -26,6 +26,7 @@ import {App} from './app.js';
 import {InteractiveConfirmationBroker} from './confirmation.js';
 import {runFirstRunWithCredentials} from './first-run.js';
 import {createFirstRunInput} from './terminal-input.js';
+import {clearTerminalScreen} from './terminal-screen.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
 
 const args = new Set(process.argv.slice(2));
@@ -81,6 +82,7 @@ async function main(): Promise<void> {
   const registry = new ToolRegistry({tools: toolDefinitions(), classify: classifyOperation, review: reviewOperation, confirm: request => confirmations.request(request), sessionGrants: grants, audit});
   let sessionId = createSessionId();
   let activeInterruptionWriter: ((reason: string) => Promise<void>) | undefined;
+  clearTerminalScreen(process.stdout);
   const instance = render(<App
     workspace={workspace} sessionId={sessionId} model={activeConfig.model} contextTokens={activeConfig.contextWindow} sessionGrants={grants}
     runTask={(task, signal) => {

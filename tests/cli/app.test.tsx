@@ -44,6 +44,59 @@ describe('App', () => {
     expect(app.lastFrame()).toContain('README 描述了浩宸信号');
   });
 
+  it('keeps submitted user text in the transcript', async () => {
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {});
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('修复登录问题');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(runTask).toHaveBeenCalledWith(
+      '修复登录问题',
+      expect.any(AbortSignal),
+    ));
+
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('浩宸 › 修复登录问题'));
+  });
+
+  it('shows matching slash commands while the user types', async () => {
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/');
+
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('/help');
+      expect(app.lastFrame()).toContain('/permissions');
+      expect(app.lastFrame()).toContain('Tab 补全');
+    });
+  });
+
+  it('completes the first matching slash command with Tab', async () => {
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/he');
+    app.stdin.write('\t');
+
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('浩宸 › /help'));
+  });
+
   it.each(['/help', '/status', '/model wolf-3', '/diff', '/permissions', '/compact', '/clear', '/resume abc', '/exit'])(
     'handles %s locally without sending it to the model',
     async command => {
@@ -64,9 +117,7 @@ describe('App', () => {
       await waitForInputListener();
       app.stdin.write(command);
       app.stdin.write('\r');
-      await vi.waitFor(() => {
-        expect(app.lastFrame()).not.toContain(command);
-      });
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
 
       expect(idleTask).not.toHaveBeenCalled();
     },
