@@ -1,0 +1,104 @@
+import React from 'react';
+import {afterEach, describe, expect, it, vi} from 'vitest';
+import {render} from 'ink-testing-library';
+import {App} from '../../src/cli/app.js';
+import type {AgentUiEvent} from '../../src/cli/reducer.js';
+import type {ToolResult} from '../../src/tools/types.js';
+
+async function* scriptedEvents(): AsyncIterable<AgentUiEvent> {
+  yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
+  yield {
+    type: 'tool_finished',
+    name: 'read_file',
+    result: {ok: true, summary: 'README.md'},
+  };
+  yield {type: 'assistant_text', text: 'README 描述了浩宸信号'};
+}
+
+const idleTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {});
+const toolResult: ToolResult = {ok: true, summary: '当前差异为空'};
+
+async function waitForInputListener(): Promise<void> {
+  await new Promise<void>(resolve => setTimeout(resolve, 0));
+}
+
+describe('App', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it('renders injected agent events after submitting a task', async () => {
+    const app = render(<App
+      runTask={() => scriptedEvents()}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取 README');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('✓ 任务完成');
+    });
+
+    expect(app.lastFrame()).toContain('◆ 读取碎片');
+    expect(app.lastFrame()).toContain('README 描述了浩宸信号');
+  });
+
+  it.each(['/help', '/status', '/model wolf-3', '/diff', '/permissions', '/compact', '/clear', '/resume abc', '/exit'])(
+    'handles %s locally without sending it to the model',
+    async command => {
+      const onExit = vi.fn(async () => undefined);
+      const app = render(<App
+        runTask={idleTask}
+        workspace="/workspace"
+        sessionId="signal-1"
+        model="wolf-2"
+        executeTool={vi.fn(async () => toolResult)}
+        compact={vi.fn(async () => ({ok: true, message: '已压缩'}))}
+        saveSession={vi.fn(async () => undefined)}
+        createSession={vi.fn(async () => 'signal-2')}
+        resumeSession={vi.fn(async () => ({id: 'abc', message: '已恢复 abc'}))}
+        onExit={onExit}
+      />);
+
+      await waitForInputListener();
+      app.stdin.write(command);
+      app.stdin.write('\r');
+      await vi.waitFor(() => {
+        expect(app.lastFrame()).not.toContain(command);
+      });
+
+      expect(idleTask).not.toHaveBeenCalled();
+    },
+  );
+
+  it('aborts once and exits after the second Ctrl+C while a task runs', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const onExit = vi.fn(async () => undefined);
+    const runTask = vi.fn(async function* (_task: string, signal: AbortSignal): AsyncIterable<AgentUiEvent> {
+      yield {type: 'status', text: '正在读取'};
+      await Promise.race([
+        blocked,
+        new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), {once: true})),
+      ]);
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      onExit={onExit}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取 README');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(runTask).toHaveBeenCalled());
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => expect(runTask.mock.calls[0]?.[1].aborted).toBe(true));
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => expect(onExit).toHaveBeenCalled());
+    release();
+  });
+});
