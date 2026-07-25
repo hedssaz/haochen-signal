@@ -39,7 +39,10 @@ const approved: ReviewDecision = {
   risk: 'low',
   summary: '操作与当前任务一致',
   reasons: ['范围明确'],
-  affected_scope: ['package.json'],
+  affected_scope: [
+    'cwd:.',
+    'command:npm install --ignore-scripts vitest',
+  ],
   constraints: [],
 };
 
@@ -84,6 +87,7 @@ describe('tool execution registry', () => {
       tempDir: join(root, 'tool-output'),
       taskSummary: '验证项目改动',
       reviewClient: scriptedModel([]),
+      reviewModel: 'wolf-review-1',
       signal: AbortSignal.timeout(5_000),
     };
     executeTool = vi.fn(async (
@@ -166,6 +170,86 @@ describe('tool execution registry', () => {
     expect(executeTool).toHaveBeenCalledOnce();
   });
 
+  it('requires confirmation when reviewer risk exceeds boundary risk', async () => {
+    review = vi.fn(async (): Promise<ReviewDecision> => ({
+      ...approved,
+      risk: 'high',
+    }));
+
+    const result = await registry().execute(
+      'run_command',
+      {command: 'npm', args: ['install', '--ignore-scripts', 'vitest']},
+      executionContext,
+    );
+
+    expect(result).toMatchObject({ok: true});
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({
+      review: expect.objectContaining({
+        verdict: 'ask_user',
+        risk: 'high',
+      }),
+    }));
+    expect(executeTool).toHaveBeenCalledOnce();
+  });
+
+  it('requires confirmation when reviewer expands the classified scope', async () => {
+    review = vi.fn(async () => ({
+      ...approved,
+      affected_scope: [...approved.affected_scope, 'path:../outside'],
+    }));
+
+    const result = await registry().execute(
+      'run_command',
+      {command: 'npm', args: ['install', '--ignore-scripts', 'vitest']},
+      executionContext,
+    );
+
+    expect(result).toMatchObject({ok: true});
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({
+      review: expect.objectContaining({
+        verdict: 'ask_user',
+        risk: 'high',
+      }),
+    }));
+    expect(executeTool).toHaveBeenCalledOnce();
+  });
+
+  it('requires confirmation for constraints without an executor', async () => {
+    review = vi.fn(async () => ({
+      ...approved,
+      constraints: ['禁止运行生命周期脚本'],
+    }));
+
+    const result = await registry().execute(
+      'run_command',
+      {command: 'npm', args: ['install', '--ignore-scripts', 'vitest']},
+      executionContext,
+    );
+
+    expect(result).toMatchObject({ok: true});
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({
+      review: expect.objectContaining({
+        verdict: 'ask_user',
+        risk: 'high',
+      }),
+    }));
+    expect(executeTool).toHaveBeenCalledOnce();
+  });
+
+  it('passes the explicitly configured model to red-eye review', async () => {
+    await registry().execute(
+      'run_command',
+      {command: 'npm', args: ['install', '--ignore-scripts', 'vitest']},
+      executionContext,
+    );
+
+    expect(review).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({model: 'wolf-review-1'}),
+      executionContext.signal,
+    );
+  });
+
   it('asks for confirmation when review cannot approve automatically', async () => {
     review = vi.fn(async () => askUser);
 
@@ -214,6 +298,24 @@ describe('tool execution registry', () => {
 
     expect(confirm).toHaveBeenCalledTimes(2);
     expect(executeTool).toHaveBeenCalledTimes(3);
+    expect(sessionGrants).toHaveLength(2);
+  });
+
+  it('does not reuse an allow_session grant across workspaces', async () => {
+    confirm = vi.fn(async (): Promise<ConfirmationResult> => 'allow_session');
+    const otherWorkspace = join(root, 'other-workspace');
+    await mkdir(otherWorkspace);
+    const toolRegistry = registry();
+    const operation = {command: 'sudo', args: ['npm', 'test']};
+
+    await toolRegistry.execute('run_command', operation, executionContext);
+    await toolRegistry.execute('run_command', operation, {
+      ...executionContext,
+      workspace: otherWorkspace,
+    });
+
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(executeTool).toHaveBeenCalledTimes(2);
     expect(sessionGrants).toHaveLength(2);
   });
 
@@ -305,6 +407,10 @@ describe('tool execution registry', () => {
 
   it('writes redacted classification, review and result details to audit', async () => {
     const secret = 'ghp_1234567890abcdef1234567890abcdef';
+    review = vi.fn(async (_client, request) => ({
+      ...approved,
+      affected_scope: [...request.boundary.normalizedScope],
+    }));
     executeTool.mockResolvedValue({
       ok: true,
       summary: `执行完成 ${secret}`,
@@ -334,5 +440,101 @@ describe('tool execution registry', () => {
     });
     expect(auditText).not.toContain(secret);
     expect(auditText).not.toContain('ghp_');
+  });
+
+  it('redacts plain CLI credential options from audit records', async () => {
+    const secrets = [
+      'plain-token-value',
+      'plain-api-value',
+      'plain-password-value',
+      'plain-line-secret',
+      'plain-quoted-secret',
+    ];
+    executeTool.mockResolvedValue({
+      ok: true,
+      summary: '工具已执行',
+      data: {
+        output: 'login --token\nplain-line-secret '
+          + '--api-key=plain"plain-quoted-secret"',
+      },
+    });
+
+    await registry().execute(
+      'run_command',
+      {
+        command: 'login',
+        args: [
+          'account',
+          '--token',
+          secrets[0],
+          `--api-key=${secrets[1]}`,
+          '--password',
+          secrets[2],
+        ],
+      },
+      executionContext,
+    );
+    const auditText = await readFile(
+      audit.pathFor(workspaceId(workspace)),
+      'utf8',
+    );
+
+    for (const secret of secrets) {
+      expect(auditText).not.toContain(secret);
+    }
+    expect(auditText).toContain('[REDACTED]');
+  });
+
+  it('preserves the real tool result when post-execution audit fails', async () => {
+    class FailingAuditStore extends AuditStore {
+      override async append(): Promise<void> {
+        throw new Error('audit failed with secret-audit-detail');
+      }
+    }
+    audit = new FailingAuditStore(join(root, 'unwritable-audit'));
+    executeTool.mockResolvedValue({
+      ok: true,
+      summary: '工具实际执行成功',
+      data: {changed: true},
+    });
+
+    const result = await registry().execute(
+      'run_command',
+      {command: 'npm', args: ['test']},
+      executionContext,
+    );
+
+    expect(executeTool).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      ok: true,
+      summary: '工具实际执行成功',
+      data: {changed: true},
+      warnings: [{
+        code: 'AUDIT_FAILED',
+        message: expect.stringContaining('工具已执行'),
+      }],
+    });
+    expect(JSON.stringify(result)).not.toContain('secret-audit-detail');
+  });
+
+  it('blocks execution when a pre-execution audit write fails', async () => {
+    class FailingAuditStore extends AuditStore {
+      override async prepare(): Promise<void> {
+        throw new Error('audit unavailable');
+      }
+    }
+    audit = new FailingAuditStore(join(root, 'unwritable-audit'));
+
+    const result = await registry().execute(
+      'run_command',
+      {command: 'npm', args: ['test']},
+      executionContext,
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'AUDIT_FAILED'},
+    });
+    expect(executeTool).not.toHaveBeenCalled();
   });
 });

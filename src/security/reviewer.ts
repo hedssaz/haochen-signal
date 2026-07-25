@@ -20,6 +20,7 @@ export const ReviewDecisionSchema = z.strictObject({
 });
 
 export interface ReviewRequest {
+  model: string;
   taskSummary: string;
   tool: string;
   input: unknown;
@@ -48,6 +49,7 @@ function failedReview(request: ReviewRequest): ReviewDecision {
 }
 
 function reviewPrompt(request: ReviewRequest): string {
+  const {model: _model, ...operationRequest} = request;
   return JSON.stringify({
     schema: {
       verdict: 'approve | ask_user | deny',
@@ -57,7 +59,7 @@ function reviewPrompt(request: ReviewRequest): string {
       affected_scope: ['字符串'],
       constraints: ['字符串'],
     },
-    request,
+    request: operationRequest,
   });
 }
 
@@ -158,7 +160,7 @@ export async function reviewOperation(
     let output = '';
     let finished = false;
     for await (const event of client.stream({
-      model: 'reviewer',
+      model: request.model,
       messages: [
         {role: 'system', content: REVIEW_SYSTEM_PROMPT},
         {role: 'user', content: reviewPrompt(request)},

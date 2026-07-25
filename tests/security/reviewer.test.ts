@@ -14,6 +14,7 @@ import {
 } from '../helpers/scripted-model.js';
 
 const request: ReviewRequest = {
+  model: 'wolf-review-1',
   taskSummary: '为项目安装测试依赖',
   tool: 'run_command',
   input: {
@@ -106,6 +107,7 @@ describe('red-eye operation reviewer', () => {
     }, AbortSignal.timeout(1_000));
 
     expect(captured).toMatchObject({
+      model: 'wolf-review-1',
       toolChoice: 'none',
       messages: [
         {

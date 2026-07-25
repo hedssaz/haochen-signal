@@ -10,6 +10,7 @@ export interface ToolResult<T = unknown> {
   summary: string;
   data?: T;
   error?: {code: string; message: string};
+  warnings?: Array<{code: string; message: string}>;
   truncated?: boolean;
 }
 

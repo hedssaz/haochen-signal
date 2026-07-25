@@ -26,6 +26,7 @@ const FAILING_REVIEW_CLIENT: ModelClient = {
 export interface ToolExecutionContext extends ToolContext {
   taskSummary: string;
   reviewClient?: ModelClient;
+  reviewModel: string;
   signal: AbortSignal;
 }
 
@@ -70,6 +71,41 @@ function fallbackReview(boundary: BoundaryDecision): ReviewDecision {
   };
 }
 
+const RISK_RANK = {
+  low: 0,
+  medium: 1,
+  high: 2,
+} as const;
+
+function enforceReviewBoundary(
+  review: ReviewDecision,
+  boundary: BoundaryDecision,
+): ReviewDecision {
+  if (review.verdict !== 'approve') return review;
+
+  const conflicts: string[] = [];
+  if (RISK_RANK[review.risk] > RISK_RANK[boundary.risk]) {
+    conflicts.push('审查风险高于确定性边界风险');
+  }
+
+  const boundaryScope = new Set(boundary.normalizedScope);
+  if (review.affected_scope.some(scope => !boundaryScope.has(scope))) {
+    conflicts.push('审查影响范围超出确定性边界范围');
+  }
+
+  if (review.constraints.length > 0) {
+    conflicts.push('当前执行门无法自动验证审查约束');
+  }
+
+  if (conflicts.length === 0) return review;
+  return {
+    ...review,
+    verdict: 'ask_user',
+    risk: 'high',
+    reasons: [...review.reasons, ...conflicts],
+  };
+}
+
 export class ToolRegistry {
   constructor(private readonly options: ToolRegistryOptions) {}
 
@@ -77,6 +113,7 @@ export class ToolRegistry {
     name: string,
     context: ToolExecutionContext,
     details: AuditDetails,
+    executionOccurred = false,
   ): Promise<ToolResult> {
     const rawEntry: AuditEntry = {
       at: Date.now(),
@@ -104,6 +141,18 @@ export class ToolRegistry {
       await this.options.audit.append(workspaceId(context.workspace), redacted);
       return details.result;
     } catch {
+      if (executionOccurred) {
+        return {
+          ...details.result,
+          warnings: [
+            ...(details.result.warnings ?? []),
+            {
+              code: 'AUDIT_FAILED',
+              message: '工具已执行，但无法写入脱敏审计记录',
+            },
+          ],
+        };
+      }
       return failure('AUDIT_FAILED', '无法写入脱敏审计记录');
     }
   }
@@ -179,6 +228,7 @@ export class ToolRegistry {
         const rawReview = await this.options.review(
           executionContext.reviewClient ?? FAILING_REVIEW_CLIENT,
           {
+            model: executionContext.reviewModel,
             taskSummary: executionContext.taskSummary,
             tool: name,
             input: validatedInput,
@@ -188,7 +238,7 @@ export class ToolRegistry {
         );
         const parsedReview = ReviewDecisionSchema.safeParse(rawReview);
         review = parsedReview.success
-          ? parsedReview.data
+          ? enforceReviewBoundary(parsedReview.data, classification)
           : fallbackReview(classification);
       } catch {
         review = fallbackReview(classification);
@@ -302,6 +352,15 @@ export class ToolRegistry {
       });
     }
 
+    try {
+      await this.options.audit.prepare(workspaceId(executionContext.workspace));
+    } catch {
+      return failure(
+        'AUDIT_FAILED',
+        '执行前无法准备脱敏审计记录，操作未执行',
+      );
+    }
+
     if (addSessionGrant) {
       this.options.sessionGrants.add(approvedFingerprint);
     }
@@ -323,15 +382,20 @@ export class ToolRegistry {
       );
     }
 
-    return this.auditResult(name, executionContext, {
-      input: validatedInput,
-      decision: 'execute',
-      classification,
-      finalClassification,
-      review,
-      confirmation,
-      sessionGrant: hasSessionGrant || addSessionGrant,
-      result,
-    });
+    return this.auditResult(
+      name,
+      executionContext,
+      {
+        input: validatedInput,
+        decision: 'execute',
+        classification,
+        finalClassification,
+        review,
+        confirmation,
+        sessionGrant: hasSessionGrant || addSessionGrant,
+        result,
+      },
+      true,
+    );
   }
 }

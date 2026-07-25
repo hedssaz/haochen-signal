@@ -197,6 +197,36 @@ it('redacts inline credential fields in command arguments', () => {
   ].join('\n'));
 });
 
+it('redacts separated and equals-style CLI credential options', () => {
+  expect(redactValue([
+    'login',
+    '--token',
+    'plain-token-value',
+    '--api-key=plain-api-value',
+    '--password',
+    'plain-password-value',
+    '--safe=value',
+  ])).toEqual([
+    'login',
+    '--token',
+    '[REDACTED]',
+    '--api-key=[REDACTED]',
+    '--password',
+    '[REDACTED]',
+    '--safe=value',
+  ]);
+});
+
+it('redacts CLI credentials across shell whitespace and quoted concatenation', () => {
+  expect(redactValue(
+    'login --token\nplain-line-secret '
+    + '--api-key=plain"quoted-secret" --safe=value',
+  )).toBe(
+    'login --token\n[REDACTED] '
+    + '--api-key=[REDACTED] --safe=value',
+  );
+});
+
 it('redacts complete and truncated private-key blocks with extended labels', () => {
   expect(redactValue(
     'before -----BEGIN PGP PRIVATE KEY BLOCK-----\n'

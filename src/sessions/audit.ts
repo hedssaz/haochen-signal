@@ -17,6 +17,11 @@ export class AuditStore {
     return jsonlPathFor(this.directory, workspaceId, 'workspace');
   }
 
+  async prepare(workspaceId: string): Promise<void> {
+    await mkdir(this.directory, {recursive: true});
+    await appendUtf8(this.pathFor(workspaceId), '');
+  }
+
   async append(workspaceId: string, entry: AuditEntry): Promise<void> {
     await mkdir(this.directory, {recursive: true});
     await appendUtf8(
