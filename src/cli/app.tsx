@@ -391,8 +391,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       if (operation === undefined) {
         void leave();
       } else if (operation.kind === 'compact') {
-        operation.controller.abort(new DOMException('用户中止', 'AbortError'));
-        appendNotice('✗', '正在中止历史压缩。');
+        if (abortRequested.current) {
+          void leave();
+        } else {
+          abortRequested.current = true;
+          operation.controller.abort(new DOMException('用户中止', 'AbortError'));
+          appendNotice('✗', '正在中止历史压缩。再次 Ctrl+C 将直接退出。');
+        }
       } else if (abortRequested.current) {
         void leave(true);
       } else {

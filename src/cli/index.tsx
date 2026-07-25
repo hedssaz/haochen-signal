@@ -24,6 +24,7 @@ import {gitStatus, gitDiff, gitLog} from '../tools/git.js';
 import {webSearch, webFetch} from '../tools/web.js';
 import {
   WEB_SEARCH_QUERY_MAX_LENGTH,
+  WEB_SEARCH_QUERY_PATTERN,
   WEB_SEARCH_RESULT_LIMIT_MAX,
 } from '../tools/web-contract.js';
 import {App, type CompactResult} from './app.js';
@@ -58,7 +59,7 @@ export function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unkno
     {name: 'git_status', description: '读取 Git 状态', inputSchema: z.object({}).strict(), jsonSchema: objectSchema({}), execute: (_i, c, s) => gitStatus(c, s)},
     {name: 'git_diff', description: '读取 Git 差异', inputSchema: z.object({staged: z.boolean().optional()}).strict(), jsonSchema: objectSchema({staged: {type: 'boolean'}}), execute: (i, c, s) => gitDiff(i as {staged?: boolean}, c, s)},
     {name: 'git_log', description: '读取近期 Git 记录', inputSchema: z.object({limit: z.number().int().optional()}).strict(), jsonSchema: objectSchema({limit: {type: 'integer'}}), execute: (i, c, s) => gitLog(i as {limit?: number}, c, s)},
-    {name: 'web_search', description: '搜索公开技术资料', inputSchema: z.object({query: z.string().trim().min(1).max(WEB_SEARCH_QUERY_MAX_LENGTH), limit: z.number().int().min(1).max(WEB_SEARCH_RESULT_LIMIT_MAX).optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string', minLength: 1, maxLength: WEB_SEARCH_QUERY_MAX_LENGTH}, limit: {type: 'integer', minimum: 1, maximum: WEB_SEARCH_RESULT_LIMIT_MAX}}, ['query']), execute: (i, c, s) => webSearch(i as {query: string; limit?: number}, c, s)},
+    {name: 'web_search', description: '搜索公开技术资料', inputSchema: z.object({query: z.string().trim().min(1).max(WEB_SEARCH_QUERY_MAX_LENGTH), limit: z.number().int().min(1).max(WEB_SEARCH_RESULT_LIMIT_MAX).optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string', description: '去除首尾空白后的长度必须为 1 至 500 个字符', pattern: WEB_SEARCH_QUERY_PATTERN}, limit: {type: 'integer', minimum: 1, maximum: WEB_SEARCH_RESULT_LIMIT_MAX}}, ['query']), execute: (i, c, s) => webSearch(i as {query: string; limit?: number}, c, s)},
     {name: 'web_fetch', description: '提取公开网页正文', inputSchema: z.object({url: z.string()}).strict(), jsonSchema: objectSchema({url: {type: 'string'}}, ['url']), execute: (i, c, s) => webFetch(i as {url: string}, c, s)},
   ];
   return new Map(specs.map(spec => [spec.name, spec]));

@@ -1,4 +1,5 @@
 import {readFile} from 'node:fs/promises';
+import {Ajv} from 'ajv';
 import {describe, expect, it, vi} from 'vitest';
 import type {ModelClient} from '../../src/providers/types.js';
 import type {SessionEvent} from '../../src/sessions/types.js';
@@ -89,8 +90,8 @@ describe('CLI entrypoint', () => {
         properties: {
           query: {
             type: 'string',
-            minLength: 1,
-            maxLength: 500,
+            description: '去除首尾空白后的长度必须为 1 至 500 个字符',
+            pattern: expect.any(String),
           },
           limit: {
             type: 'integer',
@@ -99,6 +100,10 @@ describe('CLI entrypoint', () => {
           },
         },
       });
+      const validate = new Ajv().compile(definition!.jsonSchema);
+      expect(validate({query: '   '})).toBe(false);
+      expect(validate({query: `  ${'x'.repeat(500)}  `})).toBe(true);
+      expect(validate({query: 'x'.repeat(501)})).toBe(false);
       expect(definition?.inputSchema.safeParse({query: '   '}).success).toBe(false);
       expect(definition?.inputSchema.safeParse({query: 'x'.repeat(501)}).success).toBe(false);
       expect(definition?.inputSchema.safeParse({

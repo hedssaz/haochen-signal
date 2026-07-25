@@ -319,6 +319,46 @@ describe('App', () => {
     expect(appendInterrupted).not.toHaveBeenCalled();
   });
 
+  it('exits on a second Ctrl+C while an aborted compact is still settling', async () => {
+    let compactSignal: AbortSignal | undefined;
+    let releaseCompact!: () => void;
+    const compactBlocked = new Promise<void>(resolve => { releaseCompact = resolve; });
+    const onExit = vi.fn(async () => undefined);
+    const saveSession = vi.fn(async () => undefined);
+    const appendInterrupted = vi.fn(async () => undefined);
+    const compact = vi.fn(async (signal: AbortSignal) => {
+      compactSignal = signal;
+      await compactBlocked;
+      return {ok: false, message: '已中止历史压缩。', committed: false};
+    });
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      compact={compact}
+      saveSession={saveSession}
+      appendInterrupted={appendInterrupted}
+      onExit={onExit}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/compact');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(compactSignal).toBeDefined());
+
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => expect(compactSignal?.aborted).toBe(true));
+    expect(onExit).not.toHaveBeenCalled();
+    expect(saveSession).not.toHaveBeenCalled();
+
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => expect(onExit).toHaveBeenCalledOnce());
+    expect(saveSession).toHaveBeenCalledWith('exit');
+    expect(appendInterrupted).not.toHaveBeenCalled();
+    releaseCompact();
+  });
+
   it('shows compact tokens before resolution and reconciles the exact final total', async () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
