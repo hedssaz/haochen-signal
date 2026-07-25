@@ -1,5 +1,6 @@
 import type {ReviewDecision} from '../security/reviewer.js';
 import type {ToolResult} from '../tools/types.js';
+import {summarizeToolInput} from './tool-summary.js';
 
 export type UiPhase =
   | 'idle'
@@ -9,9 +10,22 @@ export type UiPhase =
   | 'confirming'
   | 'error';
 
+export type UiEntryKind =
+  | 'user'
+  | 'assistant'
+  | 'tool'
+  | 'result'
+  | 'approval'
+  | 'status'
+  | 'review'
+  | 'error'
+  | 'success';
+
 export interface UiEntry {
-  prefix: '◆' | '◇' | '◉' | '✓' | '✗' | '浩宸 ›';
+  kind: UiEntryKind;
+  title: string;
   text: string;
+  detail?: string;
 }
 
 export interface UiState {
@@ -48,29 +62,34 @@ export const initialUiState: UiState = {
   transcript: [],
 };
 
-const toolSummary: Record<string, {text: string; prefix: UiEntry['prefix']}> = {
-  list_files: {text: '扫描信号', prefix: '◆'},
-  search_text: {text: '扫描信号', prefix: '◆'},
-  read_file: {text: '读取碎片', prefix: '◆'},
-  apply_patch: {text: '修改节点', prefix: '◆'},
-  run_command: {text: '执行验证', prefix: '◇'},
-  git_status: {text: '读取 Git 状态', prefix: '◆'},
-  git_diff: {text: '读取 Git 差异', prefix: '◆'},
-  git_log: {text: '读取 Git 记录', prefix: '◆'},
-  web_search: {text: '搜索公开资料', prefix: '◆'},
-  web_fetch: {text: '读取公开资料', prefix: '◆'},
+const toolSummary: Record<string, string> = {
+  list_files: '扫描信号',
+  search_text: '扫描信号',
+  read_file: '读取碎片',
+  apply_patch: '修改节点',
+  run_command: '执行验证',
+  git_status: '读取 Git 状态',
+  git_diff: '读取 Git 差异',
+  git_log: '读取 Git 记录',
+  web_search: '搜索公开资料',
+  web_fetch: '读取公开资料',
 };
 
-function entry(prefix: UiEntry['prefix'], text: string): UiEntry {
-  return {prefix, text};
+function entry(
+  kind: UiEntryKind,
+  title: string,
+  text: string,
+  detail?: string,
+): UiEntry {
+  return {kind, title, text, ...(detail === undefined ? {} : {detail})};
 }
 
 function append(state: UiState, value: UiEntry, overrides: Partial<UiState> = {}): UiState {
   return {...state, ...overrides, transcript: [...state.transcript, value]};
 }
 
-function describeTool(name: string): {text: string; prefix: UiEntry['prefix']} {
-  return toolSummary[name] ?? {text: `执行工具 ${name}`, prefix: '◆'};
+function describeTool(name: string): string {
+  return toolSummary[name] ?? `执行工具 ${name}`;
 }
 
 function failureDetails(result: ToolResult): string {
@@ -96,57 +115,62 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
 
   switch (event.type) {
     case 'status':
-      return append(state, entry('◆', event.text), {phase: 'thinking', error: undefined});
+      return append(state, entry('status', '状态', event.text), {phase: 'thinking', error: undefined});
     case 'assistant_delta':
       return {...state, phase: 'thinking', error: undefined};
     case 'assistant_message':
-      return append(state, entry('◆', event.text), {
+      return append(state, entry('assistant', '浩宸', event.text), {
         phase: 'thinking',
         error: undefined,
       });
     case 'assistant_text':
-      return append(state, entry('✓', `任务完成\n${event.text}`), {
+      return append(state, entry('assistant', '浩宸', event.text), {
         phase: 'idle',
         activeTool: undefined,
         error: undefined,
       });
     case 'tool_started': {
       const summary = describeTool(event.name);
-      return append(state, entry(summary.prefix, summary.text), {
+      return append(state, entry(
+        'tool',
+        event.name,
+        summary,
+        summarizeToolInput(event.name, event.input),
+      ), {
         phase: 'running_tool',
-        activeTool: {name: event.name, summary: summary.text},
+        activeTool: {name: event.name, summary},
         error: undefined,
       });
     }
     case 'tool_finished': {
       const summary = describeTool(event.name);
       if (!event.result.ok) {
-        return append(state, entry('✗', failureDetails(event.result)), {
+        return append(state, entry('error', event.name, failureDetails(event.result)), {
           phase: 'thinking',
           activeTool: undefined,
           error: event.result.error?.message ?? event.result.summary,
         });
       }
-      return append(state, entry(summary.prefix, event.result.summary), {
+      return append(state, entry('result', event.name, event.result.summary), {
         phase: 'thinking',
         activeTool: undefined,
       });
     }
     case 'review':
-      return append(state, entry('◉', `红眼审查\n${event.decision.risk} 风险 · ${event.decision.summary}`), {
+      return append(state, entry('review', '红眼审查', `${event.decision.risk} 风险 · ${event.decision.summary}`), {
         phase: event.decision.verdict === 'ask_user' ? 'confirming' : 'reviewing',
       });
     case 'limit_reached':
-      return append(state, entry('✗', `已达到${event.limit === 'turns' ? '轮次' : '工具调用'}上限`), {
+      return append(state, entry('error', '达到上限', `已达到${event.limit === 'turns' ? '轮次' : '工具调用'}上限`), {
         phase: 'idle',
       });
     case 'interrupted':
-      return append(state, entry('✗', `已中止：${event.reason}`), {
+      return append(state, entry('error', '已中止', event.reason), {
         phase: 'idle',
         activeTool: undefined,
       });
     case 'error':
-      return append(state, entry('✗', event.message), {
+      return append(state, entry('error', '错误', event.message), {
         phase: 'error',
         activeTool: undefined,
         error: event.message,

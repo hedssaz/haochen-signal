@@ -13,7 +13,12 @@ describe('uiReducer', () => {
       phase: 'running_tool',
       activeTool: {name: 'read_file', summary: '读取碎片'},
     });
-    expect(state.transcript.at(-1)).toMatchObject({prefix: '◆', text: '读取碎片'});
+    expect(state.transcript.at(-1)).toMatchObject({
+      kind: 'tool',
+      title: 'read_file',
+      text: '读取碎片',
+      detail: '{"path":"README.md"}',
+    });
   });
 
   it('renders a failed command without a completion mark', () => {
@@ -28,7 +33,8 @@ describe('uiReducer', () => {
     });
 
     expect(state.transcript.at(-1)).toMatchObject({
-      prefix: '✗',
+      kind: 'error',
+      title: 'run_command',
       text: expect.stringContaining('退出码 2'),
     });
     expect(state.transcript.at(-1)?.text).toContain('AssertionError');
@@ -41,7 +47,11 @@ describe('uiReducer', () => {
     });
 
     expect(state).toMatchObject({phase: 'idle'});
-    expect(state.transcript.at(-1)).toMatchObject({prefix: '✓', text: '任务完成\nREADME 描述了浩宸信号'});
+    expect(state.transcript.at(-1)).toMatchObject({
+      kind: 'assistant',
+      title: '浩宸',
+      text: 'README 描述了浩宸信号',
+    });
   });
 
   it('records an interruption as a failure and returns idle', () => {
@@ -51,6 +61,10 @@ describe('uiReducer', () => {
     });
 
     expect(state).toMatchObject({phase: 'idle'});
-    expect(state.transcript.at(-1)).toMatchObject({prefix: '✗', text: '已中止：用户中止'});
+    expect(state.transcript.at(-1)).toMatchObject({
+      kind: 'error',
+      title: '已中止',
+      text: '用户中止',
+    });
   });
 });

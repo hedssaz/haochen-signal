@@ -52,8 +52,28 @@ const helpText = [
   '/clear  新会话  /resume [ID]  恢复  /exit  退出',
 ].join('\n');
 
-function localEntry(prefix: UiEntry['prefix'], text: string): UiEntry {
-  return {prefix, text};
+type LocalNoticePrefix = '◆' | '◇' | '◉' | '✓' | '✗' | '浩宸 ›';
+
+function localEntry(prefix: LocalNoticePrefix, text: string): UiEntry {
+  if (prefix === '浩宸 ›') return {kind: 'user', title: '你', text};
+  if (prefix === '◉') return {kind: 'review', title: '审查', text};
+  if (prefix === '✗') return {kind: 'error', title: '错误', text};
+  if (prefix === '✓') return {kind: 'success', title: '完成', text};
+  return {kind: 'status', title: '状态', text};
+}
+
+function entryLabel(item: UiEntry): string {
+  switch (item.kind) {
+    case 'user': return '你 ›';
+    case 'assistant': return '浩宸 ›';
+    case 'tool': return `工具 › ${item.title}`;
+    case 'result': return `结果 › ${item.title}`;
+    case 'approval': return `审批 › ${item.title}`;
+    case 'review': return `审查 › ${item.title}`;
+    case 'error': return `错误 › ${item.title}`;
+    case 'success': return `完成 › ${item.title}`;
+    case 'status': return `状态 › ${item.title}`;
+  }
 }
 
 export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<Event>): React.JSX.Element {
@@ -74,7 +94,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     setState(previous => uiReducer(previous, event));
   }, []);
 
-  const appendNotice = useCallback((prefix: UiEntry['prefix'], text: string) => {
+  const appendNotice = useCallback((prefix: LocalNoticePrefix, text: string) => {
     dispatch({type: 'notice', entry: localEntry(prefix, text)});
   }, [dispatch]);
 
@@ -277,7 +297,9 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   return <Box flexDirection="column">
     <Text>{banner}</Text>
     <Box flexDirection="column" marginTop={1}>
-      {state.transcript.map((item, index) => <Text key={`${index}-${item.text}`}>{`${item.prefix} ${item.text}`}</Text>)}
+      {state.transcript.map((item, index) => <Text key={`${index}-${item.text}`}>
+        {`${entryLabel(item)} ${item.text}${item.detail === undefined ? '' : `\n参数  ${item.detail}`}`}
+      </Text>)}
     </Box>
     {pendingConfirmation === undefined ? null : <Box flexDirection="column" marginTop={1}>
       <Text color="yellow">◉ 确认请求 · {pendingConfirmation.operation.tool}</Text>
