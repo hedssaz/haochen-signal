@@ -22,6 +22,10 @@ import {listFiles, searchText, readFileTool, applyPatch} from '../tools/files.js
 import {runCommand} from '../tools/command.js';
 import {gitStatus, gitDiff, gitLog} from '../tools/git.js';
 import {webSearch, webFetch} from '../tools/web.js';
+import {
+  WEB_SEARCH_QUERY_MAX_LENGTH,
+  WEB_SEARCH_RESULT_LIMIT_MAX,
+} from '../tools/web-contract.js';
 import {App, type CompactResult} from './app.js';
 import {InteractiveConfirmationBroker} from './confirmation.js';
 import {runFirstRunWithCredentials} from './first-run.js';
@@ -54,7 +58,7 @@ export function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unkno
     {name: 'git_status', description: '读取 Git 状态', inputSchema: z.object({}).strict(), jsonSchema: objectSchema({}), execute: (_i, c, s) => gitStatus(c, s)},
     {name: 'git_diff', description: '读取 Git 差异', inputSchema: z.object({staged: z.boolean().optional()}).strict(), jsonSchema: objectSchema({staged: {type: 'boolean'}}), execute: (i, c, s) => gitDiff(i as {staged?: boolean}, c, s)},
     {name: 'git_log', description: '读取近期 Git 记录', inputSchema: z.object({limit: z.number().int().optional()}).strict(), jsonSchema: objectSchema({limit: {type: 'integer'}}), execute: (i, c, s) => gitLog(i as {limit?: number}, c, s)},
-    {name: 'web_search', description: '搜索公开技术资料', inputSchema: z.object({query: z.string(), limit: z.number().int().min(1).max(10).optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string'}, limit: {type: 'integer', minimum: 1, maximum: 10}}, ['query']), execute: (i, c, s) => webSearch(i as {query: string; limit?: number}, c, s)},
+    {name: 'web_search', description: '搜索公开技术资料', inputSchema: z.object({query: z.string().trim().min(1).max(WEB_SEARCH_QUERY_MAX_LENGTH), limit: z.number().int().min(1).max(WEB_SEARCH_RESULT_LIMIT_MAX).optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string', minLength: 1, maxLength: WEB_SEARCH_QUERY_MAX_LENGTH}, limit: {type: 'integer', minimum: 1, maximum: WEB_SEARCH_RESULT_LIMIT_MAX}}, ['query']), execute: (i, c, s) => webSearch(i as {query: string; limit?: number}, c, s)},
     {name: 'web_fetch', description: '提取公开网页正文', inputSchema: z.object({url: z.string()}).strict(), jsonSchema: objectSchema({url: {type: 'string'}}, ['url']), execute: (i, c, s) => webFetch(i as {url: string}, c, s)},
   ];
   return new Map(specs.map(spec => [spec.name, spec]));
@@ -65,6 +69,7 @@ export async function streamCompactSummary(
   modelName: string,
   prompt: string,
   signal: AbortSignal,
+  onProgress?: (streamTokens: number) => void,
 ): Promise<{text: string; streamTokens: number}> {
   let text = '';
   let streamTokens = 0;
@@ -78,6 +83,7 @@ export async function streamCompactSummary(
       && event.text.length > 0
     ) {
       streamTokens += 1;
+      onProgress?.(streamTokens);
     }
     if (event.type === 'text_delta') text += event.text;
   }
@@ -92,6 +98,7 @@ export async function compactSessionHistory(options: {
   model: ModelClient;
   modelName: string;
   signal: AbortSignal;
+  onProgress?: (streamTokens: number) => void;
 }): Promise<CompactResult> {
   const events = await options.readEvents().catch((): readonly SessionEvent[] => []);
   options.signal.throwIfAborted();
@@ -102,6 +109,7 @@ export async function compactSessionHistory(options: {
       options.modelName,
       prompt,
       options.signal,
+      liveTokens => options.onProgress?.(streamTokens + liveTokens),
     );
     options.signal.throwIfAborted();
     streamTokens += summary.streamTokens;
@@ -111,8 +119,7 @@ export async function compactSessionHistory(options: {
   if (result.compacted) {
     options.signal.throwIfAborted();
     await options.appendSummary(result.summaryEvent);
-    options.signal.throwIfAborted();
-    return {ok: true, message: '已压缩历史。', streamTokens};
+    return {ok: true, message: '已压缩历史。', committed: true, streamTokens};
   }
   return {ok: false, message: result.reason, streamTokens};
 }
@@ -178,7 +185,7 @@ async function main(): Promise<void> {
       return runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
     }}
     executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, signal, reportGate: event => gateReporter.report(event)})}
-    compact={signal => compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model, modelName: activeConfig.model, signal})}
+    compact={(signal, onProgress) => compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model, modelName: activeConfig.model, signal, onProgress})}
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
       if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
       await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});

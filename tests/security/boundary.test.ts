@@ -193,6 +193,29 @@ describe('classifyOperation', () => {
     expect(decision.normalizedScope).toContain('search:苏浩宸:5');
   });
 
+  it('trims and accepts a web search query at the 500-character boundary', async () => {
+    const query = 'x'.repeat(500);
+    const decision = await classifyOperation({
+      tool: 'web_search',
+      input: {query: `  ${query}  `},
+    }, context);
+
+    expect(decision.action).toBe('allow');
+    expect(decision.normalizedScope).toContain(`search:${query}:10`);
+  });
+
+  it.each(['   ', 'x'.repeat(501)])(
+    'denies an empty or oversized normalized web search query',
+    async (query) => {
+      const decision = await classifyOperation({
+        tool: 'web_search',
+        input: {query},
+      }, context);
+
+      expect(decision.action).toBe('deny');
+    },
+  );
+
   it.each([0, 11, 1.5])('denies an invalid web search limit: %s', async (limit) => {
     const decision = await classifyOperation({
       tool: 'web_search',

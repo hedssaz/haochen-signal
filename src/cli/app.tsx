@@ -22,6 +22,7 @@ export interface SessionSummary {
 export interface CompactResult {
   ok: boolean;
   message: string;
+  committed?: boolean;
   streamTokens?: number;
 }
 
@@ -39,7 +40,10 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   contextTokens?: number;
   sessionGrants?: ReadonlySet<string>;
   executeTool?: (name: string, input: unknown, signal: AbortSignal) => Promise<ToolResult>;
-  compact?: (signal: AbortSignal) => Promise<CompactResult>;
+  compact?: (
+    signal: AbortSignal,
+    onProgress: (streamTokens: number) => void,
+  ) => Promise<CompactResult>;
   saveSession?: (reason: 'clear' | 'exit') => Promise<void>;
   appendInterrupted?: (reason: string) => Promise<void>;
   createSession?: () => Promise<string>;
@@ -100,6 +104,7 @@ function localEntry(prefix: LocalNoticePrefix, text: string): UiEntry {
 function entryLabel(item: UiEntry): string {
   switch (item.kind) {
     case 'user': return '你 ›';
+    case 'reasoning': return '思考 ›';
     case 'assistant': return '浩宸 ›';
     case 'tool': return `工具 › ${item.title}`;
     case 'result': return `结果 › ${item.title}`;
@@ -114,6 +119,7 @@ function entryLabel(item: UiEntry): string {
 function entryColor(kind: UiEntry['kind']): 'cyan' | 'white' | 'magenta' | 'green' | 'yellow' | 'red' | 'gray' {
   switch (kind) {
     case 'user': return 'cyan';
+    case 'reasoning': return 'gray';
     case 'assistant': return 'white';
     case 'tool': return 'magenta';
     case 'result':
@@ -323,8 +329,11 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         setStreamPhase('thinking');
         setRuntimeStatus('正在压缩历史');
         try {
-          const result = await props.compact(controller.signal);
-          controller.signal.throwIfAborted();
+          const result = await props.compact(
+            controller.signal,
+            streamTokens => setStreamTokenCount(streamTokens),
+          );
+          if (result.committed !== true) controller.signal.throwIfAborted();
           setStreamTokenCount(result.streamTokens ?? 0);
           appendNotice(result.ok ? '✓' : '✗', result.message);
         } catch (error) {

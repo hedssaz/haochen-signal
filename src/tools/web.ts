@@ -5,10 +5,13 @@ import ipaddr from 'ipaddr.js';
 import {parseHTML} from 'linkedom';
 import {Agent, type Dispatcher, fetch as undiciFetch} from 'undici';
 import type {ToolContext, ToolResult} from './types.js';
+import {
+  WEB_SEARCH_QUERY_MAX_LENGTH,
+  WEB_SEARCH_RESULT_LIMIT_DEFAULT,
+  WEB_SEARCH_RESULT_LIMIT_MAX,
+} from './web-contract.js';
 
 const DUCKDUCKGO_HTML_URL = 'https://html.duckduckgo.com/html/';
-const MAX_QUERY_CHARACTERS = 500;
-const MAX_SEARCH_RESULTS = 10;
 const MAX_REDIRECTS = 3;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ARTICLE_CHARACTERS = 40_000;
@@ -553,11 +556,11 @@ function validSearchInput(input: WebSearchInput): string | undefined {
     return 'query 必须是字符串';
   }
   const query = input.query.trim();
-  if (query.length === 0 || query.length > MAX_QUERY_CHARACTERS) {
+  if (query.length === 0 || query.length > WEB_SEARCH_QUERY_MAX_LENGTH) {
     return 'query 长度必须在 1 到 500 个字符之间';
   }
   if (input.limit !== undefined
-    && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > MAX_SEARCH_RESULTS)) {
+    && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > WEB_SEARCH_RESULT_LIMIT_MAX)) {
     return 'limit 必须是 1 到 10 的整数';
   }
   return undefined;
@@ -581,7 +584,7 @@ export async function webSearch(
   if (inputError !== undefined) return failure('INVALID_INPUT', inputError);
 
   const query = input.query.trim();
-  const limit = input.limit ?? MAX_SEARCH_RESULTS;
+  const limit = input.limit ?? WEB_SEARCH_RESULT_LIMIT_DEFAULT;
   const searchUrl = new URL(DUCKDUCKGO_HTML_URL);
   searchUrl.searchParams.set('q', query);
   const request = createRequestControl(

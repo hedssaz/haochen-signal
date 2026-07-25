@@ -12,7 +12,10 @@ describe('uiReducer', () => {
     expect(state.transcript).toEqual([]);
   });
 
-  it('keeps reasoning and assistant deltas in separate live buffers', () => {
+  it.each([
+    {type: 'assistant_message', text: '开始回答'} as const,
+    {type: 'assistant_text', text: '开始回答'} as const,
+  ])('finalizes reasoning and assistant text independently on $type', (event) => {
     const withReasoning = uiReducer(initialUiState, {
       type: 'reasoning_delta',
       text: '检查协议',
@@ -28,15 +31,16 @@ describe('uiReducer', () => {
     });
     expect(streaming.transcript).toEqual([]);
 
-    const complete = uiReducer(streaming, {
-      type: 'assistant_message',
-      text: '开始回答',
-    });
+    const complete = uiReducer(streaming, event);
 
     expect(complete).toMatchObject({liveReasoning: '', liveAssistant: ''});
+    expect(complete.transcript).toEqual([
+      {kind: 'reasoning', title: '思考', text: '检查协议'},
+      {kind: 'assistant', title: '浩宸', text: '开始回答'},
+    ]);
   });
 
-  it('clears a reasoning-only tool turn before the next round starts', () => {
+  it('preserves each reasoning-only tool round before the next round starts', () => {
     const firstRound = uiReducer(initialUiState, {
       type: 'reasoning_delta',
       text: '第一轮推理',
@@ -51,14 +55,32 @@ describe('uiReducer', () => {
       liveReasoning: '第二轮推理',
       liveAssistant: '',
     });
-    expect(secondRound.transcript).toEqual([]);
+    expect(secondRound.transcript).toEqual([
+      {kind: 'reasoning', title: '思考', text: '第一轮推理'},
+    ]);
+  });
+
+  it.each([
+    {type: 'assistant_message', text: '最终回答'} as const,
+    {type: 'assistant_text', text: '最终回答'} as const,
+  ])('does not duplicate finalized reasoning on $type', (event) => {
+    const streaming = uiReducer(initialUiState, {
+      type: 'reasoning_delta',
+      text: '只保留一次',
+    });
+    const finalized = uiReducer(streaming, {type: 'assistant_turn_finished'});
+    const answered = uiReducer(finalized, event);
+
+    expect(answered.transcript.filter(entry => entry.kind === 'reasoning')).toEqual([
+      {kind: 'reasoning', title: '思考', text: '只保留一次'},
+    ]);
   });
 
   it.each([
     {type: 'error', message: '协议错误'} as const,
     {type: 'interrupted', reason: '用户中止'} as const,
     {type: 'limit_reached', limit: 'turns'} as const,
-  ])('clears live buffers on terminal $type', (event) => {
+  ])('preserves reasoning and clears live buffers on terminal $type', (event) => {
     const state = uiReducer({
       ...initialUiState,
       phase: 'thinking',
@@ -67,6 +89,11 @@ describe('uiReducer', () => {
     }, event);
 
     expect(state).toMatchObject({liveReasoning: '', liveAssistant: ''});
+    expect(state.transcript[0]).toEqual({
+      kind: 'reasoning',
+      title: '思考',
+      text: '未完成推理',
+    });
   });
 
   it('maps a read tool event to a stable scan entry', () => {

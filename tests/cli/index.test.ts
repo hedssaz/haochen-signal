@@ -2,6 +2,7 @@ import {readFile} from 'node:fs/promises';
 import {describe, expect, it, vi} from 'vitest';
 import type {ModelClient} from '../../src/providers/types.js';
 import type {SessionEvent} from '../../src/sessions/types.js';
+import type {ToolDefinitionSpec} from '../../src/tools/types.js';
 
 describe('CLI entrypoint', () => {
   it('passes the live session grant set to the App instead of its startup size', async () => {
@@ -67,7 +68,7 @@ describe('CLI entrypoint', () => {
     }
   });
 
-  it('exposes bounded result limits in the web_search model tool schema', async () => {
+  it('exposes and enforces the complete web_search model input contract', async () => {
     const originalArgv = process.argv;
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     process.argv = [...process.argv, '--help'];
@@ -75,9 +76,7 @@ describe('CLI entrypoint', () => {
 
     try {
       const cli = await import('../../src/cli/index.js') as unknown as {
-        toolDefinitions?: () => Map<string, {
-          jsonSchema: Record<string, unknown>;
-        }>;
+        toolDefinitions?: () => Map<string, ToolDefinitionSpec<unknown, unknown>>;
       };
       expect(cli.toolDefinitions).toBeTypeOf('function');
       if (typeof cli.toolDefinitions !== 'function') return;
@@ -88,12 +87,25 @@ describe('CLI entrypoint', () => {
         required: ['query'],
         additionalProperties: false,
         properties: {
+          query: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 500,
+          },
           limit: {
             type: 'integer',
             minimum: 1,
             maximum: 10,
           },
         },
+      });
+      expect(definition?.inputSchema.safeParse({query: '   '}).success).toBe(false);
+      expect(definition?.inputSchema.safeParse({query: 'x'.repeat(501)}).success).toBe(false);
+      expect(definition?.inputSchema.safeParse({
+        query: `  ${'x'.repeat(500)}  `,
+      })).toMatchObject({
+        success: true,
+        data: {query: 'x'.repeat(500)},
       });
     } finally {
       process.argv = originalArgv;
@@ -114,6 +126,7 @@ describe('CLI entrypoint', () => {
           modelName: string,
           prompt: string,
           signal: AbortSignal,
+          onProgress?: (streamTokens: number) => void,
         ) => Promise<{text: string; streamTokens: number}>;
       };
       expect(cli.streamCompactSummary).toBeTypeOf('function');
@@ -132,21 +145,24 @@ describe('CLI entrypoint', () => {
         },
       };
       const controller = new AbortController();
+      const onProgress = vi.fn();
 
       await expect(cli.streamCompactSummary(
         model,
         'wolf-2',
         '请总结',
         controller.signal,
+        onProgress,
       )).resolves.toEqual({text: '摘要完成', streamTokens: 3});
       expect(receivedSignal).toBe(controller.signal);
+      expect(onProgress.mock.calls).toEqual([[1], [2], [3]]);
     } finally {
       process.argv = originalArgv;
       write.mockRestore();
     }
   });
 
-  it('does not append a summary when compact is aborted after streaming', async () => {
+  it('does not append a summary when compact is aborted before append starts', async () => {
     const originalArgv = process.argv;
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     process.argv = [...process.argv, '--help'];
@@ -198,6 +214,71 @@ describe('CLI entrypoint', () => {
         signal: controller.signal,
       })).rejects.toMatchObject({name: 'AbortError'});
       expect(appendSummary).not.toHaveBeenCalled();
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+    }
+  });
+
+  it('returns a committed success when compact is aborted during append', async () => {
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
+
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        compactSessionHistory?: (options: {
+          readEvents: () => Promise<readonly SessionEvent[]>;
+          appendSummary: (
+            event: Extract<SessionEvent, {type: 'summary'}>,
+          ) => Promise<void>;
+          model: ModelClient;
+          modelName: string;
+          signal: AbortSignal;
+        }) => Promise<unknown>;
+      };
+      expect(cli.compactSessionHistory).toBeTypeOf('function');
+      if (typeof cli.compactSessionHistory !== 'function') return;
+
+      const controller = new AbortController();
+      const summary = JSON.stringify({
+        goal: '完成任务',
+        changes: [],
+        remaining: [],
+        keyFiles: [],
+        decisions: [],
+        errors: [],
+        verification: [],
+      });
+      const model: ModelClient = {
+        async *stream() {
+          yield {type: 'text_delta', text: summary};
+          yield {type: 'finish', reason: 'stop'};
+        },
+      };
+      const appendSummary = vi.fn(async () => {
+        controller.abort(new DOMException('用户中止', 'AbortError'));
+      });
+      const events: SessionEvent[] = Array.from({length: 7}, (_, index) => ({
+        type: 'user' as const,
+        at: index,
+        text: `消息 ${index}`,
+      }));
+
+      await expect(cli.compactSessionHistory({
+        readEvents: async () => events,
+        appendSummary,
+        model,
+        modelName: 'wolf-2',
+        signal: controller.signal,
+      })).resolves.toEqual({
+        ok: true,
+        message: '已压缩历史。',
+        committed: true,
+        streamTokens: 1,
+      });
+      expect(appendSummary).toHaveBeenCalledOnce();
     } finally {
       process.argv = originalArgv;
       write.mockRestore();

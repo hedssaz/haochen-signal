@@ -15,6 +15,11 @@ import type {
   BoundaryOperation,
   BoundaryRisk,
 } from './types.js';
+import {
+  WEB_SEARCH_QUERY_MAX_LENGTH,
+  WEB_SEARCH_RESULT_LIMIT_DEFAULT,
+  WEB_SEARCH_RESULT_LIMIT_MAX,
+} from '../tools/web-contract.js';
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_COMMAND_OUTPUT_BYTES = 64 * 1024;
@@ -1521,7 +1526,16 @@ function normalizeWebTool(tool: string, value: unknown): NormalizedOperation {
     onlyKeys(input, ['query', 'limit'], `${tool} input`);
     const query = requiredString(input.query, 'query').trim();
     if (query.length === 0) inputError('query 不能为空');
-    const limit = optionalInteger(input.limit, 'limit', 10, 1, 10);
+    if (query.length > WEB_SEARCH_QUERY_MAX_LENGTH) {
+      inputError(`query 长度不能超过 ${WEB_SEARCH_QUERY_MAX_LENGTH}`);
+    }
+    const limit = optionalInteger(
+      input.limit,
+      'limit',
+      WEB_SEARCH_RESULT_LIMIT_DEFAULT,
+      1,
+      WEB_SEARCH_RESULT_LIMIT_MAX,
+    );
     return {
       input: {query, limit},
       scope: [`search:${query}:${limit}`],

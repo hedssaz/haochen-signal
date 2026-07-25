@@ -93,9 +93,12 @@ describe('web search', () => {
   });
 
   it('validates the search input bounds', async () => {
-    const dependencies = {fetch: vi.fn(), resolveDns: publicDns};
+    const fetcher = vi.fn(async (_input: RequestInfo | URL) => htmlResponse('<main></main>'));
+    const dependencies = {fetch: fetcher, resolveDns: publicDns};
 
     await expect(webSearch({query: ''}, context, signal, dependencies))
+      .resolves.toMatchObject({ok: false, error: {code: 'INVALID_INPUT'}});
+    await expect(webSearch({query: '   '}, context, signal, dependencies))
       .resolves.toMatchObject({ok: false, error: {code: 'INVALID_INPUT'}});
     await expect(webSearch(
       {query: 'x'.repeat(501)},
@@ -105,6 +108,14 @@ describe('web search', () => {
     )).resolves.toMatchObject({ok: false, error: {code: 'INVALID_INPUT'}});
     await expect(webSearch({query: 'ok', limit: 11}, context, signal, dependencies))
       .resolves.toMatchObject({ok: false, error: {code: 'INVALID_INPUT'}});
+    await expect(webSearch(
+      {query: `  ${'x'.repeat(500)}  `},
+      context,
+      signal,
+      dependencies,
+    )).resolves.toMatchObject({ok: true});
+    const requested = new URL(String(fetcher.mock.calls[0]?.[0]));
+    expect(requested.searchParams.get('q')).toBe('x'.repeat(500));
   });
 });
 

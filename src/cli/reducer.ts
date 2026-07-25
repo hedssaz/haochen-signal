@@ -12,6 +12,7 @@ export type UiPhase =
 
 export type UiEntryKind =
   | 'user'
+  | 'reasoning'
   | 'assistant'
   | 'tool'
   | 'result'
@@ -94,6 +95,17 @@ function append(state: UiState, value: UiEntry, overrides: Partial<UiState> = {}
   return {...state, ...overrides, transcript: [...state.transcript, value]};
 }
 
+function finalizeLiveRound(state: UiState): UiState {
+  return {
+    ...state,
+    transcript: state.liveReasoning.length === 0
+      ? state.transcript
+      : [...state.transcript, entry('reasoning', '思考', state.liveReasoning)],
+    liveReasoning: '',
+    liveAssistant: '',
+  };
+}
+
 function describeTool(name: string): string {
   return toolSummary[name] ?? `执行工具 ${name}`;
 }
@@ -137,22 +149,22 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
         liveAssistant: state.liveAssistant + event.text,
       };
     case 'assistant_turn_finished':
-      return {...state, liveReasoning: '', liveAssistant: ''};
-    case 'assistant_message':
-      return append(state, entry('assistant', '浩宸', event.text), {
+      return finalizeLiveRound(state);
+    case 'assistant_message': {
+      const finalized = finalizeLiveRound(state);
+      return append(finalized, entry('assistant', '浩宸', event.text), {
         phase: 'thinking',
         error: undefined,
-        liveReasoning: '',
-        liveAssistant: '',
       });
-    case 'assistant_text':
-      return append(state, entry('assistant', '浩宸', event.text), {
+    }
+    case 'assistant_text': {
+      const finalized = finalizeLiveRound(state);
+      return append(finalized, entry('assistant', '浩宸', event.text), {
         phase: 'idle',
         activeTool: undefined,
         error: undefined,
-        liveReasoning: '',
-        liveAssistant: '',
       });
+    }
     case 'tool_started': {
       const summary = describeTool(event.name);
       return append(state, entry(
@@ -184,26 +196,26 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       return append(state, entry('review', '红眼审查', `${event.decision.risk} 风险 · ${event.decision.summary}`), {
         phase: event.decision.verdict === 'ask_user' ? 'confirming' : 'reviewing',
       });
-    case 'limit_reached':
-      return append(state, entry('error', '达到上限', `已达到${event.limit === 'turns' ? '轮次' : '工具调用'}上限`), {
+    case 'limit_reached': {
+      const finalized = finalizeLiveRound(state);
+      return append(finalized, entry('error', '达到上限', `已达到${event.limit === 'turns' ? '轮次' : '工具调用'}上限`), {
         phase: 'idle',
-        liveReasoning: '',
-        liveAssistant: '',
       });
-    case 'interrupted':
-      return append(state, entry('error', '已中止', event.reason), {
+    }
+    case 'interrupted': {
+      const finalized = finalizeLiveRound(state);
+      return append(finalized, entry('error', '已中止', event.reason), {
         phase: 'idle',
         activeTool: undefined,
-        liveReasoning: '',
-        liveAssistant: '',
       });
-    case 'error':
-      return append(state, entry('error', '错误', event.message), {
+    }
+    case 'error': {
+      const finalized = finalizeLiveRound(state);
+      return append(finalized, entry('error', '错误', event.message), {
         phase: 'error',
         activeTool: undefined,
         error: event.message,
-        liveReasoning: '',
-        liveAssistant: '',
       });
+    }
   }
 }
