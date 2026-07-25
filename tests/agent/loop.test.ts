@@ -685,10 +685,16 @@ describe('main agent loop', () => {
 
   it('bounds cancellation while a tool ignores AbortSignal and never retries it', async () => {
     const controller = new AbortController();
-    executeRead.mockImplementation(async () => new Promise<never>(() => undefined));
-    setTimeout(() => controller.abort('停止工具'), 20);
+    let markToolStarted!: () => void;
+    const toolStarted = new Promise<void>(resolve => {
+      markToolStarted = resolve;
+    });
+    executeRead.mockImplementation(async () => {
+      markToolStarted();
+      return new Promise<never>(() => undefined);
+    });
 
-    const events = await Promise.race([
+    const running = Promise.race([
       collect(runAgentTask(options(scriptedModel([
         toolResponse([{
           id: 'call_1',
@@ -700,6 +706,9 @@ describe('main agent loop', () => {
         setTimeout(() => reject(new Error('tool cancellation timed out')), 500);
       }),
     ]);
+    await toolStarted;
+    controller.abort('停止工具');
+    const events = await running;
 
     expect(executeRead).toHaveBeenCalledOnce();
     expect(events.at(-1)).toEqual({type: 'interrupted', reason: '停止工具'});
