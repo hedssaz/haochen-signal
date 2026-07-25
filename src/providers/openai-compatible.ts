@@ -21,6 +21,7 @@ interface ToolCallDelta {
 interface ChatCompletionChunk {
   choices?: Array<{
     delta?: {
+      reasoning_content?: string | null;
       content?: string | null;
       tool_calls?: ToolCallDelta[];
     };
@@ -331,6 +332,11 @@ async function* streamResponse(
     }
 
     for (const choice of chunk.choices ?? []) {
+      const reasoning = choice.delta?.reasoning_content;
+      if (typeof reasoning === 'string' && reasoning.length > 0) {
+        yield {type: 'reasoning_delta', text: reasoning};
+      }
+
       const content = choice.delta?.content;
       if (typeof content === 'string' && content.length > 0) {
         yield {type: 'text_delta', text: content};

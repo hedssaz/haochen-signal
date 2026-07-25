@@ -136,6 +136,40 @@ describe('OpenAI-compatible chat completions client', () => {
     ]);
   });
 
+  it('streams reasoning separately before the final answer', async () => {
+    const fetchImpl = vi.fn(async () => sseResponse([
+      {choices: [{delta: {reasoning_content: '先分析'}, finish_reason: null}]},
+      {choices: [{delta: {content: '再回答'}, finish_reason: null}]},
+      {
+        choices: [{delta: {}, finish_reason: 'stop'}],
+        usage: {prompt_tokens: 2, completion_tokens: 3},
+      },
+      '[DONE]',
+    ])) as typeof fetch;
+    const client = createOpenAiCompatibleClient(parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }), 'test-key', {fetch: fetchImpl});
+    const events: ModelEvent[] = [];
+
+    for await (const event of client.stream({
+      model: 'wolf-1',
+      messages: [{role: 'user', content: '回答问题'}],
+    }, new AbortController().signal)) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      {type: 'reasoning_delta', text: '先分析'},
+      {type: 'text_delta', text: '再回答'},
+      {
+        type: 'finish',
+        reason: 'stop',
+        usage: {inputTokens: 2, outputTokens: 3},
+      },
+    ]);
+  });
+
   it('serializes tools, tool choice, and assistant tool-call history', async () => {
     let receivedBody: Record<string, unknown> | undefined;
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

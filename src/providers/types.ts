@@ -9,7 +9,12 @@ export interface AssistantToolCall {
 
 export type ModelMessage =
   | {role: 'system' | 'user'; content: string}
-  | {role: 'assistant'; content: string | null; tool_calls?: AssistantToolCall[]}
+  | {
+    role: 'assistant';
+    content: string | null;
+    reasoning_content?: string;
+    tool_calls?: AssistantToolCall[];
+  }
   | {role: 'tool'; tool_call_id: string; content: string};
 
 export interface ToolDefinition {
@@ -29,6 +34,7 @@ export interface ModelRequest {
 }
 
 export type ModelEvent =
+  | {type: 'reasoning_delta'; text: string}
   | {type: 'text_delta'; text: string}
   | {
     type: 'tool_call_delta';
