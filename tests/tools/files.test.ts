@@ -234,21 +234,61 @@ describe('workspace file tools', () => {
     expect(result.data).toBeUndefined();
   });
 
-  it('rejects one in-limit file line before accumulating the whole file', async () => {
+  it('paginates a long single line by Unicode code points', async () => {
+    const text = `${'x'.repeat(65_535)}😀${'y'.repeat(5_000)}`;
+    await writeFile(join(workspace, 'one-line.html'), text);
+
+    const first = await readFileTool({
+      path: 'one-line.html',
+    }, context, signal);
+    const second = await readFileTool({
+      path: 'one-line.html',
+      startCharacter: first.data!.nextCharacter,
+    }, context, signal);
+
+    expect(first.ok).toBe(true);
+    expect(first.data!.content).not.toContain('\uFFFD');
+    expect(Array.from(first.data!.content)).toHaveLength(65_536);
+    expect(first.data).toMatchObject({
+      startCharacter: 0,
+      endCharacter: 65_536,
+      totalCharacters: 70_536,
+      nextCharacter: 65_536,
+    });
+    expect(second.data).toMatchObject({
+      startCharacter: 65_536,
+      endCharacter: 70_536,
+      totalCharacters: 70_536,
+    });
+    expect(second.data!.nextCharacter).toBeUndefined();
+    expect(first.data!.content + second.data!.content).toBe(text);
+  });
+
+  it('does not let an unselected long line affect a line-range request', async () => {
     await writeFile(
-      join(workspace, 'single-line.txt'),
-      Buffer.alloc(2 * 1024 * 1024, 'x'),
+      join(workspace, 'unselected-long-line.txt'),
+      `${'x'.repeat(65_537)}\nselected`,
     );
 
     const result = await readFileTool({
-      path: 'single-line.txt',
+      path: 'unselected-long-line.txt',
+      startLine: 2,
     }, context, signal);
 
     expect(result).toMatchObject({
-      ok: false,
-      error: {code: 'READ_LIMIT_EXCEEDED'},
+      ok: true,
+      data: {
+        content: 'selected',
+        startLine: 2,
+        endLine: 2,
+        totalLines: 2,
+        startCharacter: 0,
+        endCharacter: 8,
+        totalCharacters: 8,
+      },
+      truncated: true,
     });
-    expect(result.data).toBeUndefined();
+    expect(result.data!.nextCharacter).toBeUndefined();
   });
 
   it('returns consistent metadata for an empty file', async () => {
@@ -265,6 +305,9 @@ describe('workspace file tools', () => {
         startLine: 0,
         endLine: 0,
         totalLines: 0,
+        startCharacter: 0,
+        endCharacter: 0,
+        totalCharacters: 0,
       },
       truncated: false,
     });

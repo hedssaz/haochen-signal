@@ -25,7 +25,7 @@ const MAX_LIST_FILES = 500;
 const MAX_READ_LINES = 400;
 const MAX_READ_BYTES = 2 * 1024 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
-const MAX_READ_LINE_CHARACTERS = READ_CHUNK_BYTES;
+const MAX_READ_CHARACTERS = 65_536;
 const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules']);
 const NO_FOLLOW = constants.O_NOFOLLOW;
 // Darwin's open(2) exposes O_NOFOLLOW_ANY, but Node does not export it.
@@ -62,6 +62,8 @@ export interface ReadFileInput {
   path: string;
   startLine?: number;
   endLine?: number;
+  startCharacter?: number;
+  maxCharacters?: number;
 }
 
 export interface ReadFileOutput {
@@ -70,6 +72,10 @@ export interface ReadFileOutput {
   startLine: number;
   endLine: number;
   totalLines: number;
+  startCharacter: number;
+  endCharacter: number;
+  totalCharacters: number;
+  nextCharacter?: number;
 }
 
 export type PatchOperation =
@@ -562,7 +568,6 @@ function consumeTextLines(
   text: string,
   eof: boolean,
   onLine: (line: string) => void,
-  maxLineCharacters?: number,
 ): void {
   state.pending += text;
   let start = 0;
@@ -571,13 +576,6 @@ function consumeTextLines(
     const character = state.pending[index];
     if (character !== '\r' && character !== '\n') {
       index += 1;
-      if (maxLineCharacters !== undefined
-        && index - start > maxLineCharacters) {
-        throw new FileToolError(
-          'READ_LIMIT_EXCEEDED',
-          `单行超过读取上限 ${maxLineCharacters} 字符`,
-        );
-      }
       continue;
     }
     if (character === '\r'
@@ -592,16 +590,6 @@ function consumeTextLines(
   }
 
   state.pending = state.pending.slice(start);
-  const pendingLineLength = !eof && state.pending.endsWith('\r')
-    ? state.pending.length - 1
-    : state.pending.length;
-  if (maxLineCharacters !== undefined
-    && pendingLineLength > maxLineCharacters) {
-    throw new FileToolError(
-      'READ_LIMIT_EXCEEDED',
-      `单行超过读取上限 ${maxLineCharacters} 字符`,
-    );
-  }
   if (eof && state.pending.length > 0) {
     onLine(state.pending);
     state.pending = '';
@@ -696,7 +684,6 @@ async function readLinesWithinLimit(
           decoder.decode(chunk.subarray(0, bytesRead), {stream: true}),
           false,
           accept,
-          MAX_READ_LINE_CHARACTERS,
         );
       } catch (error) {
         if (error instanceof FileToolError) throw error;
@@ -710,7 +697,6 @@ async function readLinesWithinLimit(
         decoder.decode(),
         true,
         accept,
-        MAX_READ_LINE_CHARACTERS,
       );
     } catch {
       throw new FileToolError('BINARY_FILE', '文件不是有效的 UTF-8 文本');
@@ -824,11 +810,20 @@ export async function readFileTool(
     assertNotAborted(signal);
     const startLine = input.startLine ?? 1;
     const requestedEndLine = input.endLine ?? startLine + MAX_READ_LINES - 1;
+    const startCharacter = input.startCharacter ?? 0;
+    const maxCharacters = input.maxCharacters ?? MAX_READ_CHARACTERS;
     if (!Number.isInteger(startLine)
       || !Number.isInteger(requestedEndLine)
       || startLine < 1
       || requestedEndLine < startLine) {
       throw new FileToolError('INVALID_LINE_RANGE', '读取行范围无效');
+    }
+    if (!Number.isSafeInteger(startCharacter)
+      || !Number.isSafeInteger(maxCharacters)
+      || startCharacter < 0
+      || maxCharacters < 1
+      || maxCharacters > MAX_READ_CHARACTERS) {
+      throw new FileToolError('INVALID_CHARACTER_RANGE', '读取字符范围无效');
     }
 
     const resolved = await resolveWorkspacePath(
@@ -848,6 +843,9 @@ export async function readFileTool(
       cappedEndLine,
     );
     if (totalLines === 0) {
+      if (startCharacter > 0) {
+        throw new FileToolError('INVALID_CHARACTER_RANGE', '起始字符超出文件范围');
+      }
       return success(
         `读取 ${toWorkspacePath(resolved.relative)}：空文件`,
         {
@@ -856,6 +854,9 @@ export async function readFileTool(
           startLine: 0,
           endLine: 0,
           totalLines: 0,
+          startCharacter: 0,
+          endCharacter: 0,
+          totalCharacters: 0,
         },
         false,
       );
@@ -868,8 +869,20 @@ export async function readFileTool(
       cappedEndLine,
       totalLines,
     );
-    const content = lines.join('\n');
-    const truncated = startLine > 1 || endLine < totalLines;
+    const characters = Array.from(lines.join('\n'));
+    const totalCharacters = characters.length;
+    if (startCharacter > totalCharacters) {
+      throw new FileToolError('INVALID_CHARACTER_RANGE', '起始字符超出文件范围');
+    }
+    const endCharacter = Math.min(
+      startCharacter + maxCharacters,
+      totalCharacters,
+    );
+    const content = characters.slice(startCharacter, endCharacter).join('');
+    const truncated = startLine > 1
+      || endLine < totalLines
+      || startCharacter > 0
+      || endCharacter < totalCharacters;
 
     return success(
       `读取 ${
@@ -881,6 +894,10 @@ export async function readFileTool(
         startLine,
         endLine,
         totalLines,
+        startCharacter,
+        endCharacter,
+        totalCharacters,
+        ...(endCharacter < totalCharacters ? {nextCharacter: endCharacter} : {}),
       },
       truncated,
     );

@@ -663,6 +663,30 @@ describe('classifyOperation', () => {
     expect(decision.action).toBe('confirm');
   });
 
+  it('allows valid character pagination and rejects invalid character ranges', async () => {
+    const valid = await classifyOperation({
+      tool: 'read_file',
+      input: {
+        path: 'src/index.ts',
+        startCharacter: 0,
+        maxCharacters: 65_536,
+      },
+    }, context);
+
+    expect(valid.action).toBe('allow');
+
+    for (const input of [
+      {path: 'src/index.ts', startCharacter: -1},
+      {path: 'src/index.ts', startCharacter: 1.5},
+      {path: 'src/index.ts', maxCharacters: -1},
+      {path: 'src/index.ts', maxCharacters: 1.5},
+      {path: 'src/index.ts', maxCharacters: 65_537},
+    ]) {
+      expect((await classifyOperation({tool: 'read_file', input}, context)).action)
+        .toBe('deny');
+    }
+  });
+
   it.each([
     '.git-credentials',
     '.docker/config.json',

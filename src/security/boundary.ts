@@ -19,6 +19,7 @@ import type {
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_COMMAND_OUTPUT_BYTES = 64 * 1024;
 const DEFAULT_READ_LINES = 400;
+const DEFAULT_READ_CHARACTERS = 65_536;
 const DEFAULT_SEARCH_MATCHES = 200;
 const DEFAULT_GIT_LOG_LIMIT = 20;
 
@@ -1349,7 +1350,11 @@ async function normalizeFileTool(
     };
   }
 
-  onlyKeys(input, ['path', 'startLine', 'endLine'], `${tool} input`);
+  onlyKeys(
+    input,
+    ['path', 'startLine', 'endLine', 'startCharacter', 'maxCharacters'],
+    `${tool} input`,
+  );
   const path = await normalizePath(context, input.path, 'existing');
   const startLine = optionalInteger(input.startLine, 'startLine', 1, 1);
   const endLine = optionalInteger(
@@ -1358,8 +1363,21 @@ async function normalizeFileTool(
     startLine + DEFAULT_READ_LINES - 1,
     startLine,
   );
+  const startCharacter = optionalInteger(
+    input.startCharacter,
+    'startCharacter',
+    0,
+    0,
+  );
+  const maxCharacters = optionalInteger(
+    input.maxCharacters,
+    'maxCharacters',
+    DEFAULT_READ_CHARACTERS,
+    1,
+    DEFAULT_READ_CHARACTERS,
+  );
   return {
-    input: {path, startLine, endLine},
+    input: {path, startLine, endLine, startCharacter, maxCharacters},
     scope: [`read:${path}`],
     confirmReasons: sensitivePath(path) ? ['请求读取凭据或敏感配置文件'] : [],
     reviewReasons: [],
