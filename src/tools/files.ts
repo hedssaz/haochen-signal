@@ -20,6 +20,7 @@ import type {ToolContext, ToolResult} from './types.js';
 const MAX_SEARCH_MATCHES = 200;
 const MAX_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_SEARCH_PREVIEW_CHARACTERS = 240;
+const MAX_LIST_FILES = 500;
 const MAX_READ_LINES = 400;
 const MAX_READ_BYTES = 2 * 1024 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
@@ -345,7 +346,8 @@ async function collectRegularFiles(
   inputPath: string,
   context: ToolContext,
   signal: AbortSignal,
-): Promise<string[]> {
+  maxFiles = Number.POSITIVE_INFINITY,
+): Promise<{files: string[]; truncated: boolean}> {
   const root = await resolveWorkspacePath(
     context.workspace,
     inputPath,
@@ -354,16 +356,18 @@ async function collectRegularFiles(
   if (root.relative.split(sep).some(
     (segment) => EXCLUDED_DIRECTORIES.has(segment),
   )) {
-    return [];
+    return {files: [], truncated: false};
   }
   const rootStat = await lstat(root.absolute);
-  if (rootStat.isFile()) return [toWorkspacePath(root.relative)];
+  if (rootStat.isFile()) {
+    return {files: [toWorkspacePath(root.relative)], truncated: false};
+  }
   if (!rootStat.isDirectory()) {
     throw new FileToolError('NOT_A_DIRECTORY', '请求路径不是目录');
   }
 
   const files: string[] = [];
-  const walk = async (directory: ResolvedPath): Promise<void> => {
+  const walk = async (directory: ResolvedPath): Promise<boolean> => {
     assertNotAborted(signal);
     const entries = await readdir(directory.absolute, {withFileTypes: true});
     entries.sort((left, right) => comparePaths(left.name, right.name));
@@ -384,16 +388,18 @@ async function collectRegularFiles(
       );
       const stat = await lstat(resolved.absolute);
       if (stat.isDirectory()) {
-        await walk(resolved);
+        if (await walk(resolved)) return true;
       } else if (stat.isFile()) {
+        if (files.length >= maxFiles) return true;
         files.push(toWorkspacePath(resolved.relative));
       }
     }
+    return false;
   };
 
-  await walk(root);
+  const truncated = await walk(root);
   files.sort(comparePaths);
-  return files;
+  return {files, truncated};
 }
 
 async function openVerifiedRegularFile(
@@ -714,12 +720,19 @@ export async function listFiles(
 ): Promise<ToolResult<ListFilesOutput>> {
   try {
     assertNotAborted(signal);
-    const files = await collectRegularFiles(
+    const {files, truncated} = await collectRegularFiles(
       input.path ?? '.',
       context,
       signal,
+      MAX_LIST_FILES,
     );
-    return success(`找到 ${files.length} 个文件`, {files});
+    return success(
+      truncated
+        ? `找到前 ${files.length} 个文件（已截断）`
+        : `找到 ${files.length} 个文件`,
+      {files},
+      truncated || undefined,
+    );
   } catch (error) {
     return failure(error, signal);
   }
@@ -741,7 +754,7 @@ export async function searchText(
     }
 
     const limit = Math.min(input.maxMatches ?? MAX_SEARCH_MATCHES, MAX_SEARCH_MATCHES);
-    const files = await collectRegularFiles(
+    const {files} = await collectRegularFiles(
       input.path ?? '.',
       context,
       signal,

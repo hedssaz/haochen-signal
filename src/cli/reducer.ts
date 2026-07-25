@@ -115,7 +115,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
 
   switch (event.type) {
     case 'status':
-      return append(state, entry('status', '状态', event.text), {phase: 'thinking', error: undefined});
+      return {...state, phase: 'thinking', error: undefined};
     case 'assistant_delta':
       return {...state, phase: 'thinking', error: undefined};
     case 'assistant_message':

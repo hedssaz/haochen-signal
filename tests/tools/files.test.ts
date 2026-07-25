@@ -72,6 +72,19 @@ describe('workspace file tools', () => {
     expect(explicitDependency.data?.files).toEqual([]);
   });
 
+  it('bounds recursive file listings and marks truncated results', async () => {
+    await Promise.all(Array.from({length: 501}, (_, index) =>
+      writeFile(join(workspace, `${String(index).padStart(3, '0')}.txt`), 'x'),
+    ));
+
+    const result = await listFiles({}, context, signal);
+
+    expect(result.ok).toBe(true);
+    expect(result.truncated).toBe(true);
+    expect(result.data?.files).toHaveLength(500);
+    expect(result.summary).toContain('已截断');
+  });
+
   it('searches text with one-based locations and skips binary and oversized files', async () => {
     await writeFile(
       join(workspace, 'readme.txt'),

@@ -2,6 +2,16 @@ import {describe, expect, it} from 'vitest';
 import {initialUiState, uiReducer} from '../../src/cli/reducer.js';
 
 describe('uiReducer', () => {
+  it('keeps transient status out of the transcript', () => {
+    const state = uiReducer(initialUiState, {
+      type: 'status',
+      text: '正在理解任务',
+    });
+
+    expect(state).toMatchObject({phase: 'thinking'});
+    expect(state.transcript).toEqual([]);
+  });
+
   it('maps a read tool event to a stable scan entry', () => {
     const state = uiReducer(initialUiState, {
       type: 'tool_started',

@@ -204,6 +204,19 @@ describe('main agent loop', () => {
     }]);
   });
 
+  it.each(['你好', '嗨', 'hello', '在吗？'])(
+    'disables tools for a pure greeting: %s',
+    async task => {
+      const model = recordingModel([textResponse('你好，我在。')]);
+
+      await collect(runAgentTask(options(model.client, {task})));
+
+      expect(model.requests[0]?.tools).toBeUndefined();
+      expect(model.requests[0]?.toolChoice).toBe('none');
+      expect(executeRead).not.toHaveBeenCalled();
+    },
+  );
+
   it('merges tool-call fragments and executes calls in first-seen order after streaming', async () => {
     const executionOrder: string[] = [];
     executeRead.mockImplementation(async (input: unknown) => {
@@ -753,5 +766,7 @@ describe('main agent system prompt', () => {
     expect(prompt).toContain('权限由边界守卫决定');
     expect(prompt).toContain('模型不能自行授权');
     expect(prompt).toContain('世界观文案不得替代路径、命令、diff 和错误');
+    expect(prompt).toContain('寒暄、闲聊或能力询问');
+    expect(prompt).toContain('不要为了了解工作区主动扫描');
   });
 });

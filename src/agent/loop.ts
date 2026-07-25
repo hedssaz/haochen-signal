@@ -196,6 +196,12 @@ function normalizeLimit(value: number): number {
     : 0;
 }
 
+const PURE_GREETING = /^(?:你好(?:呀|啊|哇)?|您好|嗨|哈喽|在吗|hi|hello|hey)[\s!！?？。,.，]*$/iu;
+
+function taskAllowsTools(task: string): boolean {
+  return !PURE_GREETING.test(task.trim());
+}
+
 async function appendInterrupted(
   options: RunAgentTaskOptions,
   reason: string,
@@ -330,7 +336,10 @@ export async function* runAgentTask(
       events: history,
       maxTokens: options.maxContextTokens ?? 16_000,
     }), options.signal);
-    const tools = options.registry.modelToolDefinitions();
+    const allowTools = taskAllowsTools(options.task);
+    const tools = allowTools
+      ? options.registry.modelToolDefinitions()
+      : undefined;
 
     while (true) {
       if (turns >= maxTurns) {
@@ -349,7 +358,7 @@ export async function* runAgentTask(
         model: modelName,
         messages,
         tools,
-        toolChoice: 'auto',
+        toolChoice: allowTools ? 'auto' : 'none',
       }, options.signal)[Symbol.asyncIterator]();
 
       while (true) {

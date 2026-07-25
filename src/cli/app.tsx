@@ -191,7 +191,6 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     activeController.current = controller;
     abortRequested.current = false;
     interruptedPersisted.current = false;
-    dispatch({type: 'status', text: '正在理解任务'});
     setRuntimeStatus('正在理解任务');
     try {
       for await (const event of props.runTask(task, controller.signal)) {
@@ -378,6 +377,9 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       }
       return;
     }
+    if (activeController.current !== undefined) {
+      return;
+    }
     if (key.tab) {
       const suggestion = suggestSlashCommands(inputRef.current)[0];
       if (suggestion !== undefined) {
@@ -456,10 +458,12 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     {runtimeStatus === undefined ? null : <Text color="yellow">
       {`状态 › 运行中 · ${runtimeStatus} · Ctrl+C 中止`}
     </Text>}
-    <Box marginTop={1}>
+    {runtimeStatus === undefined ? <Box marginTop={1}>
       <Text color="cyan">浩宸 › </Text><Text>{state.input}</Text>
-    </Box>
-    {commandSuggestions.length === 0 ? null : <Box
+    </Box> : <Box marginTop={1}>
+      <Text color="yellow">输入已锁定 · 等待任务完成，Ctrl+C 中止</Text>
+    </Box>}
+    {runtimeStatus !== undefined || commandSuggestions.length === 0 ? null : <Box
       borderStyle="round"
       borderColor="cyan"
       flexDirection="column"

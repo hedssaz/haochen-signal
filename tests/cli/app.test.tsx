@@ -237,12 +237,46 @@ describe('App', () => {
       expect(app.lastFrame()).toContain(
         '状态 › 运行中 · 正在调用 read_file · Ctrl+C 中止',
       );
+      expect(app.lastFrame()).toContain('输入已锁定 · 等待任务完成，Ctrl+C 中止');
+      expect(app.lastFrame()).not.toContain('状态 › 状态');
+      expect(app.lastFrame()).not.toContain('浩宸 › ');
     });
 
     release();
     await vi.waitFor(() => {
       expect(app.lastFrame()).not.toContain('状态 › 运行中');
+      expect((app.lastFrame() ?? '').trimEnd()).toMatch(/浩宸 ›$/);
     });
+  });
+
+  it('ignores text input while a task is running', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'tool_started', name: 'list_files', input: {path: '/workspace'}};
+      await blocked;
+      yield {type: 'assistant_text', text: '完成'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('检查项目');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('输入已锁定'));
+
+    app.stdin.write('好了吗');
+    app.stdin.write('\r');
+    await new Promise<void>(resolve => setTimeout(resolve, 10));
+
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(app.lastFrame()).not.toContain('好了吗');
+    expect(app.lastFrame()).not.toContain('当前任务仍在运行');
+    release();
   });
 
   it('aborts once and exits after the second Ctrl+C while a task runs', async () => {
