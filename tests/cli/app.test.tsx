@@ -72,6 +72,26 @@ describe('App', () => {
     },
   );
 
+  it('reads the latest session grant count when permissions are requested', async () => {
+    const sessionGrants = new Set<string>();
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      sessionGrants={sessionGrants}
+    />);
+
+    await waitForInputListener();
+    sessionGrants.add('fingerprint');
+    app.stdin.write('/permissions');
+    app.stdin.write('\r');
+
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('本次会话许可：1 项');
+    });
+  });
+
   it('aborts once and exits after the second Ctrl+C while a task runs', async () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });

@@ -6,17 +6,18 @@
 - 新增无副作用 UI reducer：把代理事件映射为稳定终端条目；读取和修改使用 `◆`、验证使用 `◇`、审查使用 `◉`、仅最终回答使用 `✓`、失败使用 `✗`。带工具调用的中间文字以普通条目显示，失败命令保留退出码和 stderr 摘要，绝不展示为完成。
 - 新增首次配置流程：API 地址校验失败会重问，仅接受无用户凭据的 HTTP(S) 地址；API Key 使用隐藏输入，临时 Key 不调用钥匙串也不进入配置对象。
 - 新增 Ink App：显示固定欢迎框；普通输入仅经注入的代理任务函数执行，所有斜杠命令均本地处理；实现只读 `/diff`、会话压缩、保存、清空、恢复与退出回调。真实 ConfirmationBroker 将工具执行门的确认请求显示为工具、风险和范围，支持仅本次、会话与拒绝；非交互模式明确拒绝。
+- `/permissions` 读取与工具执行门共享的实时会话许可集合，不再使用入口启动时的数量快照；选择“本会话允许”后立即显示最新许可数。
 - 实现 Ctrl+C 生命周期：空闲时保存检查点并退出；任务运行时首次取消当前 `AbortController`，第二次会先等待幂等的 `interrupted` 会话事件落盘，再保存检查点并退出。
 - 更新中文 README 与 CHANGELOG。
 
 ## TDD 记录
 
-先新增命令与 reducer 测试并执行 `npm test -- tests/cli/commands.test.ts tests/cli/reducer.test.ts`，测试因模块尚不存在而失败；随后以最小解析和 reducer 实现转绿。首次配置测试先因 `first-run.ts` 缺失而红灯，随后补充校验、隐藏输入与临时 Key 行为。Ink 冒烟测试也先确认缺少 `app.tsx` 的导入失败，再实现事件注入、命令隔离与中止行为。复审修复阶段先加入 FTP、URL 用户凭据、工具调用前的中间文本、二次 Ctrl+C 持久化、确认按键与退出检查点的失败断言，再逐项最小实现并转绿。
+先新增命令与 reducer 测试并执行 `npm test -- tests/cli/commands.test.ts tests/cli/reducer.test.ts`，测试因模块尚不存在而失败；随后以最小解析和 reducer 实现转绿。首次配置测试先因 `first-run.ts` 缺失而红灯，随后补充校验、隐藏输入与临时 Key 行为。Ink 冒烟测试也先确认缺少 `app.tsx` 的导入失败，再实现事件注入、命令隔离与中止行为。复审修复阶段先加入 FTP、URL 用户凭据、工具调用前的中间文本、二次 Ctrl+C 持久化、确认按键与退出检查点的失败断言，再逐项最小实现并转绿。最终签字复审先新增 App 动态许可与入口 live Set 接线测试，确认旧实现分别显示 `[object Set]` 和命中 `grants.size` 快照后，再以共享只读 Set 引用完成最小修复。
 
 ## 当前验证
 
-- `npm test -- tests/cli`：5 个测试文件、39 项测试通过；
-- `npm test`：23 个测试文件、455 项测试通过；
+- `npm test -- tests/cli`：6 个测试文件、41 项测试通过；
+- `npm test`：25 个测试文件、458 项测试通过；
 - `npm run typecheck`：通过；
 - `git diff --check`：通过。
 

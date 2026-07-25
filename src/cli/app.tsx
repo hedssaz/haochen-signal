@@ -26,7 +26,7 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   sessionId: string;
   model: string;
   contextTokens?: number;
-  sessionGrants?: number;
+  sessionGrants?: ReadonlySet<string>;
   executeTool?: (name: string, input: unknown, signal: AbortSignal) => Promise<ToolResult>;
   compact?: () => Promise<CompactResult>;
   saveSession?: (reason: 'clear' | 'exit') => Promise<void>;
@@ -180,7 +180,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         return;
       }
       case 'permissions':
-        appendNotice('◉', `固定规则：越界与非公开网络直接拒绝；受限操作必须确认。\n本次会话许可：${props.sessionGrants ?? 0} 项`);
+        appendNotice('◉', `固定规则：越界与非公开网络直接拒绝；受限操作必须确认。\n本次会话许可：${props.sessionGrants?.size ?? 0} 项`);
         return;
       case 'compact': {
         if (props.compact === undefined) {
