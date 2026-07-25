@@ -3,7 +3,6 @@ import process from 'node:process';
 import {mkdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {createInterface} from 'node:readline/promises';
 import {render} from 'ink';
 import {z} from 'zod';
 import {runAgentTask} from '../agent/loop.js';
@@ -26,6 +25,7 @@ import {webSearch, webFetch} from '../tools/web.js';
 import {App} from './app.js';
 import {InteractiveConfirmationBroker} from './confirmation.js';
 import {runFirstRunWithCredentials} from './first-run.js';
+import {createFirstRunInput} from './terminal-input.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
 
 const args = new Set(process.argv.slice(2));
@@ -54,42 +54,6 @@ function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unknown>> {
   return new Map(specs.map(spec => [spec.name, spec]));
 }
 
-async function firstRunInput() {
-  const terminal = createInterface({input: process.stdin, output: process.stdout});
-  return {
-    read: async (prompt: string, options?: {hidden?: boolean}): Promise<string> => {
-      if (!options?.hidden || !process.stdin.isTTY) return terminal.question(prompt);
-      terminal.pause();
-      process.stdout.write(prompt);
-      return new Promise(resolve => {
-        let value = '';
-        const onData = (chunk: Buffer | string) => {
-          const text = chunk.toString();
-          if (text === '\r' || text === '\n') {
-            process.stdin.off('data', onData);
-            process.stdin.setRawMode(false);
-            process.stdout.write('\n');
-            terminal.resume();
-            resolve(value);
-          } else if (text === '\u0003') {
-            process.stdin.off('data', onData);
-            process.stdin.setRawMode(false);
-            terminal.resume();
-            resolve('');
-          } else if (text === '\u007f') {
-            value = value.slice(0, -1);
-          } else {
-            value += text;
-          }
-        };
-        process.stdin.setRawMode(true);
-        process.stdin.on('data', onData);
-      });
-    },
-    close: () => terminal.close(),
-  };
-}
-
 async function main(): Promise<void> {
   if (args.has('--version') || args.has('-v')) { process.stdout.write(`${VERSION}\n`); return; }
   if (args.has('--help') || args.has('-h')) { showHelp(); return; }
@@ -97,7 +61,7 @@ async function main(): Promise<void> {
   let config = await loadConfig(paths.configFile);
   let apiKey: string | undefined;
   if (config === undefined) {
-    const input = await firstRunInput();
+    const input = createFirstRunInput(process.stdin, process.stdout);
     try {
       const created = await runFirstRunWithCredentials(input, {write: text => process.stdout.write(text), saveKey: saveMacOsKeychain});
       config = created.config; apiKey = created.apiKey; await saveConfig(paths.configFile, config);

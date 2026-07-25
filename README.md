@@ -28,6 +28,8 @@ API Key 按以下顺序读取：
 2. macOS Keychain 中服务名为 `haochen-signal`、账户名为 `haochen` 的凭据；
 3. 启动时临时输入，且只保存在当前进程中。
 
+首次运行会依次询问 API 地址、模型和 API Key；API Key 使用隐藏输入，随后可选择是否保存到 macOS 钥匙串。终端必须保持在 Key 提示处等待输入，不会回显凭据。
+
 最直接的启动方式是：
 
 ```bash
