@@ -183,6 +183,38 @@ describe('classifyOperation', () => {
     expect(decision.action).toBe('deny');
   });
 
+  it('normalizes a bounded web search limit into the allowed scope', async () => {
+    const decision = await classifyOperation({
+      tool: 'web_search',
+      input: {query: '苏浩宸', limit: 5},
+    }, context);
+
+    expect(decision.action).toBe('allow');
+    expect(decision.normalizedScope).toContain('search:苏浩宸:5');
+  });
+
+  it.each([0, 11, 1.5])('denies an invalid web search limit: %s', async (limit) => {
+    const decision = await classifyOperation({
+      tool: 'web_search',
+      input: {query: '苏浩宸', limit},
+    }, context);
+
+    expect(decision.action).toBe('deny');
+  });
+
+  it('uses a distinct fingerprint for each web search limit', async () => {
+    const five = await classifyOperation({
+      tool: 'web_search',
+      input: {query: '苏浩宸', limit: 5},
+    }, context);
+    const six = await classifyOperation({
+      tool: 'web_search',
+      input: {query: '苏浩宸', limit: 6},
+    }, context);
+
+    expect(five.fingerprint).not.toBe(six.fingerprint);
+  });
+
   it('normalizes public command URLs and denies encoded private targets', async () => {
     const publicTarget = await classifyOperation({
       tool: 'run_command',

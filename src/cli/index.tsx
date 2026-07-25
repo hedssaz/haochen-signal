@@ -52,7 +52,7 @@ export function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unkno
     {name: 'git_status', description: '读取 Git 状态', inputSchema: z.object({}).strict(), jsonSchema: objectSchema({}), execute: (_i, c, s) => gitStatus(c, s)},
     {name: 'git_diff', description: '读取 Git 差异', inputSchema: z.object({staged: z.boolean().optional()}).strict(), jsonSchema: objectSchema({staged: {type: 'boolean'}}), execute: (i, c, s) => gitDiff(i as {staged?: boolean}, c, s)},
     {name: 'git_log', description: '读取近期 Git 记录', inputSchema: z.object({limit: z.number().int().optional()}).strict(), jsonSchema: objectSchema({limit: {type: 'integer'}}), execute: (i, c, s) => gitLog(i as {limit?: number}, c, s)},
-    {name: 'web_search', description: '搜索公开技术资料', inputSchema: z.object({query: z.string(), limit: z.number().int().optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string'}, limit: {type: 'integer'}}, ['query']), execute: (i, c, s) => webSearch(i as {query: string; limit?: number}, c, s)},
+    {name: 'web_search', description: '搜索公开技术资料', inputSchema: z.object({query: z.string(), limit: z.number().int().min(1).max(10).optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string'}, limit: {type: 'integer', minimum: 1, maximum: 10}}, ['query']), execute: (i, c, s) => webSearch(i as {query: string; limit?: number}, c, s)},
     {name: 'web_fetch', description: '提取公开网页正文', inputSchema: z.object({url: z.string()}).strict(), jsonSchema: objectSchema({url: {type: 'string'}}, ['url']), execute: (i, c, s) => webFetch(i as {url: string}, c, s)},
   ];
   return new Map(specs.map(spec => [spec.name, spec]));

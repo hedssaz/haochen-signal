@@ -1518,12 +1518,13 @@ function normalizeGitTool(
 function normalizeWebTool(tool: string, value: unknown): NormalizedOperation {
   const input = record(value, `${tool} input`);
   if (tool === 'web_search') {
-    onlyKeys(input, ['query'], `${tool} input`);
+    onlyKeys(input, ['query', 'limit'], `${tool} input`);
     const query = requiredString(input.query, 'query').trim();
     if (query.length === 0) inputError('query 不能为空');
+    const limit = optionalInteger(input.limit, 'limit', 10, 1, 10);
     return {
-      input: {query},
-      scope: [`search:${query}`],
+      input: {query, limit},
+      scope: [`search:${query}:${limit}`],
       confirmReasons: [],
       reviewReasons: [],
       allowReason: '操作只搜索公开技术资料',

@@ -64,4 +64,38 @@ describe('CLI entrypoint', () => {
       write.mockRestore();
     }
   });
+
+  it('exposes bounded result limits in the web_search model tool schema', async () => {
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
+
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        toolDefinitions?: () => Map<string, {
+          jsonSchema: Record<string, unknown>;
+        }>;
+      };
+      expect(cli.toolDefinitions).toBeTypeOf('function');
+      if (typeof cli.toolDefinitions !== 'function') return;
+
+      const definition = cli.toolDefinitions().get('web_search');
+      expect(definition?.jsonSchema).toMatchObject({
+        type: 'object',
+        required: ['query'],
+        additionalProperties: false,
+        properties: {
+          limit: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 10,
+          },
+        },
+      });
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+    }
+  });
 });

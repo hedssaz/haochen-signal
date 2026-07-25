@@ -145,6 +145,38 @@ describe('tool execution registry', () => {
     expect(executeTool).not.toHaveBeenCalled();
   });
 
+  it.each([0, 11, 1.5])('rejects an invalid web search limit before classification: %s', async (limit) => {
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
+
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        toolDefinitions?: () => Map<string, ToolDefinitionSpec<unknown, unknown>>;
+      };
+      expect(cli.toolDefinitions).toBeTypeOf('function');
+      if (typeof cli.toolDefinitions !== 'function') return;
+
+      tools = cli.toolDefinitions();
+      const classify = vi.fn(classifyOperation);
+      const result = await registry({classify}).execute(
+        'web_search',
+        {query: '苏浩宸', limit},
+        executionContext,
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'INVALID_INPUT'},
+      });
+      expect(classify).not.toHaveBeenCalled();
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+    }
+  });
+
   it('executes allow operations without invoking reviewer or confirmation', async () => {
     const gateEvents: ToolGateEvent[] = [];
     const result = await registry().execute(
