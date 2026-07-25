@@ -1,3 +1,10 @@
+> [!CAUTION]
+> **纯恶搞项目，请勿用于真实开发。**
+> 本仓库只用于玩梗和实验，不保证正确性、安全性、数据完整性或兼容性。不要让它接触生产项目、重要代码、真实凭据或任何无法恢复的数据。
+>
+> **PARODY PROJECT — DO NOT USE FOR REAL WORK.**
+> This repository is a joke and experiment. Do not use it with production projects, important source code, real credentials, or irreplaceable data.
+
 # 浩宸信号
 
 “浩宸信号”（Haochen Signal）是一个以“苏浩宸、狼王与信号场”世界观为交互语言的 AI 编程 CLI。它通过持续式终端会话读取项目、编辑文件、执行命令、使用 Git、检索公开技术资料，并在完成前运行验证。
@@ -6,29 +13,41 @@
 
 ## 安装
 
-需要 Node.js 20 或更高版本。
+需要 Node.js 20 或更高版本。本包尚未发布到 npm，以下从源码全局安装的方式是有意设计。
+
+| 平台 | 终端 | 安装命令 | API Key 环境变量 |
+|---|---|---|---|
+| macOS | POSIX Shell | `npm install --global .` | `export HAOCHEN_API_KEY='...'` |
+| Linux | POSIX Shell | `npm install --global .` | `export HAOCHEN_API_KEY='...'` |
+| Windows | Windows PowerShell | `npm install --global .` | `$env:HAOCHEN_API_KEY='...'` |
+
+### macOS / Linux（POSIX Shell）
 
 ```bash
-npm install --global haochen-signal
+npm install --global .
+export HAOCHEN_API_KEY='你的 API Key'
 haochen --version
 ```
 
-也可以在源码仓库中运行：
+### Windows PowerShell
 
-```bash
-npm install
-npm run dev
+```powershell
+npm install --global .
+$env:HAOCHEN_API_KEY='你的 API Key'
+haochen --version
 ```
+
+也可以在源码仓库中运行 `npm install` 后执行 `npm run dev`。
 
 ## 配置
 
 API Key 按以下顺序读取：
 
 1. `HAOCHEN_API_KEY` 环境变量；
-2. macOS Keychain 中服务名为 `haochen-signal`、账户名为 `haochen` 的凭据；
+2. 仅 macOS 的 Keychain 中服务名为 `haochen-signal`、账户名为 `haochen` 的凭据；
 3. 启动时临时输入，且只保存在当前进程中。
 
-首次运行会依次询问 API 地址、模型和 API Key；API Key 使用隐藏输入，随后可选择是否保存到 macOS 钥匙串。终端必须保持在 Key 提示处等待输入，不会回显凭据。
+首次运行会依次询问 API 地址、模型和 API Key；API Key 使用隐藏输入，终端必须保持在 Key 提示处等待输入，不会回显凭据。只有 macOS 会询问是否保存到 Keychain；Linux 和 Windows 请使用环境变量或本次启动的隐藏输入。
 
 最直接的启动方式是：
 
