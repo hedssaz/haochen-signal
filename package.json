@@ -17,9 +17,11 @@
   "scripts": {
     "dev": "tsx src/cli/index.tsx",
     "test": "vitest run",
+    "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "build": "node scripts/build.mjs"
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build"
   },
   "keywords": [
     "cli",
@@ -29,10 +31,11 @@
   "license": "MIT",
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
-    "ink": "^7.1.1",
+    "ink": "^6.8.0",
     "ipaddr.js": "^2.4.0",
     "linkedom": "^0.18.13",
     "react": "^19.2.8",
+    "react-devtools-core": "^7.0.1",
     "undici": "^6.28.0",
     "zod": "^4.4.3"
   },

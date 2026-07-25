@@ -48,6 +48,7 @@ export interface RunAgentTaskOptions {
   limits: AgentLimits;
   signal: AbortSignal;
   maxContextTokens?: number;
+  appendInterrupted?: (reason: string) => Promise<void>;
 }
 
 interface PendingToolCall {
@@ -195,15 +196,19 @@ function normalizeLimit(value: number): number {
 }
 
 async function appendInterrupted(
-  session: AgentSession,
+  options: RunAgentTaskOptions,
   reason: string,
 ): Promise<void> {
   try {
-    await session.store.append(session.id, {
-      type: 'interrupted',
-      at: Date.now(),
-      reason,
-    });
+    if (options.appendInterrupted !== undefined) {
+      await options.appendInterrupted(reason);
+    } else {
+      await options.session.store.append(options.session.id, {
+        type: 'interrupted',
+        at: Date.now(),
+        reason,
+      });
+    }
   } catch {
     // The interruption event is still emitted even if persistence is unavailable.
   }
@@ -531,7 +536,7 @@ export async function* runAgentTask(
         ? error.reason
         : abortReason(options.signal);
       const safeReason = safeErrorMessage(reason);
-      await appendInterrupted(options.session, safeReason);
+      await appendInterrupted(options, safeReason);
       yield {type: 'interrupted', reason: safeReason};
       return;
     }
