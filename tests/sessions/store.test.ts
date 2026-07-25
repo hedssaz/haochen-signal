@@ -87,9 +87,68 @@ it('lists an empty session with a stable zero update time', async () => {
     );
 
     await expect(store.list()).resolves.toEqual([
-      {id: 'active-session', updatedAt: 1},
-      {id: 'empty-session', updatedAt: 0},
+      {id: 'active-session', updatedAt: 1, preview: 'active'},
+      {id: 'empty-session', updatedAt: 0, preview: '空白会话'},
     ]);
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('initializes workspace metadata and lists safe conversation previews', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+  const currentWorkspace = 'a'.repeat(64);
+  const otherWorkspace = 'b'.repeat(64);
+
+  try {
+    await store.initialize('current', currentWorkspace, 1);
+    await store.append('current', {
+      type: 'user',
+      at: 3,
+      text: `  ${'修复登录问题'.repeat(20)}  `,
+    });
+    await store.initialize('other', otherWorkspace, 2);
+    await store.append('legacy', {type: 'user', at: 4, text: '旧版会话'});
+
+    const sessions = await store.list();
+
+    expect(sessions.find(session => session.id === 'current')).toMatchObject({
+      workspaceId: currentWorkspace,
+      updatedAt: 3,
+      preview: expect.stringMatching(/^修复登录问题/),
+    });
+    expect(Array.from(sessions.find(session => session.id === 'current')!.preview))
+      .toHaveLength(80);
+    expect(sessions.find(session => session.id === 'other')).toMatchObject({
+      workspaceId: otherWorkspace,
+      preview: '空白会话',
+    });
+    expect(sessions.find(session => session.id === 'legacy')).toEqual({
+      id: 'legacy',
+      updatedAt: 4,
+      preview: '旧版会话',
+    });
+  } finally {
+    await rm(tempDir, {recursive: true, force: true});
+  }
+});
+
+it('keeps workspace initialization idempotent and rejects conflicting metadata', async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), 'haochen-sessions-'));
+  const store = new SessionStore(tempDir);
+  const currentWorkspace = 'a'.repeat(64);
+
+  try {
+    await store.initialize('session-1', currentWorkspace, 1);
+    await store.initialize('session-1', currentWorkspace, 2);
+
+    await expect(store.read('session-1')).resolves.toEqual([
+      {type: 'session_meta', at: 1, workspaceId: currentWorkspace},
+    ]);
+    await expect(
+      store.initialize('session-1', 'b'.repeat(64), 3),
+    ).rejects.toThrow(/workspace/i);
   } finally {
     await rm(tempDir, {recursive: true, force: true});
   }
@@ -380,8 +439,8 @@ it('lists sessions by their final event time in descending order', async () => {
     await store.append('session-b', {type: 'summary', at: 50, text: 'last'});
 
     await expect(store.list()).resolves.toEqual([
-      {id: 'session-b', updatedAt: 50},
-      {id: 'session-a', updatedAt: 10},
+      {id: 'session-b', updatedAt: 50, preview: '空白会话'},
+      {id: 'session-a', updatedAt: 10, preview: 'first'},
     ]);
   } finally {
     await rm(tempDir, {recursive: true, force: true});

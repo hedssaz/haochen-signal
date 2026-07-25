@@ -240,6 +240,8 @@ describe('signal compaction', () => {
         event.type === 'interrupted' ? event.reason : event.type === 'checkpoint'
           ? event.reason : event.type === 'tool'
           ? event.tool
+          : event.type === 'session_meta'
+            ? event.workspaceId
           : event.text,
       );
     }
@@ -300,6 +302,8 @@ describe('signal compaction', () => {
         event.type === 'interrupted' ? event.reason : event.type === 'checkpoint'
           ? event.reason : event.type === 'tool'
           ? event.tool
+          : event.type === 'session_meta'
+            ? event.workspaceId
           : event.text,
       );
     }

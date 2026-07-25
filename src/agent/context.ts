@@ -28,6 +28,8 @@ function serializeValue(value: unknown): string {
 
 function messageForEvent(event: SessionEvent): ModelMessage {
   switch (event.type) {
+    case 'session_meta':
+      return {role: 'system', content: '会话元数据已初始化'};
     case 'user':
       return {role: 'user', content: event.text};
     case 'assistant':

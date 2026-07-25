@@ -37,10 +37,10 @@ describe('App', () => {
     app.stdin.write('读取 README');
     app.stdin.write('\r');
     await vi.waitFor(() => {
-      expect(app.lastFrame()).toContain('✓ 任务完成');
+      expect(app.lastFrame()).toContain('浩宸 › README 描述了浩宸信号');
     });
 
-    expect(app.lastFrame()).toContain('◆ 读取碎片');
+    expect(app.lastFrame()).toContain('工具 › read_file');
     expect(app.lastFrame()).toContain('README 描述了浩宸信号');
   });
 
@@ -61,7 +61,7 @@ describe('App', () => {
       expect.any(AbortSignal),
     ));
 
-    await vi.waitFor(() => expect(app.lastFrame()).toContain('浩宸 › 修复登录问题'));
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('你 › 修复登录问题'));
   });
 
   it('shows matching slash commands while the user types', async () => {

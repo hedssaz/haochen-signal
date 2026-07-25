@@ -3,6 +3,11 @@ import {z} from 'zod';
 const timestamp = z.number();
 
 export const SessionEventSchema = z.discriminatedUnion('type', [
+  z.strictObject({
+    type: z.literal('session_meta'),
+    at: timestamp,
+    workspaceId: z.string().regex(/^[0-9a-f]{64}$/u),
+  }),
   z.strictObject({type: z.literal('user'), at: timestamp, text: z.string()}),
   z.strictObject({type: z.literal('assistant'), at: timestamp, text: z.string()}),
   z.strictObject({
@@ -36,6 +41,8 @@ export type SessionEvent = z.infer<typeof SessionEventSchema>;
 export interface SessionInfo {
   id: string;
   updatedAt: number;
+  preview: string;
+  workspaceId?: string;
 }
 
 export interface AuditEntry {

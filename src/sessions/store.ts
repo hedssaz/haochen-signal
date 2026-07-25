@@ -83,6 +83,30 @@ export class SessionStore {
     );
   }
 
+  async initialize(
+    sessionId: string,
+    workspaceId: string,
+    at = Date.now(),
+  ): Promise<void> {
+    const metadata: SessionEvent = {type: 'session_meta', at, workspaceId};
+    SessionEventSchema.parse(metadata);
+    let events: SessionEvent[];
+    try {
+      events = await this.read(sessionId);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      events = [];
+    }
+    const existing = events.find(event => event.type === 'session_meta');
+    if (existing?.type === 'session_meta') {
+      if (existing.workspaceId !== workspaceId) {
+        throw new Error('session workspace metadata conflicts with existing workspace');
+      }
+      return;
+    }
+    await this.append(sessionId, metadata);
+  }
+
   async read(sessionId: string): Promise<SessionEvent[]> {
     const contents = await readUtf8(this.pathFor(sessionId));
     if (contents.length === 0) return [];
@@ -124,7 +148,24 @@ export class SessionStore {
           const id = entry.name.slice(0, -'.jsonl'.length);
           const events = await this.read(id);
           const finalEvent = events.at(-1);
-          return {id, updatedAt: finalEvent?.at ?? 0};
+          const metadata = events.find(event => event.type === 'session_meta');
+          const firstUser = events.find(event =>
+            event.type === 'user' && event.text.trim().length > 0);
+          const rawPreview = firstUser?.type === 'user'
+            ? firstUser.text.trim()
+            : '空白会话';
+          const previewCodePoints = Array.from(rawPreview);
+          const preview = previewCodePoints.length <= 80
+            ? rawPreview
+            : `${previewCodePoints.slice(0, 79).join('')}…`;
+          return {
+            id,
+            updatedAt: finalEvent?.at ?? 0,
+            preview,
+            ...(metadata?.type === 'session_meta'
+              ? {workspaceId: metadata.workspaceId}
+              : {}),
+          };
         }),
     );
 

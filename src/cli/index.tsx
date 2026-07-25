@@ -13,7 +13,7 @@ import {readMacOsKeychain, resolveApiKey, saveMacOsKeychain} from '../config/cre
 import {createOpenAiCompatibleClient} from '../providers/openai-compatible.js';
 import {classifyOperation} from '../security/boundary.js';
 import {reviewOperation} from '../security/reviewer.js';
-import {AuditStore} from '../sessions/audit.js';
+import {AuditStore, workspaceId} from '../sessions/audit.js';
 import {createSessionId, SessionStore} from '../sessions/store.js';
 import {createSerializedSessionStore} from '../sessions/serialized-store.js';
 import {ToolRegistry} from '../tools/registry.js';
@@ -73,6 +73,7 @@ async function main(): Promise<void> {
   apiKey ??= await resolveApiKey({env: process.env, readKeychain: readMacOsKeychain, prompt: async () => undefined});
   if (!apiKey) throw new Error('未提供 API Key；请设置 HAOCHEN_API_KEY 或重新首次配置。');
   const workspace = process.cwd();
+  const currentWorkspaceId = workspaceId(workspace);
   const tempDir = join(tmpdir(), 'haochen'); await mkdir(tempDir, {recursive: true});
   const model = createOpenAiCompatibleClient(activeConfig, apiKey);
   const store = new SessionStore(paths.sessionsDir); const sessionStore = createSerializedSessionStore(store); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
@@ -81,6 +82,7 @@ async function main(): Promise<void> {
   );
   const registry = new ToolRegistry({tools: toolDefinitions(), classify: classifyOperation, review: reviewOperation, confirm: request => confirmations.request(request), sessionGrants: grants, audit});
   let sessionId = createSessionId();
+  await store.initialize(sessionId, currentWorkspaceId);
   let activeInterruptionWriter: ((reason: string) => Promise<void>) | undefined;
   clearTerminalScreen(process.stdout);
   const instance = render(<App
@@ -102,7 +104,12 @@ async function main(): Promise<void> {
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
       if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
       await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});
-    }} createSession={async () => { sessionId = createSessionId(); return sessionId; }} listSessions={() => store.list()} resumeSession={async id => { await sessionStore.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined} confirmation={confirmations}
+    }} createSession={async () => {
+      const nextSessionId = createSessionId();
+      await store.initialize(nextSessionId, currentWorkspaceId);
+      sessionId = nextSessionId;
+      return sessionId;
+    }} listSessions={() => store.list()} resumeSession={async id => { await sessionStore.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined} confirmation={confirmations}
   />);
   await instance.waitUntilExit();
 }
