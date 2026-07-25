@@ -61,6 +61,92 @@ describe('assertPublicHttpUrl', () => {
 });
 
 describe('web search', () => {
+  it('falls back to public DNS when the local resolver returns a proxy fake IP', async () => {
+    const fallbackDns = vi.fn(async () => ['52.250.42.157']);
+    const fetcher = vi.fn(async () => htmlResponse(`
+      <article class="result">
+        <a class="result__a" href="https://example.com/haochen">苏浩宸</a>
+        <div class="result__snippet">公开搜索结果</div>
+      </article>
+    `));
+
+    const result = await webSearch({query: '苏浩宸'}, context, signal, {
+      fetch: fetcher,
+      resolveDns: async () => ['198.18.1.63', '::ffff:0:c612:13f'],
+      resolveFallbackDns: fallbackDns,
+    } as unknown as Parameters<typeof webSearch>[3]);
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        results: [{
+          title: '苏浩宸',
+          url: 'https://example.com/haochen',
+          snippet: '公开搜索结果',
+        }],
+      },
+    });
+    expect(fallbackDns).toHaveBeenCalledWith(
+      'html.duckduckgo.com',
+      expect.any(AbortSignal),
+    );
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it('does not use the public DNS fallback for an ordinary private DNS answer', async () => {
+    const fallbackDns = vi.fn(async () => ['52.250.42.157']);
+    const fetcher = vi.fn(async () => htmlResponse('<main></main>'));
+
+    const result = await webSearch({query: '苏浩宸'}, context, signal, {
+      fetch: fetcher,
+      resolveDns: async () => ['192.168.1.2'],
+      resolveFallbackDns: fallbackDns,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'WEB_URL_BLOCKED'},
+    });
+    expect(fallbackDns).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('cancels unsuccessful DNS-over-HTTPS response bodies before closing transport', async () => {
+    let canceledBodies = 0;
+    const dnsFetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1]));
+        },
+        cancel() {
+          canceledBodies += 1;
+        },
+      }),
+      {status: 503},
+    ));
+    const dispatcher = {
+      close: vi.fn(async () => undefined),
+      destroy: vi.fn(async () => undefined),
+    };
+    const pageFetch = vi.fn(async () => htmlResponse('<main></main>'));
+
+    const result = await webSearch({query: '苏浩宸'}, context, signal, {
+      fetch: pageFetch,
+      resolveDns: async () => ['198.18.1.63'],
+      dnsFetch,
+      createDnsDispatcher: vi.fn(() => dispatcher as never),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'WEB_DNS_FAILED'},
+    });
+    expect(dnsFetch).toHaveBeenCalledTimes(2);
+    expect(canceledBodies).toBe(2);
+    expect(dispatcher.close).toHaveBeenCalledOnce();
+    expect(pageFetch).not.toHaveBeenCalled();
+  });
+
   it('submits the DuckDuckGo HTML query and returns the requested top results', async () => {
     const results = Array.from({length: 12}, (_, index) => `
       <article class="result">

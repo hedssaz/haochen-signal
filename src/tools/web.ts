@@ -12,6 +12,9 @@ import {
 } from './web-contract.js';
 
 const DUCKDUCKGO_HTML_URL = 'https://html.duckduckgo.com/html/';
+const PUBLIC_DNS_URL = 'https://cloudflare-dns.com/dns-query';
+const PUBLIC_DNS_HOSTNAME = 'cloudflare-dns.com';
+const PUBLIC_DNS_ADDRESSES = ['1.1.1.1', '1.0.0.1'] as const;
 const MAX_REDIRECTS = 3;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_ARTICLE_CHARACTERS = 40_000;
@@ -35,6 +38,9 @@ type CreatePinnedDispatcher = (
 export interface WebToolDependencies {
   fetch?: WebFetchFunction;
   resolveDns?: ResolveDns;
+  resolveFallbackDns?: ResolveDns;
+  dnsFetch?: WebFetchFunction;
+  createDnsDispatcher?: CreatePinnedDispatcher;
   createDispatcher?: CreatePinnedDispatcher;
   timeoutMs?: number;
   now?: () => Date;
@@ -143,6 +149,111 @@ function isPublicIpAddress(address: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isProxyFakeIpAddress(address: string): boolean {
+  try {
+    const parsed = ipaddr.parse(address);
+    const bytes = parsed.toByteArray();
+    const ipv4Bytes = parsed.kind() === 'ipv4'
+      ? bytes
+      : parsed.range() === 'ipv4Mapped' || parsed.range() === 'rfc6145'
+        ? bytes.slice(-4)
+        : [];
+    return ipv4Bytes[0] === 198
+      && (ipv4Bytes[1] === 18 || ipv4Bytes[1] === 19);
+  } catch {
+    return false;
+  }
+}
+
+interface DnsJsonAnswer {
+  type?: unknown;
+  data?: unknown;
+}
+
+interface DnsJsonResponse {
+  Status?: unknown;
+  Answer?: unknown;
+}
+
+async function cancelResponseBody(
+  response: Response,
+  signal: AbortSignal,
+): Promise<void> {
+  if (response.body === null) return;
+  const cancelling = Promise.resolve()
+    .then(async () => response.body?.cancel())
+    .catch(() => undefined);
+  try {
+    await awaitWithSignal(cancelling, signal);
+  } catch {
+    // The shared request deadline wins over stalled response cancellation.
+  }
+}
+
+async function defaultFallbackResolveDns(
+  hostname: string,
+  signal?: AbortSignal,
+  fetcher: WebFetchFunction = undiciFetch as unknown as WebFetchFunction,
+  dispatcherFactory: CreatePinnedDispatcher = createPinnedDispatcher,
+): Promise<readonly string[]> {
+  signal?.throwIfAborted();
+  const dispatcher = dispatcherFactory(
+    PUBLIC_DNS_HOSTNAME,
+    PUBLIC_DNS_ADDRESSES,
+  );
+  const requestSignal = signal ?? new AbortController().signal;
+  try {
+    const answers = await Promise.allSettled([1, 28].map(async (type) => {
+      const url = new URL(PUBLIC_DNS_URL);
+      url.searchParams.set('name', hostname);
+      url.searchParams.set('type', String(type));
+      const response = await fetcher(url, {
+        redirect: 'error',
+        signal,
+        headers: {accept: 'application/dns-json'},
+        dispatcher,
+      });
+      if (!response.ok) {
+        await cancelResponseBody(response, requestSignal);
+        throw new Error(`DNS over HTTPS returned ${response.status}`);
+      }
+      const body = JSON.parse(await readResponseText(response, requestSignal)) as DnsJsonResponse;
+      if (body.Status !== 0 || !Array.isArray(body.Answer)) return [];
+      return body.Answer.flatMap((answer: DnsJsonAnswer) => (
+        (answer.type === 1 || answer.type === 28)
+          && typeof answer.data === 'string'
+          && isIP(answer.data) !== 0
+          ? [answer.data]
+          : []
+      ));
+    }));
+    signal?.throwIfAborted();
+    const addresses = answers.flatMap((answer) => (
+      answer.status === 'fulfilled' ? answer.value : []
+    ));
+    if (addresses.length === 0) {
+      const failed = answers.find((answer) => answer.status === 'rejected');
+      throw failed?.reason ?? new Error('DNS over HTTPS returned no addresses');
+    }
+    return addresses;
+  } finally {
+    await closeDispatcher(dispatcher, requestSignal);
+  }
+}
+
+async function resolveSearchDns(
+  hostname: string,
+  signal: AbortSignal | undefined,
+  primary: ResolveDns,
+  fallback: ResolveDns,
+): Promise<readonly string[]> {
+  const addresses = await primary(hostname, signal);
+  if (addresses.length > 0 && addresses.every(isProxyFakeIpAddress)) {
+    return fallback(hostname, signal);
+  }
+  return addresses;
 }
 
 function hostnameFromUrl(url: URL): string {
@@ -591,13 +702,29 @@ export async function webSearch(
     outerSignal,
     dependencies.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   );
+  const searchDependencies: WebToolDependencies = {
+    ...dependencies,
+    resolveDns: (hostname, signal) => resolveSearchDns(
+      hostname,
+      signal,
+      dependencies.resolveDns ?? defaultResolveDns,
+      dependencies.resolveFallbackDns ?? ((hostname, signal) => (
+        defaultFallbackResolveDns(
+          hostname,
+          signal,
+          dependencies.dnsFetch,
+          dependencies.createDnsDispatcher,
+        )
+      )),
+    ),
+  };
   let fetched: FetchedResponse | undefined;
   let result: ToolResult<WebSearchOutput>;
   try {
     fetched = await fetchWithValidatedRedirects(
       searchUrl.toString(),
       request.signal,
-      dependencies,
+      searchDependencies,
     );
     const {response} = fetched;
     if (!response.ok) {

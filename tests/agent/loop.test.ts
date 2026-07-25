@@ -857,5 +857,7 @@ describe('main agent system prompt', () => {
     expect(prompt).toContain('世界观文案不得替代路径、命令、diff 和错误');
     expect(prompt).toContain('寒暄、闲聊或能力询问');
     expect(prompt).toContain('不要为了了解工作区主动扫描');
+    expect(prompt).toContain('决定需要工具后立即调用');
+    expect(prompt).toContain('禁止重复规划');
   });
 });

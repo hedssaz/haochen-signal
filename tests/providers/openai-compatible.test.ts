@@ -1439,6 +1439,70 @@ describe('OpenAI-compatible chat completions client', () => {
     }
   });
 
+  it('treats the configured timeout as an idle timeout while stream chunks continue', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    let responseController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const encoder = new TextEncoder();
+
+    try {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          responseController = controller;
+        },
+      });
+      const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
+      const client = createOpenAiCompatibleClient(parseConfig({
+        baseUrl: 'https://example.test/v1',
+        model: 'wolf-1',
+        timeoutMs: 1_000,
+      }), 'test-key', {fetch: fetchImpl});
+      const events: ModelEvent[] = [];
+      const outcome = (async () => {
+        for await (const event of client.stream({
+          model: 'wolf-1',
+          messages: [{role: 'user', content: '持续思考后回答'}],
+        }, caller.signal)) {
+          events.push(event);
+        }
+      })();
+
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(800);
+      responseController?.enqueue(encoder.encode(
+        `data: ${JSON.stringify({choices: [{delta: {reasoning_content: '分析'}}]})}\n\n`,
+      ));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(800);
+      responseController?.enqueue(encoder.encode(
+        `data: ${JSON.stringify({choices: [{delta: {content: '回答'}}]})}\n\n`,
+      ));
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(800);
+      responseController?.enqueue(encoder.encode(
+        `data: ${JSON.stringify({choices: [{delta: {}, finish_reason: 'stop'}]})}\n\n`
+        + 'data: [DONE]\n\n',
+      ));
+      responseController?.close();
+
+      await outcome;
+      expect(events).toEqual([
+        {type: 'reasoning_delta', text: '分析'},
+        {type: 'text_delta', text: '回答'},
+        {type: 'finish', reason: 'stop', usage: undefined},
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      caller.abort();
+      try {
+        responseController?.error(new Error('test cleanup'));
+      } catch {
+        // The implementation may already have closed or canceled the stream.
+      }
+      vi.useRealTimers();
+    }
+  });
+
   it('clears the configured timeout when streaming finishes', async () => {
     vi.useFakeTimers();
     const caller = new AbortController();

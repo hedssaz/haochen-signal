@@ -47,6 +47,7 @@ const SENSITIVE_HEADER_NAME =
 
 interface OperationSignal {
   signal: AbortSignal;
+  touch(): void;
   dispose(): void;
 }
 
@@ -82,15 +83,23 @@ function createOperationSignal(
     callerSignal.addEventListener('abort', onCallerAbort, {once: true});
   }
 
-  const timeout = setTimeout(() => {
-    controller.abort(new DOMException(
-      `Model request timed out after ${timeoutMs}ms`,
-      'TimeoutError',
-    ));
-  }, timeoutMs);
+  let timeout: ReturnType<typeof setTimeout>;
+  const armTimeout = () => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => {
+      controller.abort(new DOMException(
+        `Model request timed out after ${timeoutMs}ms without stream activity`,
+        'TimeoutError',
+      ));
+    }, timeoutMs);
+  };
+  armTimeout();
 
   return {
     signal: controller.signal,
+    touch() {
+      if (!controller.signal.aborted) armTimeout();
+    },
     dispose() {
       clearTimeout(timeout);
       callerSignal.removeEventListener('abort', onCallerAbort);
@@ -235,6 +244,7 @@ async function fetchResponse(
 async function* responseChunks(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal,
+  onActivity: () => void,
 ): AsyncGenerator<Uint8Array> {
   const reader = body.getReader();
   let cancellationStarted = false;
@@ -256,6 +266,7 @@ async function* responseChunks(
         reachedNaturalEof = true;
         return;
       }
+      onActivity();
       yield result.value;
     }
   } finally {
@@ -300,6 +311,7 @@ function accumulateToolCall(
 async function* streamResponse(
   response: Response,
   signal: AbortSignal,
+  onActivity: () => void,
 ): AsyncGenerator<ModelEvent> {
   if (response.body === null) throw new Error('Model response has no body');
 
@@ -308,7 +320,7 @@ async function* streamResponse(
   let usage: {inputTokens: number; outputTokens: number} | undefined;
 
   for await (const data of decodeSse(
-    responseChunks(response.body, signal),
+    responseChunks(response.body, signal, onActivity),
     {requireCompleteFinalFrame: true},
   )) {
     if (data === '[DONE]') {
@@ -433,7 +445,7 @@ export function createOpenAiCompatibleClient(
         }
 
         try {
-          yield* streamResponse(response, operation.signal);
+          yield* streamResponse(response, operation.signal, operation.touch);
         } catch (error) {
           throw providerError(
             'Model response stream failed',
