@@ -1,5 +1,5 @@
 import {readFile} from 'node:fs/promises';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 
 describe('CLI entrypoint', () => {
   it('passes the live session grant set to the App instead of its startup size', async () => {
@@ -23,15 +23,45 @@ describe('CLI entrypoint', () => {
   });
 
   it('exposes character pagination in the read_file model tool schema', async () => {
-    const source = await readFile(
-      new URL('../../src/cli/index.tsx', import.meta.url),
-      'utf8',
-    );
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
 
-    expect(source).toContain('读取工作区文本文件（支持按字符续读）');
-    expect(source).toContain('startCharacter: z.number().int().min(0).optional()');
-    expect(source).toContain('maxCharacters: z.number().int().min(1).max(65_536).optional()');
-    expect(source).toContain("startCharacter: {type: 'integer'}");
-    expect(source).toContain("maxCharacters: {type: 'integer'}");
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        toolDefinitions?: () => Map<string, {
+          description: string;
+          jsonSchema: Record<string, unknown>;
+        }>;
+      };
+      expect(cli.toolDefinitions).toBeTypeOf('function');
+      if (typeof cli.toolDefinitions !== 'function') return;
+
+      const definition = cli.toolDefinitions().get('read_file');
+      expect(definition?.description).toBe(
+        '读取工作区文本文件；续读时保持 path、startLine、endLine 与上一页一致，并将上一页 nextCharacter 作为 startCharacter',
+      );
+      expect(definition?.jsonSchema).toMatchObject({
+        type: 'object',
+        required: ['path'],
+        additionalProperties: false,
+        properties: {
+          startCharacter: {
+            type: 'integer',
+            minimum: 0,
+            maximum: Number.MAX_SAFE_INTEGER,
+          },
+          maxCharacters: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 65_536,
+          },
+        },
+      });
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+    }
   });
 });
