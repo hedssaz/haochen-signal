@@ -64,6 +64,25 @@ const helpText = [
 ].join('\n');
 
 type LocalNoticePrefix = '◆' | '◇' | '◉' | '✓' | '✗' | '浩宸 ›';
+type StreamPhase = 'complete' | 'thinking' | 'answering';
+
+export function formatTokenCount(count: number): string {
+  if (count >= 1_000_000) {
+    return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, '')}m`;
+  }
+  if (count >= 1_000) {
+    return `${(count / 1_000).toFixed(1).replace(/\.0$/, '')}k`;
+  }
+  return String(count);
+}
+
+function phaseLabel(phase: StreamPhase): string {
+  switch (phase) {
+    case 'thinking': return '思考中';
+    case 'answering': return '思考完成 · 正在回答';
+    case 'complete': return '思考完成';
+  }
+}
 
 function localEntry(prefix: LocalNoticePrefix, text: string): UiEntry {
   if (prefix === '浩宸 ›') return {kind: 'user', title: '你', text};
@@ -111,6 +130,8 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   );
   const [resumePicker, setResumePicker] = useState<ResumePickerState | undefined>();
   const [runtimeStatus, setRuntimeStatus] = useState<string | undefined>();
+  const [streamPhase, setStreamPhase] = useState<StreamPhase>('complete');
+  const [streamTokenCount, setStreamTokenCount] = useState(0);
   const resumePickerRef = useRef<ResumePickerState | undefined>(undefined);
   const inputRef = useRef('');
   const activeController = useRef<AbortController | undefined>(undefined);
@@ -191,10 +212,19 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     activeController.current = controller;
     abortRequested.current = false;
     interruptedPersisted.current = false;
+    setStreamTokenCount(0);
+    setStreamPhase('thinking');
     setRuntimeStatus('正在理解任务');
     try {
       for await (const event of props.runTask(task, controller.signal)) {
         if (event.type === 'interrupted') interruptedPersisted.current = true;
+        if (event.type === 'reasoning_delta' && event.text.length > 0) {
+          setStreamTokenCount(count => count + 1);
+          setStreamPhase('thinking');
+        } else if (event.type === 'assistant_delta' && event.text.length > 0) {
+          setStreamTokenCount(count => count + 1);
+          setStreamPhase('answering');
+        }
         if (event.type === 'assistant_delta' || event.type === 'assistant_message') {
           setRuntimeStatus('正在规划');
         } else if (event.type === 'tool_started') {
@@ -217,6 +247,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     } finally {
       if (activeController.current === controller) activeController.current = undefined;
       setRuntimeStatus(undefined);
+      setStreamPhase('complete');
       abortRequested.current = false;
       setState(previous => previous.phase === 'idle' || previous.phase === 'error'
         ? previous
@@ -424,6 +455,17 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         {item.detail === undefined ? null : <Text dimColor>{`参数  ${item.detail}`}</Text>}
       </Box>)}
     </Box>
+    {state.liveReasoning.length === 0 ? null : <Box flexDirection="column" marginBottom={1}>
+      <Text bold>思考 ›</Text>
+      <Text>{state.liveReasoning}</Text>
+    </Box>}
+    {state.liveAssistant.length === 0 ? null : <Box flexDirection="column" marginBottom={1}>
+      <Text bold>浩宸 ›</Text>
+      <Text>{state.liveAssistant}</Text>
+    </Box>}
+    <Text dimColor>
+      {`↓ ${formatTokenCount(streamTokenCount)} tokens · ${phaseLabel(streamPhase)}`}
+    </Text>
     {pendingConfirmation === undefined ? null : <Box flexDirection="column" marginTop={1}>
       <Text color="yellow">◉ 确认请求 · {pendingConfirmation.operation.tool}</Text>
       <Text>{`风险：${pendingConfirmation.boundary.risk}\n范围：${pendingConfirmation.boundary.normalizedScope.join(', ')}\n${pendingConfirmation.boundary.reasons.join('；')}`}</Text>

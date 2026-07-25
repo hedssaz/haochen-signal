@@ -1,7 +1,7 @@
 import React from 'react';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {render} from 'ink-testing-library';
-import {App} from '../../src/cli/app.js';
+import {App, formatTokenCount} from '../../src/cli/app.js';
 import type {AgentUiEvent} from '../../src/cli/reducer.js';
 import type {ToolResult} from '../../src/tools/types.js';
 import {GateReporter} from '../../src/cli/gate-reporter.js';
@@ -25,6 +25,14 @@ async function waitForInputListener(): Promise<void> {
 
 describe('App', () => {
   afterEach(() => vi.clearAllMocks());
+
+  it.each([
+    [999, '999'],
+    [1_000, '1k'],
+    [1_000_000, '1m'],
+  ])('formats %i stream tokens as %s', (count, expected) => {
+    expect(formatTokenCount(count)).toBe(expected);
+  });
 
   it('renders injected agent events after submitting a task', async () => {
     const app = render(<App
@@ -246,6 +254,109 @@ describe('App', () => {
     await vi.waitFor(() => {
       expect(app.lastFrame()).not.toContain('状态 › 运行中');
       expect((app.lastFrame() ?? '').trimEnd()).toMatch(/浩宸 ›$/);
+    });
+  });
+
+  it('streams reasoning and answers with per-task incremental token phases', async () => {
+    let releaseAnswer!: () => void;
+    let releaseFirstTask!: () => void;
+    let releaseSecondTask!: () => void;
+    const answerGate = new Promise<void>(resolve => { releaseAnswer = resolve; });
+    const firstTaskGate = new Promise<void>(resolve => { releaseFirstTask = resolve; });
+    const secondTaskGate = new Promise<void>(resolve => { releaseSecondTask = resolve; });
+    let taskCount = 0;
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      taskCount += 1;
+      if (taskCount === 1) {
+        yield {type: 'reasoning_delta', text: '先'};
+        yield {type: 'reasoning_delta', text: '想'};
+        await answerGate;
+        yield {type: 'assistant_delta', text: '答'};
+        yield {type: 'assistant_delta', text: '案'};
+        await firstTaskGate;
+        yield {type: 'assistant_turn_finished'};
+        return;
+      }
+      await secondTaskGate;
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('解决问题');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('思考 ›');
+      expect(frame).toContain('先想');
+      expect(frame).toContain('↓ 2 tokens · 思考中');
+    });
+
+    releaseAnswer();
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('浩宸 ›');
+      expect(frame).toContain('答案');
+      expect(frame).toContain('↓ 4 tokens · 思考完成 · 正在回答');
+    });
+
+    releaseFirstTask();
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('↓ 4 tokens · 思考完成');
+      expect(frame).not.toContain('正在回答');
+    });
+
+    app.stdin.write('继续');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(runTask).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('↓ 0 tokens · 思考中');
+      expect(frame).not.toContain('↓ 4 tokens');
+    });
+
+    releaseSecondTask();
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('↓ 0 tokens · 思考完成');
+    });
+  });
+
+  it('enters answering on the first non-empty content-only delta', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'reasoning_delta', text: ''};
+      yield {type: 'assistant_delta', text: ''};
+      yield {type: 'assistant_delta', text: '直接回答'};
+      await blocked;
+      yield {type: 'assistant_turn_finished'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('直接回答');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).not.toContain('思考 ›');
+      expect(frame).toContain('浩宸 ›');
+      expect(frame).toContain('直接回答');
+      expect(frame).toContain('↓ 1 tokens · 思考完成 · 正在回答');
+    });
+
+    release();
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('↓ 1 tokens · 思考完成');
     });
   });
 
