@@ -44,13 +44,15 @@ export async function runFirstRunWithCredentials(
   output.write('首次进入信号场：请配置 OpenAI-compatible 服务。\n');
   const config = await askConfig(input, output);
   const apiKey = await askNonEmpty(input, output, 'API Key：', true);
-  const choice = (await input.read('将 API Key 保存到系统钥匙串？[y/N]：')).trim().toLowerCase();
-  const shouldSave = choice === 'y' || choice === 'yes';
-
-  if (shouldSave && output.saveKey !== undefined) {
-    await output.saveKey(apiKey);
-    output.write('API Key 已保存到系统钥匙串。\n');
-    return {config, apiKey, keySaved: true};
+  if (output.saveKey !== undefined) {
+    const choice = (
+      await input.read('将 API Key 保存到系统钥匙串？[y/N]：')
+    ).trim().toLowerCase();
+    if (choice === 'y' || choice === 'yes') {
+      await output.saveKey(apiKey);
+      output.write('API Key 已保存到系统钥匙串。\n');
+      return {config, apiKey, keySaved: true};
+    }
   }
 
   output.write('API Key 仅在本次进程中使用，不会写入配置文件。\n');

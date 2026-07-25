@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from 'node:process';
 import {mkdir} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
+import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {render} from 'ink';
 import {z} from 'zod';
@@ -25,6 +25,7 @@ import {webSearch, webFetch} from '../tools/web.js';
 import {App} from './app.js';
 import {InteractiveConfirmationBroker} from './confirmation.js';
 import {runFirstRunWithCredentials} from './first-run.js';
+import {credentialSaverForPlatform, resolveUserHome} from './platform.js';
 import {createFirstRunInput} from './terminal-input.js';
 import {clearTerminalScreen} from './terminal-screen.js';
 import {GateReporter} from './gate-reporter.js';
@@ -59,13 +60,22 @@ function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unknown>> {
 async function main(): Promise<void> {
   if (args.has('--version') || args.has('-v')) { process.stdout.write(`${VERSION}\n`); return; }
   if (args.has('--help') || args.has('-h')) { showHelp(); return; }
-  const paths = getAppPaths(process.env, process.env.HOME ?? process.cwd());
+  const paths = getAppPaths(
+    process.env,
+    resolveUserHome(process.env, homedir()),
+  );
   let config = await loadConfig(paths.configFile);
   let apiKey: string | undefined;
   if (config === undefined) {
     const input = createFirstRunInput(process.stdin, process.stdout);
     try {
-      const created = await runFirstRunWithCredentials(input, {write: text => process.stdout.write(text), saveKey: saveMacOsKeychain});
+      const created = await runFirstRunWithCredentials(input, {
+        write: text => process.stdout.write(text),
+        saveKey: credentialSaverForPlatform(
+          process.platform,
+          saveMacOsKeychain,
+        ),
+      });
       config = created.config; apiKey = created.apiKey; await saveConfig(paths.configFile, config);
     } finally { input.close(); }
   }

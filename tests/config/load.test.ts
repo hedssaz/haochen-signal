@@ -1,6 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 import {mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
-import {basename, dirname, join} from 'node:path';
+import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {loadConfig, saveConfig} from '../../src/config/load.js';
 import {parseConfig} from '../../src/config/schema.js';
@@ -17,32 +17,37 @@ describe('configuration', () => {
   });
 
   it('uses XDG paths when present', () => {
+    const configHome = resolve('cfg');
+    const dataHome = resolve('data');
+    const stateHome = resolve('state');
     expect(getAppPaths({
-      XDG_CONFIG_HOME: '/cfg',
-      XDG_DATA_HOME: '/data',
-      XDG_STATE_HOME: '/state',
-    }, '/home/wolf')).toEqual({
-      configFile: '/cfg/haochen/config.json',
-      sessionsDir: '/data/haochen/sessions',
-      auditDir: '/state/haochen/audit',
+      XDG_CONFIG_HOME: configHome,
+      XDG_DATA_HOME: dataHome,
+      XDG_STATE_HOME: stateHome,
+    }, resolve('home', 'wolf'))).toEqual({
+      configFile: join(configHome, 'haochen', 'config.json'),
+      sessionsDir: join(dataHome, 'haochen', 'sessions'),
+      auditDir: join(stateHome, 'haochen', 'audit'),
     });
   });
 
   it('uses standard XDG fallback paths when variables are absent', () => {
-    expect(getAppPaths({}, '/home/wolf')).toEqual({
-      configFile: '/home/wolf/.config/haochen/config.json',
-      sessionsDir: '/home/wolf/.local/share/haochen/sessions',
-      auditDir: '/home/wolf/.local/state/haochen/audit',
+    const home = resolve('home', 'wolf');
+    expect(getAppPaths({}, home)).toEqual({
+      configFile: join(home, '.config', 'haochen', 'config.json'),
+      sessionsDir: join(home, '.local', 'share', 'haochen', 'sessions'),
+      auditDir: join(home, '.local', 'state', 'haochen', 'audit'),
     });
   });
 
   for (const variable of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME'] as const) {
     for (const value of ['', '  ', 'relative/haochen']) {
       it(`falls back when ${variable} is not a non-empty absolute path: ${JSON.stringify(value)}`, () => {
-        expect(getAppPaths({[variable]: value}, '/home/wolf')).toEqual({
-          configFile: '/home/wolf/.config/haochen/config.json',
-          sessionsDir: '/home/wolf/.local/share/haochen/sessions',
-          auditDir: '/home/wolf/.local/state/haochen/audit',
+        const home = resolve('home', 'wolf');
+        expect(getAppPaths({[variable]: value}, home)).toEqual({
+          configFile: join(home, '.config', 'haochen', 'config.json'),
+          sessionsDir: join(home, '.local', 'share', 'haochen', 'sessions'),
+          auditDir: join(home, '.local', 'state', 'haochen', 'audit'),
         });
       });
     }

@@ -29,6 +29,24 @@ describe('runFirstRun', () => {
     ]));
   });
 
+  it('does not prompt for Keychain storage when no saver is available', async () => {
+    const input = scriptedInput(['https://api.example.test/v1', 'wolf-2', 'temp-key']);
+
+    await runFirstRunWithCredentials(input, {write: () => undefined});
+
+    expect(input.seen.map(value => value.prompt)).not.toContain('将 API Key 保存到系统钥匙串？[y/N]：');
+  });
+
+  it('saves the API key when Keychain storage is available and chosen', async () => {
+    const input = scriptedInput(['https://api.example.test/v1', 'wolf-2', 'temp-key', 'y']);
+    const saveKey = vi.fn(async () => undefined);
+
+    const result = await runFirstRunWithCredentials(input, {write: () => undefined, saveKey});
+
+    expect(result.keySaved).toBe(true);
+    expect(saveKey).toHaveBeenCalledWith('temp-key');
+  });
+
   it('retries an invalid endpoint', async () => {
     const input = scriptedInput(['not a url', 'https://api.example.test/v1', 'wolf-2', 'temp-key', 'n']);
 
