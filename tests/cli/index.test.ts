@@ -1,5 +1,6 @@
 import {readFile} from 'node:fs/promises';
 import {describe, expect, it, vi} from 'vitest';
+import type {ModelClient} from '../../src/providers/types.js';
 
 describe('CLI entrypoint', () => {
   it('passes the live session grant set to the App instead of its startup size', async () => {
@@ -93,6 +94,51 @@ describe('CLI entrypoint', () => {
           },
         },
       });
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+    }
+  });
+
+  it('passes the compact signal through and counts non-empty summary deltas', async () => {
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
+
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        streamCompactSummary?: (
+          model: ModelClient,
+          modelName: string,
+          prompt: string,
+          signal: AbortSignal,
+        ) => Promise<{text: string; streamTokens: number}>;
+      };
+      expect(cli.streamCompactSummary).toBeTypeOf('function');
+      if (typeof cli.streamCompactSummary !== 'function') return;
+
+      let receivedSignal: AbortSignal | undefined;
+      const model: ModelClient = {
+        async *stream(_request, signal) {
+          receivedSignal = signal;
+          yield {type: 'reasoning_delta', text: '分析'};
+          yield {type: 'reasoning_delta', text: ''};
+          yield {type: 'text_delta', text: '摘要'};
+          yield {type: 'text_delta', text: ''};
+          yield {type: 'text_delta', text: '完成'};
+          yield {type: 'finish', reason: 'stop'};
+        },
+      };
+      const controller = new AbortController();
+
+      await expect(cli.streamCompactSummary(
+        model,
+        'wolf-2',
+        '请总结',
+        controller.signal,
+      )).resolves.toEqual({text: '摘要完成', streamTokens: 3});
+      expect(receivedSignal).toBe(controller.signal);
     } finally {
       process.argv = originalArgv;
       write.mockRestore();

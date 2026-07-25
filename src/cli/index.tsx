@@ -31,6 +31,7 @@ import {resolveStartupApiKey} from './startup-credentials.js';
 import {clearTerminalScreen} from './terminal-screen.js';
 import {GateReporter} from './gate-reporter.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
+import type {ModelClient} from '../providers/types.js';
 
 const args = new Set(process.argv.slice(2));
 
@@ -56,6 +57,30 @@ export function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unkno
     {name: 'web_fetch', description: '提取公开网页正文', inputSchema: z.object({url: z.string()}).strict(), jsonSchema: objectSchema({url: {type: 'string'}}, ['url']), execute: (i, c, s) => webFetch(i as {url: string}, c, s)},
   ];
   return new Map(specs.map(spec => [spec.name, spec]));
+}
+
+export async function streamCompactSummary(
+  model: ModelClient,
+  modelName: string,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<{text: string; streamTokens: number}> {
+  let text = '';
+  let streamTokens = 0;
+  for await (const event of model.stream({
+    model: modelName,
+    messages: [{role: 'user', content: prompt}],
+    toolChoice: 'none',
+  }, signal)) {
+    if (
+      (event.type === 'reasoning_delta' || event.type === 'text_delta')
+      && event.text.length > 0
+    ) {
+      streamTokens += 1;
+    }
+    if (event.type === 'text_delta') text += event.text;
+  }
+  return {text, streamTokens};
 }
 
 async function main(): Promise<void> {
@@ -119,7 +144,7 @@ async function main(): Promise<void> {
       return runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
     }}
     executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, signal, reportGate: event => gateReporter.report(event)})}
-    compact={async () => { const events = await sessionStore.read(sessionId).catch(() => []); const result = await compactHistory(events, async prompt => { let text = ''; for await (const event of model.stream({model: activeConfig.model, messages: [{role: 'user', content: prompt}], toolChoice: 'none'}, new AbortController().signal)) if (event.type === 'text_delta') text += event.text; return text; }); if (result.compacted) { await sessionStore.append(sessionId, result.summaryEvent); return {ok: true, message: '已压缩历史。'}; } return {ok: false, message: result.reason}; }}
+    compact={async signal => { const events = await sessionStore.read(sessionId).catch(() => []); let streamTokens = 0; const result = await compactHistory(events, async prompt => { const summary = await streamCompactSummary(model, activeConfig.model, prompt, signal); streamTokens += summary.streamTokens; return summary.text; }); if (result.compacted) { await sessionStore.append(sessionId, result.summaryEvent); return {ok: true, message: '已压缩历史。', streamTokens}; } return {ok: false, message: result.reason, streamTokens}; }}
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
       if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
       await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});

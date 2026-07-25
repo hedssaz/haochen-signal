@@ -22,6 +22,7 @@ export interface SessionSummary {
 export interface CompactResult {
   ok: boolean;
   message: string;
+  streamTokens?: number;
 }
 
 export interface ResumeResult {
@@ -38,7 +39,7 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   contextTokens?: number;
   sessionGrants?: ReadonlySet<string>;
   executeTool?: (name: string, input: unknown, signal: AbortSignal) => Promise<ToolResult>;
-  compact?: () => Promise<CompactResult>;
+  compact?: (signal: AbortSignal) => Promise<CompactResult>;
   saveSession?: (reason: 'clear' | 'exit') => Promise<void>;
   appendInterrupted?: (reason: string) => Promise<void>;
   createSession?: () => Promise<string>;
@@ -65,6 +66,10 @@ const helpText = [
 
 type LocalNoticePrefix = '◆' | '◇' | '◉' | '✓' | '✗' | '浩宸 ›';
 type StreamPhase = 'complete' | 'thinking' | 'answering';
+type ForegroundOperation = {
+  kind: 'agent' | 'compact';
+  controller: AbortController;
+};
 
 export function formatTokenCount(count: number): string {
   if (count >= 1_000_000) {
@@ -134,7 +139,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const [streamTokenCount, setStreamTokenCount] = useState(0);
   const resumePickerRef = useRef<ResumePickerState | undefined>(undefined);
   const inputRef = useRef('');
-  const activeController = useRef<AbortController | undefined>(undefined);
+  const activeOperation = useRef<ForegroundOperation | undefined>(undefined);
   const abortRequested = useRef(false);
   const interruptedPersisted = useRef(false);
   const exiting = useRef(false);
@@ -153,13 +158,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
 
   useEffect(() => props.gateReporter?.subscribe(event => {
     if (event.type === 'review_started') {
-      if (activeController.current !== undefined) {
+      if (activeOperation.current !== undefined) {
         setRuntimeStatus(`AI 自动审查 ${event.tool}`);
       }
       return;
     }
     if (event.type === 'classified' && event.action === 'confirm') {
-      if (activeController.current !== undefined) {
+      if (activeOperation.current !== undefined) {
         setRuntimeStatus(`等待确认 ${event.tool}`);
       }
       return;
@@ -173,7 +178,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
           text: event.summary,
         },
       });
-      if (activeController.current !== undefined) {
+      if (activeOperation.current !== undefined) {
         setRuntimeStatus(event.outcome === 'execute'
           ? `正在执行 ${event.tool}`
           : `审批拒绝 ${event.tool}`);
@@ -204,12 +209,12 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   }, [dispatch, exit, persistInterrupted, props]);
 
   const runTask = useCallback(async (task: string) => {
-    if (activeController.current !== undefined) {
+    if (activeOperation.current !== undefined) {
       appendNotice('✗', '当前任务仍在运行，请先中止。');
       return;
     }
     const controller = new AbortController();
-    activeController.current = controller;
+    activeOperation.current = {kind: 'agent', controller};
     abortRequested.current = false;
     interruptedPersisted.current = false;
     setStreamTokenCount(0);
@@ -247,7 +252,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         dispatch({type: 'error', message: error instanceof Error ? error.message : '代理任务失败'});
       }
     } finally {
-      if (activeController.current === controller) activeController.current = undefined;
+      if (activeOperation.current?.controller === controller) activeOperation.current = undefined;
       setRuntimeStatus(undefined);
       setStreamPhase('complete');
       abortRequested.current = false;
@@ -311,8 +316,26 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
           appendNotice('✗', '当前无法压缩历史。');
           return;
         }
-        const result = await props.compact();
-        appendNotice(result.ok ? '✓' : '✗', result.message);
+        const controller = new AbortController();
+        activeOperation.current = {kind: 'compact', controller};
+        abortRequested.current = false;
+        setStreamTokenCount(0);
+        setStreamPhase('thinking');
+        setRuntimeStatus('正在压缩历史');
+        try {
+          const result = await props.compact(controller.signal);
+          setStreamTokenCount(result.streamTokens ?? 0);
+          appendNotice(result.ok ? '✓' : '✗', result.message);
+        } catch (error) {
+          appendNotice('✗', controller.signal.aborted
+            ? '已中止历史压缩。'
+            : error instanceof Error ? error.message : '压缩历史失败');
+        } finally {
+          if (activeOperation.current?.controller === controller) activeOperation.current = undefined;
+          setRuntimeStatus(undefined);
+          setStreamPhase('complete');
+          abortRequested.current = false;
+        }
         return;
       }
       case 'clear': {
@@ -354,15 +377,18 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
 
   useInput((input, key) => {
     if (key.ctrl && input.toLowerCase() === 'c') {
-      const controller = activeController.current;
-      if (controller === undefined) {
+      const operation = activeOperation.current;
+      if (operation === undefined) {
         void leave();
+      } else if (operation.kind === 'compact') {
+        operation.controller.abort(new DOMException('用户中止', 'AbortError'));
+        appendNotice('✗', '正在中止历史压缩。');
       } else if (abortRequested.current) {
         void leave(true);
       } else {
         abortRequested.current = true;
         props.confirmation?.respond('deny');
-        controller.abort(new DOMException('用户中止', 'AbortError'));
+        operation.controller.abort(new DOMException('用户中止', 'AbortError'));
         appendNotice('✗', '正在中止当前任务。再次 Ctrl+C 将直接退出。');
       }
       return;
@@ -410,7 +436,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       }
       return;
     }
-    if (activeController.current !== undefined) {
+    if (activeOperation.current !== undefined) {
       return;
     }
     if (key.tab) {

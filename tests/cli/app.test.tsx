@@ -257,6 +257,54 @@ describe('App', () => {
     });
   });
 
+  it('locks input, counts tokens and cancels a slow compact without exiting', async () => {
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {});
+    const onExit = vi.fn(async () => undefined);
+    const appendInterrupted = vi.fn(async () => undefined);
+    let compactSignal: AbortSignal | undefined;
+    const compact = vi.fn(async (signal: AbortSignal) => {
+      compactSignal = signal;
+      await new Promise<void>(resolve => {
+        signal.addEventListener('abort', () => resolve(), {once: true});
+      });
+      return {ok: true, message: '已压缩历史。', streamTokens: 3};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      compact={compact}
+      appendInterrupted={appendInterrupted}
+      onExit={onExit}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/compact');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(compact).toHaveBeenCalledWith(expect.any(AbortSignal));
+      expect(app.lastFrame()).toContain('正在压缩历史');
+      expect(app.lastFrame()).toContain('输入已锁定');
+      expect(app.lastFrame()).toContain('↓ 0 tokens · 思考中');
+    });
+
+    app.stdin.write('是');
+    app.stdin.write('\r');
+    await new Promise<void>(resolve => setTimeout(resolve, 10));
+    expect(runTask).not.toHaveBeenCalled();
+    expect(app.lastFrame()).not.toContain('你 ›\n是');
+
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => expect(compactSignal?.aborted).toBe(true));
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).not.toContain('输入已锁定');
+      expect(app.lastFrame()).toContain('↓ 3 tokens · 思考完成');
+    });
+    expect(onExit).not.toHaveBeenCalled();
+    expect(appendInterrupted).not.toHaveBeenCalled();
+  });
+
   it('streams reasoning and answers with per-task incremental token phases', async () => {
     let releaseAnswer!: () => void;
     let releaseFirstTask!: () => void;
