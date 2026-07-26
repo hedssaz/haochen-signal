@@ -25,6 +25,10 @@ import {
   type ModelConfigState,
 } from './model-config.js';
 import {ModelConfigView} from './model-config-view.js';
+import type {
+  CredentialPromptBroker,
+  PendingCredentialPrompt,
+} from './credential-prompt.js';
 
 export interface SessionSummary {
   id: string;
@@ -77,6 +81,7 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   ) => void;
   onExit?: () => Promise<void> | void;
   confirmation?: ConfirmationBroker;
+  credentialPrompt?: CredentialPromptBroker;
   gateReporter?: GateReporter;
 }
 
@@ -197,6 +202,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | undefined>(
     () => props.confirmation?.getPending(),
   );
+  const [pendingCredential, setPendingCredential] = useState<
+    PendingCredentialPrompt | undefined
+  >(() => props.credentialPrompt?.getPending());
+  const [credentialInput, setCredentialInput] = useState('');
+  const [credentialInputError, setCredentialInputError] = useState<
+    string | undefined
+  >();
   const [resumePicker, setResumePicker] = useState<ResumePickerState | undefined>();
   const [runtimeStatus, setRuntimeStatus] = useState<string | undefined>();
   const [streamPhase, setStreamPhase] = useState<StreamPhase>('complete');
@@ -208,6 +220,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const modelDiscoveryController = useRef<AbortController | undefined>(undefined);
   const usageByModelId = useRef(new Map<string, number>());
   const inputRef = useRef('');
+  const credentialInputRef = useRef('');
   const activeOperation = useRef<ForegroundOperation | undefined>(undefined);
   const abortRequested = useRef(false);
   const interruptedPersisted = useRef(false);
@@ -356,6 +369,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     setPendingConfirmation(props.confirmation?.getPending());
   }), [props.confirmation]);
 
+  useEffect(() => props.credentialPrompt?.subscribe(() => {
+    credentialInputRef.current = '';
+    setCredentialInput('');
+    setCredentialInputError(undefined);
+    setPendingCredential(props.credentialPrompt?.getPending());
+  }), [props.credentialPrompt]);
+
   useEffect(() => {
     modelConfigurationRef.current = props.modelConfig;
     setModelConfiguration(props.modelConfig);
@@ -406,6 +426,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         dispatch({type: 'interrupted', reason: '用户中止'});
       }
       props.confirmation?.close();
+      props.credentialPrompt?.close();
       await props.saveSession?.('exit');
       await props.onExit?.();
     } finally {
@@ -653,6 +674,34 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       else if (input === 'd' || key.escape) props.confirmation?.respond('deny');
       return;
     }
+    if (pendingCredential !== undefined) {
+      if (key.return) {
+        const apiKey = credentialInputRef.current.trim();
+        if (apiKey.length === 0) {
+          setCredentialInputError('API Key 不能为空。');
+          return;
+        }
+        credentialInputRef.current = '';
+        setCredentialInput('');
+        setCredentialInputError(undefined);
+        props.credentialPrompt?.respond(apiKey);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        credentialInputRef.current = Array.from(
+          credentialInputRef.current,
+        ).slice(0, -1).join('');
+        setCredentialInput(credentialInputRef.current);
+        setCredentialInputError(undefined);
+        return;
+      }
+      if (!key.ctrl && !key.meta && input.length > 0) {
+        credentialInputRef.current += input;
+        setCredentialInput(credentialInputRef.current);
+        setCredentialInputError(undefined);
+      }
+      return;
+    }
     if (resumePicker !== undefined) {
       if (key.escape) {
         resumePickerRef.current = undefined;
@@ -765,6 +814,22 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       <Text>{`风险：${pendingConfirmation.boundary.risk}\n范围：${pendingConfirmation.boundary.normalizedScope.join(', ')}\n${pendingConfirmation.boundary.reasons.join('；')}`}</Text>
       <Text color="yellow">a 仅本次允许 · s 本会话允许 · d 拒绝</Text>
     </Box>}
+    {pendingCredential === undefined ? null : <Box
+      borderStyle="round"
+      borderColor="yellow"
+      flexDirection="column"
+      marginTop={1}
+      paddingX={1}
+    >
+      <Text color="yellow">供应商凭据 · 仅本次进程</Text>
+      <Text>
+        {`${pendingCredential.provider.name ?? '模型供应商'} API Key：${'•'.repeat(Array.from(credentialInput).length)}`}
+      </Text>
+      {credentialInputError === undefined
+        ? null
+        : <Text color="red">{credentialInputError}</Text>}
+      <Text dimColor>Enter 提交 · 输入不会写入配置、会话或审计</Text>
+    </Box>}
     {resumePicker === undefined ? null : <Box
       borderStyle="round"
       borderColor="cyan"
@@ -794,7 +859,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     {runtimeStatus === undefined ? null : <Text color="yellow">
       {`状态 › 运行中 · ${runtimeStatus} · Ctrl+C 中止`}
     </Text>}
-    {runtimeStatus === undefined ? <Box marginTop={1}>
+    {pendingCredential !== undefined ? null : runtimeStatus === undefined ? <Box marginTop={1}>
       <Text color="cyan">浩宸 › </Text><Text>{state.input}</Text>
     </Box> : <Box marginTop={1}>
       <Text color="yellow">输入已锁定 · 等待任务完成，Ctrl+C 中止</Text>

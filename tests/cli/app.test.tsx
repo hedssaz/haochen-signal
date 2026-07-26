@@ -6,6 +6,7 @@ import type {AgentUiEvent} from '../../src/cli/reducer.js';
 import type {ToolResult} from '../../src/tools/types.js';
 import {GateReporter} from '../../src/cli/gate-reporter.js';
 import type {HaochenConfig} from '../../src/config/schema.js';
+import {resolveStartupApiKey} from '../../src/cli/startup-credentials.js';
 
 async function* scriptedEvents(): AsyncIterable<AgentUiEvent> {
   yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
@@ -133,6 +134,70 @@ describe('App', () => {
     });
     expect(compact).not.toHaveBeenCalled();
     expect(app.lastFrame()).not.toContain('输入已锁定');
+  });
+
+  it('collects a missing provider key inside the controlled Ink TTY without disabling raw input', async () => {
+    const promptModule = await import(
+      '../../src/cli/credential-prompt.js'
+    ).catch(() => undefined);
+    expect(promptModule).toBeDefined();
+    if (promptModule === undefined) return;
+    const credentialPrompt = new promptModule.InteractiveCredentialPromptBroker(
+      true,
+    );
+    const provider = modelConfig.providers[0]!;
+    let resolvedKey: string | undefined;
+    const runTask = vi.fn(async function* (
+      _task: string,
+      signal: AbortSignal,
+    ): AsyncIterable<AgentUiEvent> {
+      resolvedKey = await resolveStartupApiKey({
+        provider,
+        platform: 'linux',
+        env: {},
+        readKeychain: async () => undefined,
+        prompt: () => credentialPrompt.request(provider, signal),
+      });
+      yield {type: 'assistant_text', text: '凭据已接收'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="deepseek-chat"
+      modelConfig={modelConfig}
+      credentialPrompt={credentialPrompt}
+    />);
+    const setRawMode = vi.spyOn(app.stdin, 'setRawMode');
+
+    await waitForInputListener();
+    app.stdin.write('触发模型');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('DeepSeek API Key：');
+    });
+
+    app.stdin.write('provider-secret');
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('•'.repeat('provider-secret'.length));
+      expect(frame).not.toContain('provider-secret');
+    });
+    app.stdin.write('\r');
+
+    await vi.waitFor(() => {
+      expect(resolvedKey).toBe('provider-secret');
+      expect(app.lastFrame()).toContain('凭据已接收');
+    });
+    expect(app.frames.join('\n')).not.toContain('provider-secret');
+    expect(JSON.stringify(modelConfig)).not.toContain('provider-secret');
+    expect(setRawMode).not.toHaveBeenCalledWith(false);
+
+    app.stdin.write('/help');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('内置命令：'));
+    expect(runTask).toHaveBeenCalledOnce();
+    expect(setRawMode).not.toHaveBeenCalledWith(false);
   });
 
   it('shows real context usage and one unchanged previous-round total for multiple tools', async () => {

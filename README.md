@@ -49,7 +49,7 @@ API Key 按以下顺序读取：
 
 首次运行不会强制询问供应商、模型或 API Key，而是创建空的 v2 配置并直接进入信号场。此时 `/help`、`/model`、`/resume`、`/diff` 和 `/exit` 等本地命令仍可使用；普通问题会显示“未绑定模型，请先使用 /model 配置并选择模型。”，`/compact` 也会明确说明必须先绑定模型，二者都不会发起模型请求或锁住输入。
 
-通过 `/model` 添加供应商时，API Key 使用隐藏输入且不会写入配置 JSON。macOS 会按供应商保存到 Keychain；Linux 和 Windows 只保留当前进程凭据。对于配置中已有、但当前进程尚未解析到凭据的供应商，第一次实际任务会隐藏询问该供应商的 API Key。旧配置迁移出的 `legacy-provider` 仍可回退读取 `HAOCHEN_API_KEY` 与旧 Keychain 条目；新供应商不会读取这两个全局旧来源。
+通过 `/model` 添加供应商时，API Key 使用隐藏输入且不会写入配置 JSON。macOS 会按供应商保存到 Keychain；Linux 和 Windows 只保留当前进程凭据。对于配置中已有、但当前进程尚未解析到凭据的供应商，第一次实际任务会在 Ink 界面内显示独立的圆点掩码输入；它与普通命令共用 Ink 已接管的 stdin，不会另建 readline、切换 raw mode 或把 Key 写入终端转录。提交后输入立即恢复，下一条本地命令可直接使用。旧配置迁移出的 `legacy-provider` 仍可回退读取 `HAOCHEN_API_KEY` 与旧 Keychain 条目；新供应商不会读取这两个全局旧来源。
 
 添加供应商时可向规范化后的 `{baseUrl}/models` 发起 OpenAI-compatible `GET` 请求。响应体最多为 2 MiB，只接受对象中的非空 `data[].id`；模型 ID 会去重并按确定性字典序排列。请求支持取消和超时，响应正文、认证头与 API Key 不会进入界面错误。错误边界不会对未知抛出值执行 `instanceof`；只在 `typeof` 证明可作为 WeakMap 键时查询内部错误，恶意 Proxy 的原型 trap 不会绕过 total 脱敏。
 

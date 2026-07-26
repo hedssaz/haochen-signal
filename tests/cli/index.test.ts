@@ -199,7 +199,10 @@ describe('CLI entrypoint', () => {
     await resolve();
 
     expect(resolveApiKey).toHaveBeenCalledOnce();
-    expect(resolveApiKey).toHaveBeenCalledWith(config.providers[0]);
+    expect(resolveApiKey).toHaveBeenCalledWith(
+      config.providers[0],
+      undefined,
+    );
     expect(temporaryProviderKeys.get('provider-a')).toBe(
       'provider-a-resolved-key',
     );
@@ -273,8 +276,8 @@ describe('CLI entrypoint', () => {
       'utf8',
     );
 
-    expect(source).toContain('resolveStartupApiKey({');
-    expect(source).not.toContain('prompt: async () => undefined');
+    expect(source).toContain('credentialPrompts.request(provider, signal)');
+    expect(source).not.toContain('createFirstRunInput(process.stdin');
   });
 
   it('exposes character pagination in the read_file model tool schema', async () => {

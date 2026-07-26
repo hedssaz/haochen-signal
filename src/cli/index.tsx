@@ -45,9 +45,9 @@ import {
   type CompactResult,
 } from './app.js';
 import {InteractiveConfirmationBroker} from './confirmation.js';
+import {InteractiveCredentialPromptBroker} from './credential-prompt.js';
 import {createFirstRunConfig} from './first-run.js';
 import {resolveUserHome} from './platform.js';
-import {createFirstRunInput} from './terminal-input.js';
 import {resolveStartupApiKey} from './startup-credentials.js';
 import {clearTerminalScreen} from './terminal-screen.js';
 import {GateReporter} from './gate-reporter.js';
@@ -118,7 +118,10 @@ export interface ModelClientFactoryOptions {
 export interface ModelRuntimeResolverOptions {
   getConfig: () => HaochenConfig;
   temporaryProviderKeys: Map<string, string>;
-  resolveApiKey: (provider: ProviderProfile) => Promise<string | undefined>;
+  resolveApiKey: (
+    provider: ProviderProfile,
+    signal?: AbortSignal,
+  ) => Promise<string | undefined>;
   createClient?: (options: ModelClientFactoryOptions) => ModelClient;
 }
 
@@ -140,7 +143,7 @@ function providerClientCacheKey(
 
 export function createModelRuntimeResolver(
   options: ModelRuntimeResolverOptions,
-): () => Promise<ModelRuntime> {
+): (signal?: AbortSignal) => Promise<ModelRuntime> {
   const clientCache = new Map<string, Map<string, ModelClient>>();
   const createClient = options.createClient ?? (request => (
     createOpenAiCompatibleClient({
@@ -150,7 +153,8 @@ export function createModelRuntimeResolver(
     }, request.apiKey)
   ));
 
-  return async () => {
+  return async signal => {
+    signal?.throwIfAborted();
     const config = options.getConfig();
     const model = config.models.find(
       candidate => candidate.id === config.activeModelId,
@@ -165,7 +169,8 @@ export function createModelRuntimeResolver(
 
     let apiKey = options.temporaryProviderKeys.get(provider.id);
     if (apiKey === undefined) {
-      apiKey = await options.resolveApiKey(provider);
+      apiKey = await options.resolveApiKey(provider, signal);
+      signal?.throwIfAborted();
       if (apiKey === undefined) {
         throw new Error(`未提供 ${provider.name} API Key。`);
       }
@@ -263,15 +268,21 @@ async function main(): Promise<void> {
   const currentWorkspaceId = workspaceId(workspace);
   const tempDir = join(tmpdir(), 'haochen'); await mkdir(tempDir, {recursive: true});
   const temporaryProviderKeys = new Map<string, string>();
+  const interactiveTerminal =
+    process.stdin.isTTY === true && process.stdout.isTTY === true;
+  const credentialPrompts = new InteractiveCredentialPromptBroker(
+    interactiveTerminal,
+  );
   const resolveModelRuntime = createModelRuntimeResolver({
     getConfig: () => activeConfig,
     temporaryProviderKeys,
-    resolveApiKey: provider => resolveStartupApiKey({
+    resolveApiKey: (provider, signal) => resolveStartupApiKey({
       provider,
       env: process.env,
       readKeychain: readMacOsKeychain,
-      createInput: () => createFirstRunInput(process.stdin, process.stdout),
-      write: text => process.stdout.write(text),
+      prompt: () => signal === undefined
+        ? Promise.resolve(undefined)
+        : credentialPrompts.request(provider, signal),
     }),
   });
   const currentModel = () => activeConfig.models.find(
@@ -279,7 +290,7 @@ async function main(): Promise<void> {
   );
   const store = new SessionStore(paths.sessionsDir); const sessionStore = createSerializedSessionStore(store); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
   const confirmations = new InteractiveConfirmationBroker(
-    process.stdin.isTTY === true && process.stdout.isTTY === true,
+    interactiveTerminal,
   );
   const registry = new ToolRegistry({tools: toolDefinitions(), classify: classifyOperation, review: reviewOperation, confirm: request => confirmations.request(request), sessionGrants: grants, audit});
   const gateReporter = new GateReporter();
@@ -318,8 +329,9 @@ async function main(): Promise<void> {
       },
     }}
     workspaceId={currentWorkspaceId}
+    credentialPrompt={credentialPrompts}
     runTask={async function* (task, signal) {
-      const runtime = await resolveModelRuntime();
+      const runtime = await resolveModelRuntime(signal);
       const taskSessionId = sessionId;
       let interruptedWrite: Promise<void> | undefined;
       const appendInterrupted = (reason: string): Promise<void> => {
@@ -333,7 +345,7 @@ async function main(): Promise<void> {
     }}
     executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewModel: currentModel()?.modelId ?? '', signal, reportGate: event => gateReporter.report(event)})}
     compact={async (signal, onProgress) => {
-      const runtime = await resolveModelRuntime();
+      const runtime = await resolveModelRuntime(signal);
       return compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model: runtime.client, modelName: runtime.model.modelId, signal, onProgress});
     }}
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
