@@ -25,16 +25,16 @@
 
 ```bash
 npm install --global .
-export HAOCHEN_API_KEY='你的 API Key'
 haochen --version
+haochen
 ```
 
 ### Windows PowerShell
 
 ```powershell
 npm install --global .
-$env:HAOCHEN_API_KEY='你的 API Key'
 haochen --version
+haochen
 ```
 
 也可以在源码仓库中运行 `npm install` 后执行 `npm run dev`。
@@ -45,16 +45,17 @@ API Key 按以下顺序读取：
 
 1. 供应商专属环境变量，格式为 `HAOCHEN_PROVIDER_<供应商 ID 每个 UTF-16 code unit 的四位十六进制>_API_KEY`；例如稳定 ID `deepseek` 对应 `HAOCHEN_PROVIDER_0064006500650070007300650065006B_API_KEY`。该可逆编码区分大小写、标点、非 ASCII ID、未配对代理项和替换字符；只有同时满足 `provider.id === legacy-provider` 与 `credentialRef === legacy` 的迁移供应商继续兼容 `HAOCHEN_API_KEY`；
 2. 仅 macOS 的 Keychain；新版条目以 `haochen-signal:<同一 UTF-16 可逆十六进制后缀>` 区分供应商，例如 `deepseek` 使用 `haochen-signal:0064006500650070007300650065006B`，服务名不包含原始供应商 ID。解析方必须显式允许 legacy 回退，且只有同时满足上述 ID 和引用条件时，才会读取服务名 `haochen-signal`、账户名 `haochen` 的旧条目；
-3. 启动时临时输入，且只保存在当前进程中。
+3. 当前任务第一次使用该供应商时隐藏输入，且只保存在当前进程中。
 
-首次运行会依次询问 API 地址、模型和 API Key；API Key 使用隐藏输入，终端必须保持在 Key 提示处等待输入，不会回显凭据。只有 macOS 会询问是否保存到 Keychain；Linux 和 Windows 请使用环境变量或本次启动的隐藏输入。
+首次运行不会强制询问供应商、模型或 API Key，而是创建空的 v2 配置并直接进入信号场。此时 `/help`、`/model`、`/resume`、`/diff` 和 `/exit` 等本地命令仍可使用；普通问题会显示“未绑定模型，请先使用 /model 配置并选择模型。”，`/compact` 也会明确说明必须先绑定模型，二者都不会发起模型请求或锁住输入。
+
+通过 `/model` 添加供应商时，API Key 使用隐藏输入且不会写入配置 JSON。macOS 会按供应商保存到 Keychain；Linux 和 Windows 只保留当前进程凭据。对于配置中已有、但当前进程尚未解析到凭据的供应商，第一次实际任务会隐藏询问该供应商的 API Key。旧配置迁移出的 `legacy-provider` 仍可回退读取 `HAOCHEN_API_KEY` 与旧 Keychain 条目；新供应商不会读取这两个全局旧来源。
 
 添加供应商时可向规范化后的 `{baseUrl}/models` 发起 OpenAI-compatible `GET` 请求。响应体最多为 2 MiB，只接受对象中的非空 `data[].id`；模型 ID 会去重并按确定性字典序排列。请求支持取消和超时，响应正文、认证头与 API Key 不会进入界面错误。错误边界不会对未知抛出值执行 `instanceof`；只在 `typeof` 证明可作为 WeakMap 键时查询内部错误，恶意 Proxy 的原型 trap 不会绕过 total 脱敏。
 
 最直接的启动方式是：
 
 ```bash
-export HAOCHEN_API_KEY='你的 API Key'
 haochen
 ```
 
@@ -94,7 +95,7 @@ haochen
 - `activeModelId`：当前模型的稳定本地 ID；
 - `timeoutMs`：单次模型请求的无流量超时，范围为 1 至 300 秒；每收到一个响应流分片都会重新计时，因此持续思考或回答不会在固定总时长到达时被强制截断；
 
-旧版单供应商配置会在加载时迁移到 v2 内存结构，并在首次实际保存模型设置时原子写回。
+旧版单供应商配置会在加载时迁移到 v2 内存结构，并在首次实际保存模型设置时原子写回。每个代理任务和 `/compact` 开始时都会重新读取当前 `activeModelId`、对应供应商与该供应商凭据；客户端按供应商请求配置和凭据身份复用。切换模型不会更换会话 ID，但下一轮会使用新供应商客户端、真实 `modelId` 和 `contextWindow`，红眼审查默认复用同一轮的当前客户端与模型。
 
 ## 交互使用
 

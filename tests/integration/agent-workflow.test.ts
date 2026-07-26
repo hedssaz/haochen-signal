@@ -12,8 +12,13 @@ import {promisify} from 'node:util';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {z} from 'zod';
 import {runAgentTask, type AgentEvent} from '../../src/agent/loop.js';
-import {parseConfig} from '../../src/config/schema.js';
+import {
+  parseConfig,
+  type HaochenConfig,
+  type ProviderProfile,
+} from '../../src/config/schema.js';
 import {createOpenAiCompatibleClient} from '../../src/providers/openai-compatible.js';
+import type {ModelClient} from '../../src/providers/types.js';
 import {classifyOperation} from '../../src/security/boundary.js';
 import {
   reviewOperation,
@@ -82,6 +87,19 @@ async function collect(iterable: AsyncIterable<AgentEvent>): Promise<AgentEvent[
   return events;
 }
 
+async function collectModelStream(
+  client: ModelClient,
+  model: string,
+): Promise<void> {
+  for await (const _event of client.stream({
+    model,
+    messages: [{role: 'user', content: '测试动态供应商'}],
+    toolChoice: 'none',
+  }, AbortSignal.timeout(10_000))) {
+    // Consume the complete response so request and stream failures surface.
+  }
+}
+
 function definition(
   name: string,
   description: string,
@@ -129,12 +147,124 @@ describe('真实代理工作流', () => {
 
   function modelClient(baseUrl: string, apiKey: string) {
     return createOpenAiCompatibleClient(parseConfig({
-      baseUrl,
-      model: 'signal-main',
-      reviewModel: 'signal-review',
+      version: 2,
+      providers: [{
+        id: 'workflow-provider',
+        name: '工作流供应商',
+        baseUrl,
+        credentialRef: 'workflow-credential',
+        headers: {},
+      }],
+      models: [{
+        id: 'signal-main-profile',
+        providerId: 'workflow-provider',
+        modelId: 'signal-main',
+        displayName: 'Signal Main',
+        contextWindow: 128_000,
+      }],
+      activeModelId: 'signal-main-profile',
       timeoutMs: 5_000,
     }), apiKey);
   }
+
+  it('切换供应商后下一轮使用新客户端、凭据和模型', async () => {
+    const firstServer = await startMockOpenAiServer([
+      mockTextResponse('来自供应商 A'),
+    ]);
+    const secondServer = await startMockOpenAiServer([
+      mockTextResponse('来自供应商 B'),
+    ]);
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
+
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        createModelRuntimeResolver: (options: {
+          getConfig: () => HaochenConfig;
+          temporaryProviderKeys: Map<string, string>;
+          resolveApiKey: (
+            provider: ProviderProfile,
+          ) => Promise<string | undefined>;
+        }) => () => Promise<{
+          client: ModelClient;
+          model: HaochenConfig['models'][number];
+        }>;
+      };
+      let config = parseConfig({
+        version: 2,
+        providers: [
+          {
+            id: 'provider-a',
+            name: '供应商 A',
+            baseUrl: firstServer.baseUrl,
+            credentialRef: 'credential-a',
+            headers: {},
+          },
+          {
+            id: 'provider-b',
+            name: '供应商 B',
+            baseUrl: secondServer.baseUrl,
+            credentialRef: 'credential-b',
+            headers: {},
+          },
+        ],
+        models: [
+          {
+            id: 'profile-a',
+            providerId: 'provider-a',
+            modelId: 'model-a',
+            displayName: 'Model A',
+            contextWindow: 128_000,
+          },
+          {
+            id: 'profile-b',
+            providerId: 'provider-b',
+            modelId: 'model-b',
+            displayName: 'Model B',
+            contextWindow: 256_000,
+          },
+        ],
+        activeModelId: 'profile-a',
+        timeoutMs: 5_000,
+      });
+      const resolveRuntime = cli.createModelRuntimeResolver({
+        getConfig: () => config,
+        temporaryProviderKeys: new Map([
+          ['provider-a', 'key-a'],
+          ['provider-b', 'key-b'],
+        ]),
+        resolveApiKey: vi.fn(async () => undefined),
+      });
+
+      const first = await resolveRuntime();
+      await collectModelStream(first.client, first.model.modelId);
+      config = {...config, activeModelId: 'profile-b'};
+      const second = await resolveRuntime();
+      await collectModelStream(second.client, second.model.modelId);
+
+      expect(firstServer.requests).toEqual([
+        expect.objectContaining({
+          authorization: 'Bearer key-a',
+          body: expect.objectContaining({model: 'model-a'}),
+        }),
+      ]);
+      expect(secondServer.requests).toEqual([
+        expect.objectContaining({
+          authorization: 'Bearer key-b',
+          body: expect.objectContaining({model: 'model-b'}),
+        }),
+      ]);
+      expect(first.model.contextWindow).toBe(128_000);
+      expect(second.model.contextWindow).toBe(256_000);
+      expect(second.client).not.toBe(first.client);
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+      await Promise.all([firstServer.close(), secondServer.close()]);
+    }
+  });
 
   it('通过真实工具读取、修改、测试并保留完整审计轨迹', async () => {
     await writeFile(join(workspace, 'package.json'), JSON.stringify({
@@ -295,7 +425,7 @@ describe('真实代理工作流', () => {
     }
   });
 
-  it('红眼低风险批准自动放行依赖安装且不打断用户', async () => {
+  it('红眼复用当前模型低风险批准自动放行依赖安装且不打断用户', async () => {
     const input = {command: 'npm', args: ['install', 'zod']};
     const boundary = await classifyOperation(
       {tool: 'run_command', input},
@@ -344,7 +474,7 @@ describe('真实代理工作流', () => {
         workspace,
         tempDir: join(root, 'tool-output'),
         reviewClient: client,
-        reviewModel: 'signal-review',
+        reviewModel: 'signal-main',
         limits: {maxTurns: 4, maxToolCalls: 4},
         signal: AbortSignal.timeout(10_000),
       }));
@@ -353,7 +483,7 @@ describe('真实代理工作流', () => {
       expect(confirm).not.toHaveBeenCalled();
       expect(server.requests.map(request => request.body.model)).toEqual([
         'signal-main',
-        'signal-review',
+        'signal-main',
         'signal-main',
       ]);
       expect(server.requests[1]?.body.tool_choice).toBe('none');

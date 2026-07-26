@@ -45,6 +45,11 @@ export interface ResumeResult {
   message: string;
 }
 
+export const MODEL_NOT_BOUND_MESSAGE =
+  '未绑定模型，请先使用 /model 配置并选择模型。';
+export const COMPACT_MODEL_NOT_BOUND_MESSAGE =
+  '未绑定模型，无法压缩历史；请先使用 /model 配置并选择模型。';
+
 export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   runTask: (task: string, signal: AbortSignal) => AsyncIterable<Event>;
   workspace: string;
@@ -408,7 +413,19 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     }
   }, [dispatch, exit, persistInterrupted, props]);
 
+  const hasBoundModel = useCallback(() => {
+    const config = modelConfigurationRef.current;
+    if (config === undefined) return model.trim().length > 0;
+    return config.models.some(
+      candidate => candidate.id === config.activeModelId,
+    );
+  }, [model]);
+
   const runTask = useCallback(async (task: string) => {
+    if (!hasBoundModel()) {
+      appendNotice('✗', MODEL_NOT_BOUND_MESSAGE);
+      return;
+    }
     if (activeOperation.current !== undefined) {
       appendNotice('✗', '当前任务仍在运行，请先中止。');
       return;
@@ -468,7 +485,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         ? previous
         : {...previous, phase: 'idle', activeTool: undefined});
     }
-  }, [appendNotice, dispatch, props]);
+  }, [appendNotice, dispatch, hasBoundModel, props]);
 
   const submitCommand = useCallback(async (input: string) => {
     appendNotice('浩宸 ›', input);
@@ -523,6 +540,10 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         appendNotice('◉', `固定规则：越界与非公开网络直接拒绝；受限操作必须确认。\n本次会话许可：${props.sessionGrants?.size ?? 0} 项`);
         return;
       case 'compact': {
+        if (!hasBoundModel()) {
+          appendNotice('✗', COMPACT_MODEL_NOT_BOUND_MESSAGE);
+          return;
+        }
         if (props.compact === undefined) {
           appendNotice('✗', '当前无法压缩历史。');
           return;
@@ -593,6 +614,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     dispatch,
     displayedContextLimit,
     displayedModel,
+    hasBoundModel,
     leave,
     modelConfiguration,
     props,

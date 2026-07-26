@@ -1,9 +1,9 @@
 import {describe, expect, it, vi} from 'vitest';
-import {parseConfig} from '../../src/config/schema.js';
 import {
   createOpenAiCompatibleClient,
   ModelHttpError,
   ModelProviderError,
+  type OpenAiCompatibleEndpointConfig,
 } from '../../src/providers/openai-compatible.js';
 import type {ModelEvent} from '../../src/providers/types.js';
 import {
@@ -21,6 +21,17 @@ function sseResponse(events: unknown[]): Response {
     status: 200,
     headers: {'content-type': 'text/event-stream'},
   });
+}
+
+function endpointConfig(
+  config: Omit<OpenAiCompatibleEndpointConfig, 'headers' | 'timeoutMs'>
+    & Partial<Pick<OpenAiCompatibleEndpointConfig, 'headers' | 'timeoutMs'>>,
+): OpenAiCompatibleEndpointConfig {
+  return {
+    baseUrl: config.baseUrl,
+    headers: config.headers ?? {},
+    timeoutMs: config.timeoutMs ?? 60_000,
+  };
 }
 
 describe('OpenAI-compatible chat completions client', () => {
@@ -58,9 +69,8 @@ describe('OpenAI-compatible chat completions client', () => {
         '[DONE]',
       ]);
     }) as typeof fetch;
-    const config = parseConfig({
+    const config = endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: {
         authorization: 'Bearer configured-key',
         'x-project': 'haochen',
@@ -110,9 +120,8 @@ describe('OpenAI-compatible chat completions client', () => {
         {choices: [], usage: {prompt_tokens: 12, completion_tokens: 3}},
       ]);
     }) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
     const events: ModelEvent[] = [];
 
@@ -146,9 +155,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
       '[DONE]',
     ])) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
     const events: ModelEvent[] = [];
 
@@ -179,9 +187,8 @@ describe('OpenAI-compatible chat completions client', () => {
         '[DONE]',
       ]);
     }) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
 
     for await (const _event of client.stream({
@@ -247,9 +254,8 @@ describe('OpenAI-compatible chat completions client', () => {
       {choices: [{delta: {}, finish_reason: 'stop'}]},
       '[DONE]',
     ])) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), apiKey, {fetch: fetchImpl});
     let thrown: unknown;
 
@@ -276,9 +282,8 @@ describe('OpenAI-compatible chat completions client', () => {
       {choices: [{delta: {}, finish_reason: 'stop'}]},
       '[DONE]',
     ])) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: {'x-api-key': headerSecret},
     }), 'auth-secret', {fetch: fetchImpl});
     let thrown: unknown;
@@ -313,9 +318,8 @@ describe('OpenAI-compatible chat completions client', () => {
       {choices: [{delta: {}, finish_reason: 'stop'}]},
       '[DONE]',
     ])) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: {'x-api-key': 'serialize-secret'},
     }), 'auth-secret', {fetch: fetchImpl});
     let thrown: unknown;
@@ -363,9 +367,8 @@ describe('OpenAI-compatible chat completions client', () => {
       ]);
     }) as typeof fetch;
     const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl, sleep});
     const controller = new AbortController();
     const events: ModelEvent[] = [];
@@ -395,9 +398,8 @@ describe('OpenAI-compatible chat completions client', () => {
       headers: {'retry-after': '0'},
     })) as typeof fetch;
     const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'top-secret', {fetch: fetchImpl, sleep});
     let thrown: unknown;
 
@@ -425,9 +427,8 @@ describe('OpenAI-compatible chat completions client', () => {
       status: 401,
       statusText: 'provider rejected header-secret and bearer-secret',
     })) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: {'x-api-key': 'header-secret'},
     }), 'bearer-secret', {fetch: fetchImpl});
     let thrown: unknown;
@@ -470,13 +471,10 @@ describe('OpenAI-compatible chat completions client', () => {
       status: 401,
       statusText: `rejected ${Object.values(sensitiveHeaders).join(' ')}`,
     })) as typeof fetch;
-    const client = createOpenAiCompatibleClient({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: sensitiveHeaders,
-      timeoutMs: 60_000,
-      contextWindow: 128_000,
-    } as never, 'auth-secret', {fetch: fetchImpl});
+    }), 'auth-secret', {fetch: fetchImpl});
     let thrown: unknown;
 
     try {
@@ -501,9 +499,8 @@ describe('OpenAI-compatible chat completions client', () => {
     const fetchImpl = vi.fn(async () => {
       throw new Error('socket failed for fetch-secret and auth-secret');
     }) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: {'api-key': 'fetch-secret'},
     }), 'auth-secret', {fetch: fetchImpl});
     let thrown: unknown;
@@ -535,9 +532,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
     });
     const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: {'x-api-key': 'reader-secret'},
     }), 'auth-secret', {fetch: fetchImpl});
     let thrown: unknown;
@@ -565,9 +561,8 @@ describe('OpenAI-compatible chat completions client', () => {
       'data: parse-secret\n\n',
       {status: 200, headers: {'content-type': 'text/event-stream'}},
     )) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
       headers: {'x-api-key': 'parse-secret'},
     }), 'auth-secret', {fetch: fetchImpl});
     let thrown: unknown;
@@ -595,9 +590,8 @@ describe('OpenAI-compatible chat completions client', () => {
       `data: ${JSON.stringify({choices: [{delta: {content: '未完成'}}]})}\n\n`,
       {status: 200, headers: {'content-type': 'text/event-stream'}},
     )) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
     const events: ModelEvent[] = [];
     let thrown: unknown;
@@ -623,9 +617,8 @@ describe('OpenAI-compatible chat completions client', () => {
       {choices: [{delta: {content: '未完成'}}]},
       '[DONE]',
     ])) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
     const events: ModelEvent[] = [];
     let thrown: unknown;
@@ -655,9 +648,8 @@ describe('OpenAI-compatible chat completions client', () => {
       `data: ${JSON.stringify(finalChunk)}`,
       {status: 200, headers: {'content-type': 'text/event-stream'}},
     )) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
     let thrown: unknown;
 
@@ -691,9 +683,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
     });
     const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
 
     for await (const _event of client.stream({
@@ -717,9 +708,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
     });
     const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
 
     await expect((async () => {
@@ -745,9 +735,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
     });
     const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
 
     await expect((async () => {
@@ -775,9 +764,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
     });
     const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
 
     for await (const _event of client.stream({
@@ -804,9 +792,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
     });
     const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
 
     for await (const _event of client.stream({
@@ -845,9 +832,8 @@ describe('OpenAI-compatible chat completions client', () => {
         ]);
       }) as typeof fetch;
       const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl, sleep});
       const outcomePromise = (async () => {
@@ -899,9 +885,8 @@ describe('OpenAI-compatible chat completions client', () => {
       ]);
     }) as typeof fetch;
     const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl, sleep});
 
     for await (const _event of client.stream({
@@ -933,9 +918,8 @@ describe('OpenAI-compatible chat completions client', () => {
         },
       });
       const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
       const outcomePromise = (async () => {
@@ -982,9 +966,8 @@ describe('OpenAI-compatible chat completions client', () => {
         },
       });
       const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
       const outcomePromise = (async () => {
@@ -1026,9 +1009,8 @@ describe('OpenAI-compatible chat completions client', () => {
         },
       });
       const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
       const outcomePromise = (async () => {
@@ -1074,9 +1056,8 @@ describe('OpenAI-compatible chat completions client', () => {
         ]);
     }) as typeof fetch;
     const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl, sleep});
     const events: ModelEvent[] = [];
 
@@ -1113,9 +1094,8 @@ describe('OpenAI-compatible chat completions client', () => {
       ]);
     }) as typeof fetch;
     const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {
       fetch: fetchImpl,
       sleep,
@@ -1143,9 +1123,8 @@ describe('OpenAI-compatible chat completions client', () => {
         status: 503,
         headers: {'retry-after': '3000000'},
       })) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
       const outcomePromise = (async () => {
@@ -1195,9 +1174,8 @@ describe('OpenAI-compatible chat completions client', () => {
       ]);
     }) as typeof fetch;
     const sleep = vi.fn(async (_ms: number, _signal: AbortSignal) => {});
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl, sleep});
 
     for await (const _event of client.stream({
@@ -1222,9 +1200,8 @@ describe('OpenAI-compatible chat completions client', () => {
         headers: {'retry-after': '0'},
       });
     }) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
 
     const consume = async () => {
@@ -1252,9 +1229,8 @@ describe('OpenAI-compatible chat completions client', () => {
     const sleep = vi.fn(async () => {
       controller.abort();
     });
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl, sleep});
 
     const consume = async () => {
@@ -1282,9 +1258,8 @@ describe('OpenAI-compatible chat completions client', () => {
       status: 200,
       headers: {'content-type': 'text/event-stream'},
     })) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
     const controller = new AbortController();
     const iterator = client.stream({
@@ -1317,9 +1292,8 @@ describe('OpenAI-compatible chat completions client', () => {
       },
     });
     const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
-      model: 'wolf-1',
     }), 'test-key', {fetch: fetchImpl});
     const controller = new AbortController();
     const iterator = client.stream({
@@ -1367,9 +1341,8 @@ describe('OpenAI-compatible chat completions client', () => {
           reject(transportSignal?.reason);
         }, {once: true});
       })) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
       const outcomePromise = (async () => {
@@ -1413,9 +1386,8 @@ describe('OpenAI-compatible chat completions client', () => {
         },
       });
       const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
       const outcomePromise = (async () => {
@@ -1459,9 +1431,8 @@ describe('OpenAI-compatible chat completions client', () => {
         },
       });
       const fetchImpl = vi.fn(async () => new Response(body, {status: 200})) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
       const events: ModelEvent[] = [];
@@ -1523,9 +1494,8 @@ describe('OpenAI-compatible chat completions client', () => {
           '[DONE]',
         ]);
       }) as typeof fetch;
-      const client = createOpenAiCompatibleClient(parseConfig({
+      const client = createOpenAiCompatibleClient(endpointConfig({
         baseUrl: 'https://example.test/v1',
-        model: 'wolf-1',
         timeoutMs: 1_000,
       }), 'test-key', {fetch: fetchImpl});
 

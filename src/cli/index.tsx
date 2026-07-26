@@ -8,6 +8,11 @@ import {z} from 'zod';
 import {runAgentTask} from '../agent/loop.js';
 import {compactHistory} from '../agent/context.js';
 import {loadConfig, saveConfig} from '../config/load.js';
+import type {
+  HaochenConfig,
+  ModelProfile,
+  ProviderProfile,
+} from '../config/schema.js';
 import {getAppPaths} from '../config/paths.js';
 import {readMacOsKeychain, saveMacOsKeychain} from '../config/credentials.js';
 import {createOpenAiCompatibleClient} from '../providers/openai-compatible.js';
@@ -34,10 +39,14 @@ import {
   WEB_SEARCH_QUERY_PATTERN,
   WEB_SEARCH_RESULT_LIMIT_MAX,
 } from '../tools/web-contract.js';
-import {App, type CompactResult} from './app.js';
+import {
+  App,
+  MODEL_NOT_BOUND_MESSAGE,
+  type CompactResult,
+} from './app.js';
 import {InteractiveConfirmationBroker} from './confirmation.js';
-import {runFirstRunWithCredentials} from './first-run.js';
-import {credentialSaverForPlatform, resolveUserHome} from './platform.js';
+import {createFirstRunConfig} from './first-run.js';
+import {resolveUserHome} from './platform.js';
 import {createFirstRunInput} from './terminal-input.js';
 import {resolveStartupApiKey} from './startup-credentials.js';
 import {clearTerminalScreen} from './terminal-screen.js';
@@ -71,6 +80,115 @@ export function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unkno
     {name: 'web_fetch', description: '提取公开网页正文', inputSchema: z.object({url: z.string()}).strict(), jsonSchema: objectSchema({url: {type: 'string'}}, ['url']), execute: (i, c, s) => webFetch(i as {url: string}, c, s)},
   ];
   return new Map(specs.map(spec => [spec.name, spec]));
+}
+
+export interface ConfigPersistence {
+  load: (path: string) => Promise<HaochenConfig | undefined>;
+  save: (path: string, config: HaochenConfig) => Promise<void>;
+}
+
+const defaultConfigPersistence: ConfigPersistence = {
+  load: loadConfig,
+  save: saveConfig,
+};
+
+export async function loadOrCreateConfig(
+  path: string,
+  dependencies: ConfigPersistence = defaultConfigPersistence,
+): Promise<HaochenConfig> {
+  const loaded = await dependencies.load(path);
+  if (loaded !== undefined) return loaded;
+  const created = createFirstRunConfig();
+  await dependencies.save(path, created);
+  return created;
+}
+
+export interface ModelRuntime {
+  client: ModelClient;
+  model: ModelProfile;
+  provider: ProviderProfile;
+}
+
+export interface ModelClientFactoryOptions {
+  provider: ProviderProfile;
+  apiKey: string;
+  timeoutMs: number;
+}
+
+export interface ModelRuntimeResolverOptions {
+  getConfig: () => HaochenConfig;
+  temporaryProviderKeys: Map<string, string>;
+  resolveApiKey: (provider: ProviderProfile) => Promise<string | undefined>;
+  createClient?: (options: ModelClientFactoryOptions) => ModelClient;
+}
+
+function providerClientCacheKey(
+  provider: ProviderProfile,
+  timeoutMs: number,
+): string {
+  return JSON.stringify({
+    id: provider.id,
+    name: provider.name,
+    baseUrl: provider.baseUrl,
+    credentialRef: provider.credentialRef,
+    headers: Object.entries(provider.headers).sort(
+      ([left], [right]) => left.localeCompare(right),
+    ),
+    timeoutMs,
+  });
+}
+
+export function createModelRuntimeResolver(
+  options: ModelRuntimeResolverOptions,
+): () => Promise<ModelRuntime> {
+  const clientCache = new Map<string, Map<string, ModelClient>>();
+  const createClient = options.createClient ?? (request => (
+    createOpenAiCompatibleClient({
+      baseUrl: request.provider.baseUrl,
+      headers: request.provider.headers,
+      timeoutMs: request.timeoutMs,
+    }, request.apiKey)
+  ));
+
+  return async () => {
+    const config = options.getConfig();
+    const model = config.models.find(
+      candidate => candidate.id === config.activeModelId,
+    );
+    if (model === undefined) throw new Error(MODEL_NOT_BOUND_MESSAGE);
+    const provider = config.providers.find(
+      candidate => candidate.id === model.providerId,
+    );
+    if (provider === undefined) {
+      throw new Error('当前模型的供应商不存在。');
+    }
+
+    let apiKey = options.temporaryProviderKeys.get(provider.id);
+    if (apiKey === undefined) {
+      apiKey = await options.resolveApiKey(provider);
+      if (apiKey === undefined) {
+        throw new Error(`未提供 ${provider.name} API Key。`);
+      }
+      options.temporaryProviderKeys.set(provider.id, apiKey);
+    }
+
+    const cacheKey = providerClientCacheKey(provider, config.timeoutMs);
+    let clientsByCredential = clientCache.get(cacheKey);
+    if (clientsByCredential === undefined) {
+      clientsByCredential = new Map();
+      clientCache.set(cacheKey, clientsByCredential);
+    }
+    let client = clientsByCredential.get(apiKey);
+    if (client === undefined) {
+      client = createClient({
+        provider,
+        apiKey,
+        timeoutMs: config.timeoutMs,
+      });
+      clientsByCredential.set(apiKey, client);
+    }
+    return {client, model, provider};
+  };
 }
 
 export async function streamCompactSummary(
@@ -140,53 +258,25 @@ async function main(): Promise<void> {
     process.env,
     resolveUserHome(process.env, homedir()),
   );
-  let config = await loadConfig(paths.configFile);
-  let apiKey: string | undefined;
-  if (config === undefined) {
-    const input = createFirstRunInput(process.stdin, process.stdout);
-    try {
-      const created = await runFirstRunWithCredentials(input, {
-        write: text => process.stdout.write(text),
-        saveKey: credentialSaverForPlatform(
-          process.platform,
-          saveMacOsKeychain,
-        ),
-      });
-      config = created.config; apiKey = created.apiKey; await saveConfig(paths.configFile, config);
-    } finally { input.close(); }
-  }
-  if (config === undefined) throw new Error('无法创建配置。');
-  let activeConfig = config;
-  const initialModel = activeConfig.models.find(
-    candidate => candidate.id === activeConfig.activeModelId,
-  );
-  if (initialModel === undefined) throw new Error('当前未绑定模型。');
-  const initialProvider = activeConfig.providers.find(
-    candidate => candidate.id === initialModel.providerId,
-  );
-  if (initialProvider === undefined) throw new Error('当前模型的供应商不存在。');
-  apiKey ??= await resolveStartupApiKey({
-    provider: initialProvider,
-    env: process.env,
-    readKeychain: readMacOsKeychain,
-    createInput: () => createFirstRunInput(process.stdin, process.stdout),
-    write: text => process.stdout.write(text),
-  });
-  if (!apiKey) throw new Error('未提供 API Key；请设置 HAOCHEN_API_KEY 或重新首次配置。');
+  let activeConfig = await loadOrCreateConfig(paths.configFile);
   const workspace = process.cwd();
   const currentWorkspaceId = workspaceId(workspace);
   const tempDir = join(tmpdir(), 'haochen'); await mkdir(tempDir, {recursive: true});
-  const model = createOpenAiCompatibleClient({
-    baseUrl: initialProvider.baseUrl,
-    headers: initialProvider.headers,
-    timeoutMs: activeConfig.timeoutMs,
-  }, apiKey);
-  const temporaryProviderKeys = new Map<string, string>([
-    [initialProvider.id, apiKey],
-  ]);
+  const temporaryProviderKeys = new Map<string, string>();
+  const resolveModelRuntime = createModelRuntimeResolver({
+    getConfig: () => activeConfig,
+    temporaryProviderKeys,
+    resolveApiKey: provider => resolveStartupApiKey({
+      provider,
+      env: process.env,
+      readKeychain: readMacOsKeychain,
+      createInput: () => createFirstRunInput(process.stdin, process.stdout),
+      write: text => process.stdout.write(text),
+    }),
+  });
   const currentModel = () => activeConfig.models.find(
     candidate => candidate.id === activeConfig.activeModelId,
-  ) ?? initialModel;
+  );
   const store = new SessionStore(paths.sessionsDir); const sessionStore = createSerializedSessionStore(store); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
   const confirmations = new InteractiveConfirmationBroker(
     process.stdin.isTTY === true && process.stdout.isTTY === true,
@@ -196,9 +286,10 @@ async function main(): Promise<void> {
   let sessionId = createSessionId();
   await store.initialize(sessionId, currentWorkspaceId);
   let activeInterruptionWriter: ((reason: string) => Promise<void>) | undefined;
+  const initialModel = currentModel();
   clearTerminalScreen(process.stdout);
   const instance = render(<App
-    workspace={workspace} sessionId={sessionId} model={initialModel.modelId} contextTokens={initialModel.contextWindow} sessionGrants={grants}
+    workspace={workspace} sessionId={sessionId} model={initialModel?.modelId ?? ''} contextTokens={initialModel?.contextWindow ?? 0} sessionGrants={grants}
     modelConfig={activeConfig}
     modelConfigController={{
       discover: request => discoverModels({
@@ -227,8 +318,8 @@ async function main(): Promise<void> {
       },
     }}
     workspaceId={currentWorkspaceId}
-    runTask={(task, signal) => {
-      const selectedModel = currentModel();
+    runTask={async function* (task, signal) {
+      const runtime = await resolveModelRuntime();
       const taskSessionId = sessionId;
       let interruptedWrite: Promise<void> | undefined;
       const appendInterrupted = (reason: string): Promise<void> => {
@@ -238,10 +329,13 @@ async function main(): Promise<void> {
         return interruptedWrite;
       };
       activeInterruptionWriter = appendInterrupted;
-      return runAgentTask({task, model, modelName: selectedModel.modelId, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: model, reviewModel: selectedModel.modelId, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: selectedModel.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
+      yield* runAgentTask({task, model: runtime.client, modelName: runtime.model.modelId, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: runtime.client, reviewModel: runtime.model.modelId, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: runtime.model.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
     }}
-    executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: currentModel().modelId, signal, reportGate: event => gateReporter.report(event)})}
-    compact={(signal, onProgress) => compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model, modelName: currentModel().modelId, signal, onProgress})}
+    executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewModel: currentModel()?.modelId ?? '', signal, reportGate: event => gateReporter.report(event)})}
+    compact={async (signal, onProgress) => {
+      const runtime = await resolveModelRuntime();
+      return compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model: runtime.client, modelName: runtime.model.modelId, signal, onProgress});
+    }}
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
       if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
       await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});

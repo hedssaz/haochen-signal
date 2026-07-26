@@ -100,4 +100,45 @@ describe('resolveStartupApiKey', () => {
     expect(readKeychain).toHaveBeenCalledWith('deepseek', false);
     expect(createInput).not.toHaveBeenCalled();
   });
+
+  it('keeps the legacy global environment key fallback for a migrated provider', async () => {
+    const createInput = vi.fn();
+    const readKeychain = vi.fn(async () => undefined);
+
+    await expect(resolveStartupApiKey({
+      provider: {
+        id: 'legacy-provider',
+        name: '旧供应商',
+        credentialRef: 'legacy',
+      },
+      env: {HAOCHEN_API_KEY: 'legacy-environment-key'},
+      readKeychain,
+      createInput,
+      write: () => undefined,
+    })).resolves.toBe('legacy-environment-key');
+
+    expect(readKeychain).not.toHaveBeenCalled();
+    expect(createInput).not.toHaveBeenCalled();
+  });
+
+  it('allows the old Keychain service only for a migrated legacy provider', async () => {
+    const createInput = vi.fn();
+    const readKeychain = vi.fn(async () => 'legacy-keychain-key');
+
+    await expect(resolveStartupApiKey({
+      provider: {
+        id: 'legacy-provider',
+        name: '旧供应商',
+        credentialRef: 'legacy',
+      },
+      platform: 'darwin',
+      env: {},
+      readKeychain,
+      createInput,
+      write: () => undefined,
+    })).resolves.toBe('legacy-keychain-key');
+
+    expect(readKeychain).toHaveBeenCalledWith('legacy-provider', true);
+    expect(createInput).not.toHaveBeenCalled();
+  });
 });

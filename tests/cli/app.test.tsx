@@ -51,6 +51,12 @@ const multiModelConfig: HaochenConfig = {
     },
   ],
 };
+const emptyModelConfig: HaochenConfig = {
+  version: 2,
+  providers: [],
+  models: [],
+  timeoutMs: 60_000,
+};
 
 async function waitForInputListener(): Promise<void> {
   await new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -65,6 +71,68 @@ describe('App', () => {
     [1_000_000, '1m'],
   ])('formats %i stream tokens as %s', (count, expected) => {
     expect(formatTokenCount(count)).toBe(expected);
+  });
+
+  it('rejects an ordinary question before starting or locking a task when no model is bound', async () => {
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {});
+    const executeTool = vi.fn(async () => toolResult);
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model=""
+      modelConfig={emptyModelConfig}
+      executeTool={executeTool}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('解释这个项目');
+    app.stdin.write('\r');
+
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain(
+        '未绑定模型，请先使用 /model 配置并选择模型。',
+      );
+    });
+    expect(runTask).not.toHaveBeenCalled();
+    expect(app.lastFrame()).not.toContain('输入已锁定');
+    expect(app.lastFrame()).not.toContain('正在理解任务');
+
+    app.stdin.write('/help');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('内置命令：'));
+
+    app.stdin.write('/diff');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(executeTool).toHaveBeenCalledWith(
+      'git_diff',
+      {},
+      expect.any(AbortSignal),
+    ));
+  });
+
+  it('rejects compact explicitly without locking input when no model is bound', async () => {
+    const compact = vi.fn(async () => ({ok: true, message: '已压缩'}));
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model=""
+      modelConfig={emptyModelConfig}
+      compact={compact}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/compact');
+    app.stdin.write('\r');
+
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain(
+        '未绑定模型，无法压缩历史；请先使用 /model 配置并选择模型。',
+      );
+    });
+    expect(compact).not.toHaveBeenCalled();
+    expect(app.lastFrame()).not.toContain('输入已锁定');
   });
 
   it('shows real context usage and one unchanged previous-round total for multiple tools', async () => {

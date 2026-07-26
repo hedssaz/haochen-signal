@@ -1,11 +1,262 @@
 import {readFile} from 'node:fs/promises';
 import {Ajv} from 'ajv';
 import {describe, expect, it, vi} from 'vitest';
+import type {
+  HaochenConfig,
+  ProviderProfile,
+} from '../../src/config/schema.js';
 import type {ModelClient} from '../../src/providers/types.js';
 import type {SessionEvent} from '../../src/sessions/types.js';
 import type {ToolDefinitionSpec} from '../../src/tools/types.js';
 
+interface ModelRuntime {
+  client: ModelClient;
+  model: HaochenConfig['models'][number];
+  provider: ProviderProfile;
+}
+
+interface CliTestExports {
+  loadOrCreateConfig?: (
+    path: string,
+    dependencies: {
+      load: (path: string) => Promise<HaochenConfig | undefined>;
+      save: (path: string, config: HaochenConfig) => Promise<void>;
+    },
+  ) => Promise<HaochenConfig>;
+  createModelRuntimeResolver?: (options: {
+    getConfig: () => HaochenConfig;
+    temporaryProviderKeys: Map<string, string>;
+    resolveApiKey: (provider: ProviderProfile) => Promise<string | undefined>;
+    createClient: (options: {
+      provider: ProviderProfile;
+      apiKey: string;
+      timeoutMs: number;
+    }) => ModelClient;
+  }) => () => Promise<ModelRuntime>;
+}
+
+async function importCliForTest(): Promise<CliTestExports> {
+  const originalArgv = process.argv;
+  const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  process.argv = [...process.argv, '--help'];
+  vi.resetModules();
+  try {
+    return await import('../../src/cli/index.js') as CliTestExports;
+  } finally {
+    process.argv = originalArgv;
+    write.mockRestore();
+  }
+}
+
+function runtimeConfig(): HaochenConfig {
+  return {
+    version: 2,
+    providers: [
+      {
+        id: 'provider-a',
+        name: '供应商 A',
+        baseUrl: 'https://a.example.test/v1',
+        credentialRef: 'credential-a',
+        headers: {'x-tenant': 'a'},
+      },
+      {
+        id: 'provider-b',
+        name: '供应商 B',
+        baseUrl: 'https://b.example.test/v1',
+        credentialRef: 'credential-b',
+        headers: {},
+      },
+    ],
+    models: [
+      {
+        id: 'model-a',
+        providerId: 'provider-a',
+        modelId: 'alpha-chat',
+        displayName: 'Alpha Chat',
+        contextWindow: 128_000,
+      },
+      {
+        id: 'model-b',
+        providerId: 'provider-b',
+        modelId: 'beta-chat',
+        displayName: 'Beta Chat',
+        contextWindow: 256_000,
+      },
+    ],
+    activeModelId: 'model-a',
+    timeoutMs: 60_000,
+  };
+}
+
+function inertClient(label: string): ModelClient & {label: string} {
+  return {
+    label,
+    async *stream() {
+      yield {type: 'finish', reason: 'stop'};
+    },
+  };
+}
+
 describe('CLI entrypoint', () => {
+  it('creates and persists an empty v2 config when no config file exists', async () => {
+    const cli = await importCliForTest();
+    expect(cli.loadOrCreateConfig).toBeTypeOf('function');
+    if (cli.loadOrCreateConfig === undefined) return;
+    const load = vi.fn(async () => undefined);
+    const save = vi.fn(async () => undefined);
+
+    await expect(cli.loadOrCreateConfig('/config.json', {
+      load,
+      save,
+    })).resolves.toEqual({
+      version: 2,
+      providers: [],
+      models: [],
+      timeoutMs: 60_000,
+    });
+
+    expect(load).toHaveBeenCalledWith('/config.json');
+    expect(save).toHaveBeenCalledWith('/config.json', {
+      version: 2,
+      providers: [],
+      models: [],
+      timeoutMs: 60_000,
+    });
+  });
+
+  it('reads the active provider for every task and reuses clients by provider config and credential', async () => {
+    const cli = await importCliForTest();
+    expect(cli.createModelRuntimeResolver).toBeTypeOf('function');
+    if (cli.createModelRuntimeResolver === undefined) return;
+    let config = runtimeConfig();
+    const clients = new Map([
+      ['provider-a', inertClient('client-a')],
+      ['provider-b', inertClient('client-b')],
+    ]);
+    const createClient = vi.fn(({provider}: {provider: ProviderProfile}) => (
+      clients.get(provider.id)!
+    ));
+    const resolve = cli.createModelRuntimeResolver({
+      getConfig: () => config,
+      temporaryProviderKeys: new Map([
+        ['provider-a', 'key-a'],
+        ['provider-b', 'key-b'],
+      ]),
+      resolveApiKey: vi.fn(async () => undefined),
+      createClient,
+    });
+
+    const first = await resolve();
+    const firstAgain = await resolve();
+    config = {...config, activeModelId: 'model-b'};
+    const second = await resolve();
+    config = {...config, activeModelId: 'model-a'};
+    const firstAfterSwitchBack = await resolve();
+
+    expect(first).toMatchObject({
+      model: {id: 'model-a', modelId: 'alpha-chat', contextWindow: 128_000},
+      provider: {id: 'provider-a'},
+      client: {label: 'client-a'},
+    });
+    expect(second).toMatchObject({
+      model: {id: 'model-b', modelId: 'beta-chat', contextWindow: 256_000},
+      provider: {id: 'provider-b'},
+      client: {label: 'client-b'},
+    });
+    expect(firstAgain.client).toBe(first.client);
+    expect(firstAfterSwitchBack.client).toBe(first.client);
+    expect(createClient).toHaveBeenCalledTimes(2);
+    expect(createClient).toHaveBeenNthCalledWith(1, {
+      provider: config.providers[0],
+      apiKey: 'key-a',
+      timeoutMs: 60_000,
+    });
+    expect(createClient).toHaveBeenNthCalledWith(2, {
+      provider: config.providers[1],
+      apiKey: 'key-b',
+      timeoutMs: 60_000,
+    });
+  });
+
+  it('resolves and remembers the selected provider credential on demand', async () => {
+    const cli = await importCliForTest();
+    expect(cli.createModelRuntimeResolver).toBeTypeOf('function');
+    if (cli.createModelRuntimeResolver === undefined) return;
+    const config = runtimeConfig();
+    const temporaryProviderKeys = new Map<string, string>();
+    const resolveApiKey = vi.fn(async (provider: ProviderProfile) => (
+      `${provider.id}-resolved-key`
+    ));
+    const createClient = vi.fn(() => inertClient('resolved'));
+    const resolve = cli.createModelRuntimeResolver({
+      getConfig: () => config,
+      temporaryProviderKeys,
+      resolveApiKey,
+      createClient,
+    });
+
+    await resolve();
+    await resolve();
+
+    expect(resolveApiKey).toHaveBeenCalledOnce();
+    expect(resolveApiKey).toHaveBeenCalledWith(config.providers[0]);
+    expect(temporaryProviderKeys.get('provider-a')).toBe(
+      'provider-a-resolved-key',
+    );
+    expect(createClient).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an unbound model before resolving credentials or constructing a client', async () => {
+    const cli = await importCliForTest();
+    expect(cli.createModelRuntimeResolver).toBeTypeOf('function');
+    if (cli.createModelRuntimeResolver === undefined) return;
+    const resolveApiKey = vi.fn(async () => 'unexpected-key');
+    const createClient = vi.fn(() => inertClient('unexpected'));
+    const resolve = cli.createModelRuntimeResolver({
+      getConfig: () => ({
+        version: 2,
+        providers: [],
+        models: [],
+        timeoutMs: 60_000,
+      }),
+      temporaryProviderKeys: new Map(),
+      resolveApiKey,
+      createClient,
+    });
+
+    await expect(resolve()).rejects.toThrow(
+      '未绑定模型，请先使用 /model 配置并选择模型。',
+    );
+    expect(resolveApiKey).not.toHaveBeenCalled();
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
+  it('constructs a new client when the active provider request config changes', async () => {
+    const cli = await importCliForTest();
+    expect(cli.createModelRuntimeResolver).toBeTypeOf('function');
+    if (cli.createModelRuntimeResolver === undefined) return;
+    let config = runtimeConfig();
+    const createClient = vi.fn(() => inertClient(`client-${createClient.mock.calls.length}`));
+    const resolve = cli.createModelRuntimeResolver({
+      getConfig: () => config,
+      temporaryProviderKeys: new Map([['provider-a', 'key-a']]),
+      resolveApiKey: vi.fn(async () => undefined),
+      createClient,
+    });
+
+    const before = await resolve();
+    config = {
+      ...config,
+      providers: config.providers.map(provider => provider.id === 'provider-a'
+        ? {...provider, baseUrl: 'https://a.example.test/v2'}
+        : provider),
+    };
+    const after = await resolve();
+
+    expect(after.client).not.toBe(before.client);
+    expect(createClient).toHaveBeenCalledTimes(2);
+  });
+
   it('passes the live session grant set to the App instead of its startup size', async () => {
     const source = await readFile(
       new URL('../../src/cli/index.tsx', import.meta.url),
