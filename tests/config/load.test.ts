@@ -127,6 +127,11 @@ describe('configuration', () => {
     'service-api-key',
     'x-auth-token',
     'anthropic-api-key',
+    'Ocp-Apim-Subscription-Key',
+    'X-RapidAPI-Key',
+    'X-Auth-Key',
+    'X-Client-Secret',
+    'X-Auth',
   ])(
     'rejects a persisted authentication header: %s',
     header => {
@@ -143,6 +148,26 @@ describe('configuration', () => {
       })).toThrow();
     },
   );
+
+  it('preserves non-sensitive compatibility headers', () => {
+    const headers = {
+      'x-tenant': 'alpha',
+      'x-api-version': '2026-07-27',
+      'idempotency-key': 'request-1',
+    };
+
+    expect(parseConfig({
+      version: 2,
+      providers: [{
+        id: 'provider',
+        name: 'Provider',
+        baseUrl: 'https://example.test',
+        credentialRef: 'provider',
+        headers,
+      }],
+      models: [],
+    }).providers[0]?.headers).toEqual(headers);
+  });
 
   it.each([
     {

@@ -1,4 +1,5 @@
 import type {HaochenConfig} from '../config/schema.js';
+import {isSensitiveHeaderName} from '../security/headers.js';
 import {redactValue} from '../security/redact.js';
 import {decodeSse} from './sse.js';
 import type {ModelClient, ModelEvent, ModelRequest} from './types.js';
@@ -42,8 +43,6 @@ interface AccumulatedToolCall {
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
-const SENSITIVE_HEADER_NAME =
-  /(?:^|[-_])(?:authorization|cookie|set[-_]?cookie|api[-_]?key|key|token|secret)(?:$|[-_])/i;
 
 interface OperationSignal {
   signal: AbortSignal;
@@ -116,7 +115,7 @@ function collectSensitiveValues(
   if (apiKey.length > 0) values.add(apiKey);
 
   for (const [name, value] of entries) {
-    if (value.length > 0 && SENSITIVE_HEADER_NAME.test(name)) {
+    if (value.length > 0 && isSensitiveHeaderName(name)) {
       values.add(value);
     }
   }

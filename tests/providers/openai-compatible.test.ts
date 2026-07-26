@@ -460,16 +460,23 @@ describe('OpenAI-compatible chat completions client', () => {
       'encryption-key': 'key-value',
       'x-token': 'token-value',
       'client-secret': 'secret-value',
+      'ocp-apim-subscription-key': 'subscription-key-value',
+      'x-rapidapi-key': 'rapid-api-key-value',
+      'x-auth-key': 'auth-key-value',
+      'x-client-secret': 'client-secret-value',
+      'x-auth': 'x-auth-value',
     };
     const fetchImpl = vi.fn(async () => new Response('denied', {
       status: 401,
       statusText: `rejected ${Object.values(sensitiveHeaders).join(' ')}`,
     })) as typeof fetch;
-    const client = createOpenAiCompatibleClient(parseConfig({
+    const client = createOpenAiCompatibleClient({
       baseUrl: 'https://example.test/v1',
       model: 'wolf-1',
       headers: sensitiveHeaders,
-    }), 'auth-secret', {fetch: fetchImpl});
+      timeoutMs: 60_000,
+      contextWindow: 128_000,
+    } as never, 'auth-secret', {fetch: fetchImpl});
     let thrown: unknown;
 
     try {

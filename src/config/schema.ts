@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {isSensitiveHeaderName} from '../security/headers.js';
 
 const BaseUrlSchema = z.string().url().refine(value => {
   const url = new URL(value);
@@ -13,7 +14,6 @@ const BaseUrlSchema = z.string().url().refine(value => {
 });
 
 const ProfileIdSchema = z.string().trim().min(1);
-const AuthenticationHeaderName = /(?:^|[-_])(?:(?:proxy[-_]?)?authorization|proxy[-_]?auth|api[-_]?key|auth[-_]?token|access[-_]?token|security[-_]?token|token|cookie|set[-_]?cookie)(?:$|[-_])/i;
 
 const ProviderProfileSchema = z.object({
   id: ProfileIdSchema,
@@ -23,7 +23,7 @@ const ProviderProfileSchema = z.object({
   headers: z.record(z.string(), z.string()).default({}),
 }).superRefine((provider, context) => {
   for (const header of Object.keys(provider.headers)) {
-    if (AuthenticationHeaderName.test(header)) {
+    if (isSensitiveHeaderName(header)) {
       context.addIssue({
         code: 'custom',
         path: ['headers', header],
