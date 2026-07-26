@@ -40,7 +40,7 @@ function trimmedCredential(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-export function providerApiKeyEnvironmentVariable(providerId: string): string {
+export function providerEnvironmentSuffix(providerId: string): string {
   if (providerId.length === 0) {
     throw new Error('供应商 ID 不能为空');
   }
@@ -52,7 +52,11 @@ export function providerApiKeyEnvironmentVariable(providerId: string): string {
       .toUpperCase()
       .padStart(4, '0');
   }
-  return `HAOCHEN_PROVIDER_${encodedId}_API_KEY`;
+  return encodedId;
+}
+
+export function providerApiKeyEnvironmentVariable(providerId: string): string {
+  return `HAOCHEN_PROVIDER_${providerEnvironmentSuffix(providerId)}_API_KEY`;
 }
 
 function allowsLegacyFallback(
@@ -90,7 +94,7 @@ export async function resolveApiKey(options: CredentialOptions): Promise<string 
 
 function keychainService(providerId: string | undefined): string {
   return providerId
-    ? `haochen-signal:${providerId}`
+    ? `haochen-signal:${providerEnvironmentSuffix(providerId)}`
     : 'haochen-signal';
 }
 

@@ -116,6 +116,45 @@ describe('discoverModels', () => {
     expect((error as Error).message).not.toContain(API_KEY);
   });
 
+  it('uses a fixed sanitized description when an Error message getter throws', async () => {
+    const injected = new Error('ignored');
+    Object.defineProperty(injected, 'message', {
+      get() {
+        throw new Error(API_KEY);
+      },
+    });
+    const fetchImpl = mockFetch(async () => {
+      throw injected;
+    });
+
+    const error = await discoverModels(options(fetchImpl)).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(ModelDiscoveryError);
+    expect((error as Error).message).toContain('模型列表请求失败');
+    expect((error as Error).message).not.toContain(API_KEY);
+  });
+
+  it('uses a fixed sanitized description when unknown toString throws', async () => {
+    const injected = {
+      toString() {
+        throw new Error(API_KEY);
+      },
+    };
+    const fetchImpl = mockFetch(async () => {
+      throw injected;
+    });
+
+    const error = await discoverModels(options(fetchImpl)).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(ModelDiscoveryError);
+    expect((error as Error).message).toContain('模型列表请求失败');
+    expect((error as Error).message).not.toContain(API_KEY);
+  });
+
   it('rejects non-success status without exposing status text containing the API key', async () => {
     const fetchImpl = mockFetch(async () => new Response('denied', {
       status: 401,

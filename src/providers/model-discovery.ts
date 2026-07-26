@@ -152,12 +152,15 @@ function sanitizedErrorDescription(
   error: unknown,
   apiKey: string,
 ): string {
-  return sanitizedMessage(
-    error instanceof Error
+  let description: string;
+  try {
+    description = error instanceof Error
       ? `${error.name}: ${error.message}`
-      : String(error),
-    apiKey,
-  );
+      : String(error);
+  } catch {
+    description = '模型列表请求失败';
+  }
+  return sanitizedMessage(description, apiKey);
 }
 
 function publicFailure(

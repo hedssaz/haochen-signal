@@ -1,6 +1,7 @@
 import {describe, expect, it, vi} from 'vitest';
 import {
   providerApiKeyEnvironmentVariable,
+  providerEnvironmentSuffix,
   readMacOsKeychain,
   resolveApiKey,
   saveMacOsKeychain,
@@ -180,6 +181,15 @@ describe('providerApiKeyEnvironmentVariable', () => {
     expect(new Set(names)).toHaveLength(3);
   });
 
+  it.each([
+    ['deepseek', '0064006500650070007300650065006B'],
+    ['\uD800', 'D800'],
+    ['\uD801', 'D801'],
+    ['\uFFFD', 'FFFD'],
+  ])('uses the reversible provider environment suffix for %j', (providerId, expected) => {
+    expect(providerEnvironmentSuffix(providerId)).toBe(expected);
+  });
+
   it('rejects an empty provider ID', () => {
     expect(() => providerApiKeyEnvironmentVariable('')).toThrow(
       '供应商 ID 不能为空',
@@ -217,14 +227,16 @@ describe('macOS Keychain adapter', () => {
       '-a',
       'haochen',
       '-s',
-      'haochen-signal:deepseek',
+      'haochen-signal:0064006500650070007300650065006B',
       '-w',
     ]);
   });
 
   it('falls back to the old Keychain service for a migrated legacy credential', async () => {
     const run = vi.fn(async (_file: string, args: string[]) => {
-      if (args.includes('haochen-signal:legacy-provider')) {
+      if (args.includes(
+        'haochen-signal:006C00650067006100630079002D00700072006F00760069006400650072',
+      )) {
         throw new Error('item not found');
       }
       return {stdout: ' old-key\n'};
@@ -238,7 +250,7 @@ describe('macOS Keychain adapter', () => {
       '-a',
       'haochen',
       '-s',
-      'haochen-signal:legacy-provider',
+      'haochen-signal:006C00650067006100630079002D00700072006F00760069006400650072',
       '-w',
     ]);
     expect(run).toHaveBeenNthCalledWith(2, 'security', [
@@ -271,6 +283,26 @@ describe('macOS Keychain adapter', () => {
       readMacOsKeychain(run, 'darwin', 'deepseek', true),
     ).resolves.toBeUndefined();
     expect(run).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['\uD800', 'D800'],
+    ['\uD801', 'D801'],
+    ['\uFFFD', 'FFFD'],
+  ])('uses a distinct encoded Keychain service for provider ID %j', async (providerId, suffix) => {
+    const run = vi.fn(async () => ({stdout: 'stored-key'}));
+
+    await expect(
+      readMacOsKeychain(run, 'darwin', providerId),
+    ).resolves.toBe('stored-key');
+    expect(run).toHaveBeenCalledWith('security', [
+      'find-generic-password',
+      '-a',
+      'haochen',
+      '-s',
+      `haochen-signal:${suffix}`,
+      '-w',
+    ]);
   });
 
   it('returns undefined without running security outside macOS', async () => {
@@ -308,7 +340,7 @@ describe('macOS Keychain adapter', () => {
       '-a',
       'haochen',
       '-s',
-      'haochen-signal:deepseek',
+      'haochen-signal:0064006500650070007300650065006B',
       '-w',
       'stored-key',
     ]);
