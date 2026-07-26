@@ -1,10 +1,12 @@
 import React from 'react';
 import {Box, Text, useInput} from 'ink';
 import {
+  activeModelConfigProvider,
   orderedModels,
   type ModelConfigAction,
   type ModelConfigState,
 } from './model-config.js';
+import {providerApiKeyEnvironmentVariable} from '../config/credentials.js';
 
 export interface ModelConfigViewProps {
   state: ModelConfigState;
@@ -64,7 +66,7 @@ function ModelList(props: ModelConfigViewProps): React.JSX.Element {
         })}
       </Box>;
     })}
-    <Text color="cyan">A 添加供应商  E 编辑  D 删除  Enter 切换</Text>
+    <Text color="cyan">A 添加模型  E 编辑  D 删除  Enter 切换</Text>
     <Text dimColor>↑/↓ 选择 · Esc 返回</Text>
   </Box>;
 }
@@ -76,13 +78,46 @@ const providerActions = [
 ] as const;
 
 function ProviderActions(props: ModelConfigViewProps): React.JSX.Element {
+  const provider = activeModelConfigProvider(props.state);
   return <Box flexDirection="column">
     <Text dimColor>{`${props.state.form.providerName} · ${props.state.form.baseUrl}`}</Text>
+    {provider === undefined ? null : <Text dimColor>
+      {`环境变量：${providerApiKeyEnvironmentVariable(provider.id)}`}
+    </Text>}
     {providerActions.map((action, index) => <Text
       key={action}
       color={index === props.state.selectedActionIndex ? 'cyan' : undefined}
     >
       {`${index === props.state.selectedActionIndex ? '›' : ' '} ${action}`}
+    </Text>)}
+    <Text dimColor>↑/↓ 选择 · Enter 继续 · Esc 返回</Text>
+  </Box>;
+}
+
+const addActions = [
+  '添加到当前供应商',
+  '添加新供应商',
+  '取消',
+] as const;
+
+function AddActions(props: ModelConfigViewProps): React.JSX.Element {
+  const selected = orderedModels(props.state.config)[props.state.selectedModelIndex];
+  const provider = selected === undefined
+    ? undefined
+    : props.state.config.providers.find(
+      candidate => candidate.id === selected.providerId,
+    );
+  return <Box flexDirection="column">
+    <Text bold>添加模型</Text>
+    {addActions.map((action, index) => <Text
+      key={action}
+      color={index === props.state.selectedActionIndex ? 'cyan' : undefined}
+    >
+      {`${index === props.state.selectedActionIndex ? '›' : ' '} ${
+        index === 0
+          ? `添加到当前供应商（${provider?.name ?? '未知'}）`
+          : action
+      }`}
     </Text>)}
     <Text dimColor>↑/↓ 选择 · Enter 继续 · Esc 返回</Text>
   </Box>;
@@ -106,6 +141,8 @@ function ScreenContents(props: ModelConfigViewProps): React.JSX.Element {
   switch (state.screen) {
     case 'list':
       return <ModelList {...props}/>;
+    case 'add_actions':
+      return <AddActions {...props}/>;
     case 'provider_name':
       return <Box flexDirection="column">
         <Text bold>添加供应商 · 1/3</Text>
@@ -185,7 +222,7 @@ function keyboardAction(
     meta: boolean;
   },
 ): ModelConfigAction | undefined {
-  if (key.escape || (key.ctrl && input.toLowerCase() === 'c' && state.screen === 'discovering')) {
+  if (key.escape) {
     return {type: 'escape'};
   }
   if (key.upArrow) return {type: 'move', delta: -1};

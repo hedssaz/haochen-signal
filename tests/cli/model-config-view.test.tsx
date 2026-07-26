@@ -8,6 +8,7 @@ import {
   type ModelConfigState,
 } from '../../src/cli/model-config.js';
 import {ModelConfigView} from '../../src/cli/model-config-view.js';
+import {providerApiKeyEnvironmentVariable} from '../../src/config/credentials.js';
 
 const emptyConfig: HaochenConfig = {
   version: 2,
@@ -99,7 +100,32 @@ describe('ModelConfigView', () => {
     expect(app.lastFrame()).toContain('● DeepSeek Chat');
     expect(app.lastFrame()).toContain('128k');
     expect(app.lastFrame()).toContain('当前');
-    expect(app.lastFrame()).toContain('A 添加供应商  E 编辑  D 删除  Enter 切换');
+    expect(app.lastFrame()).toContain('A 添加模型  E 编辑  D 删除  Enter 切换');
+  });
+
+  it('offers the selected provider or a new provider when adding a model', () => {
+    const state = transitionModelConfig(
+      createModelConfigState(populatedConfig),
+      {type: 'add'},
+    ).state;
+    const app = render(<ModelConfigView state={state} onAction={vi.fn()}/>);
+
+    expect(app.lastFrame()).toContain('添加到当前供应商（DeepSeek）');
+    expect(app.lastFrame()).toContain('添加新供应商');
+  });
+
+  it('shows the provider API address and dedicated environment variable in its action screen', () => {
+    let state = transitionModelConfig(
+      createModelConfigState(populatedConfig),
+      {type: 'add'},
+    ).state;
+    state = transitionModelConfig(state, {type: 'submit'}).state;
+    const app = render(<ModelConfigView state={state} onAction={vi.fn()}/>);
+
+    expect(app.lastFrame()).toContain('https://api.deepseek.test/v1');
+    expect(app.lastFrame()).toContain(
+      providerApiKeyEnvironmentVariable('deepseek'),
+    );
   });
 
   it('renders and selects interleaved models in the same provider-group order', () => {

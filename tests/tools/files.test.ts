@@ -569,6 +569,64 @@ describe('workspace file tools', () => {
     await expect(readdir(workspace)).resolves.toEqual([]);
   });
 
+  it('rolls back its own target when canceled after link publishes it', async () => {
+    const controller = new AbortController();
+    let markPublished!: () => void;
+    let releaseLink!: () => void;
+    const published = new Promise<void>(resolve => { markPublished = resolve; });
+    const linkGate = new Promise<void>(resolve => { releaseLink = resolve; });
+
+    const running = writeFileTool({
+      path: 'canceled-after-link.txt',
+      content: 'must be rolled back',
+    }, context, controller.signal, {
+      link: async (temporaryPath, targetPath) => {
+        await linkFile(temporaryPath, targetPath);
+        markPublished();
+        await linkGate;
+      },
+    });
+
+    await published;
+    controller.abort('link 发布后取消');
+    releaseLink();
+    const result = await running;
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    await expect(readdir(workspace)).resolves.toEqual([]);
+  });
+
+  it('never deletes a replacement target while rolling back an aborted add', async () => {
+    const controller = new AbortController();
+    const replacement = 'written by another actor';
+
+    const result = await writeFileTool({
+      path: 'replaced-after-link.txt',
+      content: 'tool contents',
+    }, context, controller.signal, {
+      link: async (temporaryPath, targetPath) => {
+        await linkFile(temporaryPath, targetPath);
+        await unlinkFile(targetPath);
+        await writeFile(targetPath, replacement);
+        controller.abort('目标被替换后取消');
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    await expect(
+      readFile(join(workspace, 'replaced-after-link.txt'), 'utf8'),
+    ).resolves.toBe(replacement);
+    await expect(readdir(workspace)).resolves.toEqual([
+      'replaced-after-link.txt',
+    ]);
+  });
+
   it('rejects write_file traversal and symlink escapes', async () => {
     const outsideDirectory = join(tempDirectory, 'outside');
     await mkdir(outsideDirectory);

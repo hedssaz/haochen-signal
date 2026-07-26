@@ -33,6 +33,16 @@ interface CliTestExports {
       timeoutMs: number;
     }) => ModelClient;
   }) => () => Promise<ModelRuntime>;
+  createTaskInterruptionRouter?: (
+    append: (sessionId: string, event: SessionEvent) => Promise<void>,
+    now?: () => number,
+  ) => {
+    beginTask: (sessionId: string) => {
+      appendInterrupted: (reason: string) => Promise<void>;
+      finish: () => void;
+    };
+    appendCurrent: (sessionId: string, reason: string) => Promise<void>;
+  };
 }
 
 async function importCliForTest(): Promise<CliTestExports> {
@@ -287,6 +297,54 @@ describe('CLI entrypoint', () => {
     );
 
     expect(source).toContain('/>, {exitOnCtrlC: false});');
+  });
+
+  it('binds interruption writes before credential resolution and clears the task binding afterward', async () => {
+    const cli = await importCliForTest();
+    expect(cli.createTaskInterruptionRouter).toBeTypeOf('function');
+    if (cli.createTaskInterruptionRouter === undefined) return;
+    const writes: Array<{sessionId: string; event: SessionEvent}> = [];
+    const router = cli.createTaskInterruptionRouter(
+      async (sessionId, event) => {
+        writes.push({sessionId, event});
+      },
+      () => 123,
+    );
+
+    const firstTask = router.beginTask('task-session');
+    await router.appendCurrent('resumed-session', '等待凭据时二次中止');
+    await firstTask.appendInterrupted('等待凭据时二次中止');
+    firstTask.finish();
+    await router.appendCurrent('resumed-session', '恢复后退出');
+
+    expect(writes).toEqual([
+      {
+        sessionId: 'task-session',
+        event: {
+          type: 'interrupted',
+          at: 123,
+          reason: '等待凭据时二次中止',
+        },
+      },
+      {
+        sessionId: 'resumed-session',
+        event: {
+          type: 'interrupted',
+          at: 123,
+          reason: '恢复后退出',
+        },
+      },
+    ]);
+
+    const source = await readFile(
+      new URL('../../src/cli/index.tsx', import.meta.url),
+      'utf8',
+    );
+    expect(source.indexOf('interruptionRouter.beginTask(taskSessionId)')).toBeGreaterThan(-1);
+    expect(source.indexOf('interruptionRouter.beginTask(taskSessionId)')).toBeLessThan(
+      source.indexOf('resolveModelRuntime(signal)'),
+    );
+    expect(source).toContain('taskInterruption.finish()');
   });
 
   it('exposes character pagination in the read_file model tool schema', async () => {

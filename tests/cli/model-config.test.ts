@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import type {HaochenConfig} from '../../src/config/schema.js';
 import {
   createModelConfigState,
+  ModelConfigOperationController,
   orderedModels,
   transitionModelConfig,
   type ModelConfigAction,
@@ -143,7 +144,7 @@ describe('model configuration state machine', () => {
     let state = createModelConfigState(config);
 
     state = step(state, {type: 'add'});
-    expect(state.screen).toBe('provider_name');
+    expect(state.screen).toBe('add_actions');
 
     state = createModelConfigState(config);
     state = step(state, {type: 'edit'});
@@ -166,8 +167,104 @@ describe('model configuration state machine', () => {
     expect(close.effect).toEqual({type: 'close'});
   });
 
+  it('exposes abortable discovery and save operation status until settlement', () => {
+    const controller = new ModelConfigOperationController();
+
+    expect(controller.status).toBe('idle');
+    const discoverySignal = controller.begin('discovering');
+    expect(controller.status).toBe('discovering');
+    expect(controller.isCurrent(discoverySignal)).toBe(true);
+
+    expect(controller.abort()).toBe('discovering');
+    expect(discoverySignal.aborted).toBe(true);
+    expect(controller.status).toBe('discovering');
+
+    controller.complete(discoverySignal);
+    expect(controller.status).toBe('idle');
+
+    const saveSignal = controller.begin('saving');
+    expect(controller.status).toBe('saving');
+    controller.abort();
+    expect(saveSignal.aborted).toBe(true);
+    controller.complete(saveSignal);
+    expect(controller.status).toBe('idle');
+  });
+
+  it('cancels discovery to provider actions and saving to its editable return screen', () => {
+    let discovering = step(createModelConfigState(config), {type: 'add'});
+    discovering = step(discovering, {type: 'submit'});
+    discovering = step(discovering, {type: 'submit'});
+    expect(discovering.screen).toBe('discovering');
+
+    const canceledDiscovery = transitionModelConfig(discovering, {type: 'abort'});
+    expect(canceledDiscovery.state.screen).toBe('provider_actions');
+    expect(canceledDiscovery.effect).toEqual({type: 'abort_active'});
+
+    let editing = step(createModelConfigState(config), {type: 'edit'});
+    editing = step(editing, {type: 'submit'});
+    const saving = transitionModelConfig(editing, {type: 'submit'});
+    expect(saving.state.screen).toBe('saving');
+
+    const canceledSave = transitionModelConfig(saving.state, {type: 'abort'});
+    expect(canceledSave.state.screen).toBe('edit_context_window');
+    expect(canceledSave.state.pendingSave).toBeUndefined();
+    expect(canceledSave.effect).toEqual({type: 'abort_active'});
+  });
+
+  it('adds a second model to the selected provider without duplicating it or requesting a new key', () => {
+    let state = step(createModelConfigState(config), {type: 'add'});
+    expect(state.screen).toBe('add_actions');
+
+    state = step(state, {type: 'submit'});
+    expect(state).toMatchObject({
+      screen: 'provider_actions',
+      targetProviderId: 'deepseek',
+      form: {
+        providerName: 'DeepSeek',
+        baseUrl: 'https://api.deepseek.test/v1',
+        apiKey: '',
+      },
+    });
+
+    const discovery = transitionModelConfig(state, {type: 'submit'});
+    expect(discovery.effect).toMatchObject({
+      type: 'discover',
+      provider: {id: 'deepseek'},
+    });
+    expect(discovery.effect).not.toHaveProperty('apiKey');
+
+    state = step(state, {type: 'move', delta: 1});
+    state = step(state, {type: 'submit'});
+    state = typeText(state, 'deepseek-v3');
+    state = step(state, {type: 'submit'});
+    state = step(state, {type: 'submit'});
+    const save = transitionModelConfig(state, {type: 'submit'});
+
+    expect(save.effect).toMatchObject({
+      type: 'save',
+      credential: undefined,
+      config: {
+        activeModelId: 'model-deepseek-deepseek-v3',
+        providers: config.providers,
+        models: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'model-deepseek-deepseek-v3',
+            providerId: 'deepseek',
+            modelId: 'deepseek-v3',
+          }),
+        ]),
+      },
+    });
+    const savedConfig = (
+      save.effect as Extract<typeof save.effect, {type: 'save'}>
+    ).config;
+    expect(savedConfig.providers).toHaveLength(config.providers.length);
+  });
+
   it('collects provider fields, validates the URL and emits a discovery request', () => {
     let state = step(createModelConfigState(config), {type: 'add'});
+    state = step(state, {type: 'move', delta: 1});
+    state = step(state, {type: 'submit'});
     state = typeText(state, '  Moonshot  ');
     state = step(state, {type: 'submit'});
     expect(state.screen).toBe('provider_base_url');
@@ -205,6 +302,8 @@ describe('model configuration state machine', () => {
 
   it('selects a discovered model and defaults details to 128000', () => {
     let state = step(createModelConfigState(config), {type: 'add'});
+    state = step(state, {type: 'move', delta: 1});
+    state = step(state, {type: 'submit'});
     state = typeText(state, 'Moonshot');
     state = step(state, {type: 'submit'});
     state = typeText(state, 'https://api.moonshot.test/v1');
@@ -230,6 +329,8 @@ describe('model configuration state machine', () => {
 
   it('supports manual Model ID and keeps the API key out of saved config', () => {
     let state = step(createModelConfigState(config), {type: 'add'});
+    state = step(state, {type: 'move', delta: 1});
+    state = step(state, {type: 'submit'});
     state = typeText(state, 'Moonshot');
     state = step(state, {type: 'submit'});
     state = typeText(state, 'https://api.moonshot.test/v1');
@@ -302,6 +403,8 @@ describe('model configuration state machine', () => {
 
   it('shows discovery errors without discarding provider fields', () => {
     let state = step(createModelConfigState(config), {type: 'add'});
+    state = step(state, {type: 'move', delta: 1});
+    state = step(state, {type: 'submit'});
     state = typeText(state, 'Moonshot');
     state = step(state, {type: 'submit'});
     state = typeText(state, 'https://api.moonshot.test/v1');

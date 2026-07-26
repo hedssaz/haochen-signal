@@ -7,6 +7,7 @@ import {
 
 export type ModelConfigScreen =
   | 'list'
+  | 'add_actions'
   | 'provider_name'
   | 'provider_base_url'
   | 'provider_api_key'
@@ -39,6 +40,7 @@ export interface ModelConfigState {
   screen: ModelConfigScreen;
   selectedModelIndex: number;
   selectedActionIndex: number;
+  targetProviderId?: string;
   discoveredModelIds: string[];
   selectedDiscoveredIndex: number;
   form: ModelConfigForm;
@@ -53,13 +55,14 @@ export interface ModelConfigCredential {
 
 export interface ModelConfigDiscoverRequest {
   provider: ProviderProfile;
-  apiKey: string;
+  apiKey?: string;
   signal: AbortSignal;
 }
 
 export interface ModelConfigSaveRequest {
   config: HaochenConfig;
   credential?: ModelConfigCredential;
+  signal: AbortSignal;
 }
 
 export interface ModelConfigController {
@@ -69,10 +72,11 @@ export interface ModelConfigController {
 
 export type ModelConfigEffect =
   | {type: 'close'}
+  | {type: 'abort_active'}
   | {
     type: 'discover';
     provider: ProviderProfile;
-    apiKey: string;
+    apiKey?: string;
   }
   | {type: 'cancel_discovery'}
   | {
@@ -94,11 +98,51 @@ export type ModelConfigAction =
   | {type: 'add'}
   | {type: 'edit'}
   | {type: 'delete'}
+  | {type: 'abort'}
   | {type: 'escape'}
   | {type: 'discovery_succeeded'; modelIds: readonly string[]}
   | {type: 'discovery_failed'; message: string}
   | {type: 'save_succeeded'; config: HaochenConfig}
   | {type: 'save_failed'; message: string};
+
+export type ModelConfigOperationStatus = 'idle' | 'discovering' | 'saving';
+
+export class ModelConfigOperationController {
+  private active?: {
+    status: Exclude<ModelConfigOperationStatus, 'idle'>;
+    controller: AbortController;
+  };
+
+  get status(): ModelConfigOperationStatus {
+    return this.active?.status ?? 'idle';
+  }
+
+  begin(status: Exclude<ModelConfigOperationStatus, 'idle'>): AbortSignal {
+    this.abort();
+    const controller = new AbortController();
+    this.active = {status, controller};
+    return controller.signal;
+  }
+
+  abort(): Exclude<ModelConfigOperationStatus, 'idle'> | undefined {
+    const active = this.active;
+    if (active === undefined) return undefined;
+    active.controller.abort(new DOMException('用户中止', 'AbortError'));
+    return active.status;
+  }
+
+  isCurrent(signal: AbortSignal): boolean {
+    return this.active?.controller.signal === signal;
+  }
+
+  complete(signal: AbortSignal): void {
+    if (this.isCurrent(signal)) this.active = undefined;
+  }
+
+  clear(): void {
+    this.active = undefined;
+  }
+}
 
 const emptyForm = (): ModelConfigForm => ({
   providerName: '',
@@ -144,6 +188,13 @@ function wrap(index: number, delta: number, length: number): number {
 
 function selectedModel(state: ModelConfigState): ModelProfile | undefined {
   return orderedModels(state.config)[state.selectedModelIndex];
+}
+
+function selectedProvider(state: ModelConfigState): ProviderProfile | undefined {
+  const model = selectedModel(state);
+  return model === undefined
+    ? undefined
+    : state.config.providers.find(provider => provider.id === model.providerId);
 }
 
 function withError(state: ModelConfigState, error: string): ModelConfigTransition {
@@ -228,6 +279,18 @@ function buildProvider(state: ModelConfigState): ProviderProfile {
   };
 }
 
+export function activeModelConfigProvider(
+  state: ModelConfigState,
+): ProviderProfile | undefined {
+  if (state.targetProviderId !== undefined) {
+    return state.config.providers.find(
+      provider => provider.id === state.targetProviderId,
+    );
+  }
+  if (state.form.providerName.trim().length === 0) return undefined;
+  return buildProvider(state);
+}
+
 function buildAddedConfig(
   state: ModelConfigState,
 ): {
@@ -235,7 +298,12 @@ function buildAddedConfig(
   provider: ProviderProfile;
   model: ModelProfile;
 } {
-  const provider = buildProvider(state);
+  const existingProvider = state.targetProviderId === undefined
+    ? undefined
+    : state.config.providers.find(
+      provider => provider.id === state.targetProviderId,
+    );
+  const provider = existingProvider ?? buildProvider(state);
   const modelIds = new Set(state.config.models.map(model => model.id));
   const model: ModelProfile = {
     id: uniqueId(
@@ -252,7 +320,9 @@ function buildAddedConfig(
     model,
     config: parseConfig({
       ...state.config,
-      providers: [...state.config.providers, provider],
+      providers: existingProvider === undefined
+        ? [...state.config.providers, provider]
+        : state.config.providers,
       models: [...state.config.models, model],
       activeModelId: model.id,
     }),
@@ -305,6 +375,13 @@ function transitionMove(
   delta: -1 | 1,
 ): ModelConfigTransition {
   switch (state.screen) {
+    case 'add_actions':
+      return {
+        state: {
+          ...withoutError(state),
+          selectedActionIndex: wrap(state.selectedActionIndex, delta, 3),
+        },
+      };
     case 'list': {
       const models = orderedModels(state.config);
       return {
@@ -423,8 +500,57 @@ function submitProviderAction(state: ModelConfigState): ModelConfigTransition {
     },
     effect: {
       type: 'discover',
-      provider: buildProvider(state),
-      apiKey: state.form.apiKey,
+      provider: activeModelConfigProvider(state) ?? buildProvider(state),
+      ...(state.form.apiKey.length === 0 ? {} : {apiKey: state.form.apiKey}),
+    },
+  };
+}
+
+function submitAddAction(state: ModelConfigState): ModelConfigTransition {
+  if (state.selectedActionIndex === 2) {
+    return {
+      state: {
+        ...createModelConfigState(state.config),
+        selectedModelIndex: state.selectedModelIndex,
+      },
+    };
+  }
+  if (state.selectedActionIndex === 1) {
+    return {
+      state: {
+        ...state,
+        screen: 'provider_name',
+        targetProviderId: undefined,
+        selectedActionIndex: 0,
+        form: emptyForm(),
+        error: undefined,
+      },
+    };
+  }
+  const provider = selectedProvider(state);
+  if (provider === undefined) {
+    return {
+      state: {
+        ...state,
+        screen: 'provider_name',
+        targetProviderId: undefined,
+        selectedActionIndex: 0,
+        form: emptyForm(),
+        error: undefined,
+      },
+    };
+  }
+  return {
+    state: {
+      ...withoutError(state),
+      screen: 'provider_actions',
+      targetProviderId: provider.id,
+      selectedActionIndex: 0,
+      form: {
+        ...emptyForm(),
+        providerName: provider.name,
+        baseUrl: provider.baseUrl,
+      },
     },
   };
 }
@@ -478,10 +604,12 @@ function submitModelDetails(state: ModelConfigState): ModelConfigTransition {
   return pendingSave(prepared, config, {
     returnScreen: 'model_context_window',
     selectedModelId: model.id,
-    credential: {
-      providerId: provider.id,
-      apiKey: state.form.apiKey,
-    },
+    credential: state.targetProviderId === undefined
+      ? {
+          providerId: provider.id,
+          apiKey: state.form.apiKey,
+        }
+      : undefined,
   });
 }
 
@@ -512,6 +640,8 @@ function transitionSubmit(state: ModelConfigState): ModelConfigTransition {
   switch (state.screen) {
     case 'list':
       return submitList(state);
+    case 'add_actions':
+      return submitAddAction(state);
     case 'provider_name':
       return submitProviderName(state);
     case 'provider_base_url':
@@ -559,10 +689,13 @@ function transitionSubmit(state: ModelConfigState): ModelConfigTransition {
 
 function transitionAdd(state: ModelConfigState): ModelConfigTransition {
   if (state.screen !== 'list') return {state};
+  const provider = selectedProvider(state);
   return {
     state: {
       ...state,
-      screen: 'provider_name',
+      screen: provider === undefined ? 'provider_name' : 'add_actions',
+      selectedActionIndex: 0,
+      targetProviderId: undefined,
       form: emptyForm(),
       error: undefined,
     },
@@ -612,6 +745,8 @@ function transitionEscape(state: ModelConfigState): ModelConfigTransition {
   switch (state.screen) {
     case 'list':
       return {state, effect: {type: 'close'}};
+    case 'add_actions':
+      return {state: {...createModelConfigState(state.config), selectedModelIndex: state.selectedModelIndex}};
     case 'provider_name':
       return {state: {...createModelConfigState(state.config), selectedModelIndex: state.selectedModelIndex}};
     case 'provider_base_url':
@@ -619,7 +754,9 @@ function transitionEscape(state: ModelConfigState): ModelConfigTransition {
     case 'provider_api_key':
       return {state: {...withoutError(state), screen: 'provider_base_url'}};
     case 'provider_actions':
-      return {state: {...withoutError(state), screen: 'provider_api_key'}};
+      return state.targetProviderId === undefined
+        ? {state: {...withoutError(state), screen: 'provider_api_key'}}
+        : {state: {...withoutError(state), screen: 'add_actions'}};
     case 'discovering':
       return {
         state: {...withoutError(state), screen: 'provider_actions'},
@@ -639,6 +776,26 @@ function transitionEscape(state: ModelConfigState): ModelConfigTransition {
     case 'saving':
       return {state};
   }
+}
+
+function transitionAbort(state: ModelConfigState): ModelConfigTransition {
+  if (state.screen === 'discovering') {
+    return {
+      state: {...withoutError(state), screen: 'provider_actions'},
+      effect: {type: 'abort_active'},
+    };
+  }
+  if (state.screen === 'saving') {
+    return {
+      state: {
+        ...withoutError(state),
+        screen: state.pendingSave?.returnScreen ?? 'list',
+        pendingSave: undefined,
+      },
+      effect: {type: 'abort_active'},
+    };
+  }
+  return {state};
 }
 
 function transitionDiscoverySucceeded(
@@ -708,6 +865,8 @@ export function transitionModelConfig(
       return transitionEdit(state);
     case 'delete':
       return transitionDelete(state);
+    case 'abort':
+      return transitionAbort(state);
     case 'escape':
       return transitionEscape(state);
     case 'discovery_succeeded':

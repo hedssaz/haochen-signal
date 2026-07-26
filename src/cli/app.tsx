@@ -18,6 +18,7 @@ import type {
 import {redactValue} from '../security/redact.js';
 import {
   createModelConfigState,
+  ModelConfigOperationController,
   transitionModelConfig,
   type ModelConfigAction,
   type ModelConfigController,
@@ -217,7 +218,9 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const modelConfigurationRef = useRef(props.modelConfig);
   const modelConfigStateRef = useRef<ModelConfigState | undefined>(undefined);
   const modelConfigEffectRef = useRef<(effect: ModelConfigEffect) => void>(() => undefined);
-  const modelDiscoveryController = useRef<AbortController | undefined>(undefined);
+  const modelConfigOperationController = useRef(
+    new ModelConfigOperationController(),
+  );
   const usageByModelId = useRef(new Map<string, number>());
   const inputRef = useRef('');
   const credentialInputRef = useRef('');
@@ -263,19 +266,21 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const performModelConfigEffect = useCallback((effect: ModelConfigEffect) => {
     switch (effect.type) {
       case 'close':
-        modelDiscoveryController.current?.abort();
-        modelDiscoveryController.current = undefined;
+        modelConfigOperationController.current.abort();
+        modelConfigOperationController.current.clear();
+        abortRequested.current = false;
         modelConfigStateRef.current = undefined;
         setModelConfigState(undefined);
         return;
+      case 'abort_active':
+        modelConfigOperationController.current.abort();
+        return;
       case 'cancel_discovery':
-        modelDiscoveryController.current?.abort();
-        modelDiscoveryController.current = undefined;
+        modelConfigOperationController.current.abort();
+        modelConfigOperationController.current.clear();
+        abortRequested.current = false;
         return;
       case 'discover': {
-        const controller = new AbortController();
-        modelDiscoveryController.current?.abort();
-        modelDiscoveryController.current = controller;
         if (props.modelConfigController === undefined) {
           applyModelConfigAction({
             type: 'discovery_failed',
@@ -283,35 +288,37 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
           });
           return;
         }
+        abortRequested.current = false;
+        const signal = modelConfigOperationController.current.begin('discovering');
         void props.modelConfigController.discover({
           provider: effect.provider,
           apiKey: effect.apiKey,
-          signal: controller.signal,
+          signal,
         }).then(
           modelIds => {
             if (
-              controller.signal.aborted
-              || modelDiscoveryController.current !== controller
+              signal.aborted
+              || !modelConfigOperationController.current.isCurrent(signal)
             ) return;
-            modelDiscoveryController.current = undefined;
             applyModelConfigAction({type: 'discovery_succeeded', modelIds});
           },
           error => {
             if (
-              controller.signal.aborted
-              || modelDiscoveryController.current !== controller
+              signal.aborted
+              || !modelConfigOperationController.current.isCurrent(signal)
             ) return;
-            modelDiscoveryController.current = undefined;
             applyModelConfigAction({
               type: 'discovery_failed',
               message: safeErrorMessage(
                 error,
                 '获取模型失败。',
-                [effect.apiKey],
+                effect.apiKey === undefined ? [] : [effect.apiKey],
               ),
             });
           },
-        );
+        ).finally(() => {
+          modelConfigOperationController.current.complete(signal);
+        });
         return;
       }
       case 'save': {
@@ -322,13 +329,26 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
           });
           return;
         }
+        abortRequested.current = false;
+        const signal = modelConfigOperationController.current.begin('saving');
         void props.modelConfigController.save({
           config: effect.config,
           credential: effect.credential,
+          signal,
         }).then(
           () => {
+            if (
+              signal.aborted
+              || !modelConfigOperationController.current.isCurrent(signal)
+            ) return;
             modelConfigurationRef.current = effect.config;
             setModelConfiguration(effect.config);
+            const validModelIds = new Set(
+              effect.config.models.map(candidate => candidate.id),
+            );
+            for (const id of usageByModelId.current.keys()) {
+              if (!validModelIds.has(id)) usageByModelId.current.delete(id);
+            }
             const active = effect.config.models.find(
               candidate => candidate.id === effect.config.activeModelId,
             );
@@ -342,17 +362,25 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
               config: effect.config,
             });
           },
-          error => applyModelConfigAction({
-            type: 'save_failed',
-            message: safeErrorMessage(
-              error,
-              '保存模型配置失败。',
-              effect.credential === undefined
-                ? []
-                : [effect.credential.apiKey],
-            ),
-          }),
-        );
+          error => {
+            if (
+              signal.aborted
+              || !modelConfigOperationController.current.isCurrent(signal)
+            ) return;
+            applyModelConfigAction({
+              type: 'save_failed',
+              message: safeErrorMessage(
+                error,
+                '保存模型配置失败。',
+                effect.credential === undefined
+                  ? []
+                  : [effect.credential.apiKey],
+              ),
+            });
+          },
+        ).finally(() => {
+          modelConfigOperationController.current.complete(signal);
+        });
         return;
       }
     }
@@ -645,8 +673,18 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   ]);
 
   useInput((input, key) => {
-    if (modelConfigState !== undefined) return;
     if (key.ctrl && input.toLowerCase() === 'c') {
+      if (modelConfigStateRef.current !== undefined) {
+        if (modelConfigOperationController.current.status === 'idle') {
+          void leave();
+        } else if (abortRequested.current) {
+          void leave();
+        } else {
+          abortRequested.current = true;
+          applyModelConfigAction({type: 'abort'});
+        }
+        return;
+      }
       const operation = activeOperation.current;
       if (operation === undefined) {
         void leave();
@@ -702,6 +740,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       }
       return;
     }
+    if (modelConfigState !== undefined) return;
     if (resumePicker !== undefined) {
       if (key.escape) {
         resumePickerRef.current = undefined;
@@ -774,10 +813,28 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     : visibleResumeItems(resumePicker, 8);
 
   if (modelConfigState !== undefined) {
-    return <ModelConfigView
-      state={modelConfigState}
-      onAction={applyModelConfigAction}
-    />;
+    return <Box flexDirection="column">
+      <ModelConfigView
+        state={modelConfigState}
+        onAction={applyModelConfigAction}
+      />
+      {pendingCredential === undefined ? null : <Box
+        borderStyle="round"
+        borderColor="yellow"
+        flexDirection="column"
+        marginTop={1}
+        paddingX={1}
+      >
+        <Text color="yellow">供应商凭据 · 仅本次进程</Text>
+        <Text>
+          {`${pendingCredential.provider.name ?? '模型供应商'} API Key：${'•'.repeat(Array.from(credentialInput).length)}`}
+        </Text>
+        {credentialInputError === undefined
+          ? null
+          : <Text color="red">{credentialInputError}</Text>}
+        <Text dimColor>Enter 提交 · 输入不会写入配置、会话或审计</Text>
+      </Box>}
+    </Box>;
   }
 
   return <Box flexDirection="column">

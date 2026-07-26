@@ -54,6 +54,9 @@ import {GateReporter} from './gate-reporter.js';
 import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js';
 import type {ModelClient} from '../providers/types.js';
 import type {SessionEvent} from '../sessions/types.js';
+import {createTaskInterruptionRouter} from './task-interruption.js';
+
+export {createTaskInterruptionRouter} from './task-interruption.js';
 
 const args = new Set(process.argv.slice(2));
 
@@ -296,20 +299,45 @@ async function main(): Promise<void> {
   const gateReporter = new GateReporter();
   let sessionId = createSessionId();
   await store.initialize(sessionId, currentWorkspaceId);
-  let activeInterruptionWriter: ((reason: string) => Promise<void>) | undefined;
+  const interruptionRouter = createTaskInterruptionRouter(
+    (id, event) => sessionStore.append(id, event),
+  );
   const initialModel = currentModel();
   clearTerminalScreen(process.stdout);
   const instance = render(<App
     workspace={workspace} sessionId={sessionId} model={initialModel?.modelId ?? ''} contextTokens={initialModel?.contextWindow ?? 0} sessionGrants={grants}
     modelConfig={activeConfig}
     modelConfigController={{
-      discover: request => discoverModels({
-        provider: request.provider,
-        apiKey: request.apiKey,
-        timeoutMs: activeConfig.timeoutMs,
-        signal: request.signal,
-      }),
+      discover: async request => {
+        let apiKey = request.apiKey?.trim();
+        if (!apiKey) {
+          apiKey = temporaryProviderKeys.get(request.provider.id);
+        }
+        if (!apiKey) {
+          apiKey = await resolveStartupApiKey({
+            provider: request.provider,
+            env: process.env,
+            readKeychain: readMacOsKeychain,
+            prompt: () => credentialPrompts.request(
+              request.provider,
+              request.signal,
+            ),
+          });
+        }
+        request.signal.throwIfAborted();
+        if (!apiKey) {
+          throw new Error(`未找到 ${request.provider.name} 的 API Key。`);
+        }
+        temporaryProviderKeys.set(request.provider.id, apiKey);
+        return discoverModels({
+          provider: request.provider,
+          apiKey,
+          timeoutMs: activeConfig.timeoutMs,
+          signal: request.signal,
+        });
+      },
       save: async request => {
+        request.signal.throwIfAborted();
         if (request.credential !== undefined && process.platform === 'darwin') {
           await saveMacOsKeychain(
             request.credential.apiKey,
@@ -317,7 +345,9 @@ async function main(): Promise<void> {
             process.platform,
             request.credential.providerId,
           );
+          request.signal.throwIfAborted();
         }
+        request.signal.throwIfAborted();
         await saveConfig(paths.configFile, request.config);
         if (request.credential !== undefined) {
           temporaryProviderKeys.set(
@@ -331,17 +361,14 @@ async function main(): Promise<void> {
     workspaceId={currentWorkspaceId}
     credentialPrompt={credentialPrompts}
     runTask={async function* (task, signal) {
-      const runtime = await resolveModelRuntime(signal);
       const taskSessionId = sessionId;
-      let interruptedWrite: Promise<void> | undefined;
-      const appendInterrupted = (reason: string): Promise<void> => {
-        interruptedWrite ??= sessionStore.append(taskSessionId, {
-          type: 'interrupted', at: Date.now(), reason,
-        });
-        return interruptedWrite;
-      };
-      activeInterruptionWriter = appendInterrupted;
-      yield* runAgentTask({task, model: runtime.client, modelName: runtime.model.modelId, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: runtime.client, reviewModel: runtime.model.modelId, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: runtime.model.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
+      const taskInterruption = interruptionRouter.beginTask(taskSessionId);
+      try {
+        const runtime = await resolveModelRuntime(signal);
+        yield* runAgentTask({task, model: runtime.client, modelName: runtime.model.modelId, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: runtime.client, reviewModel: runtime.model.modelId, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: runtime.model.contextWindow, appendInterrupted: taskInterruption.appendInterrupted, reportGate: event => gateReporter.report(event)});
+      } finally {
+        taskInterruption.finish();
+      }
     }}
     executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewModel: currentModel()?.modelId ?? '', signal, reportGate: event => gateReporter.report(event)})}
     compact={async (signal, onProgress) => {
@@ -349,8 +376,7 @@ async function main(): Promise<void> {
       return compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model: runtime.client, modelName: runtime.model.modelId, signal, onProgress});
     }}
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
-      if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
-      await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});
+      await interruptionRouter.appendCurrent(sessionId, reason);
     }} createSession={async () => {
       const nextSessionId = createSessionId();
       await store.initialize(nextSessionId, currentWorkspaceId);
