@@ -35,6 +35,10 @@ export interface UiState {
   transcript: UiEntry[];
   liveReasoning: string;
   liveAssistant: string;
+  usedContext: number;
+  roundUsageTotal?: number;
+  previousRoundTotal?: number;
+  showPreviousRoundUsage: boolean;
   activeTool?: {name: string; summary: string};
   error?: string;
 }
@@ -47,6 +51,7 @@ export type AgentUiEvent =
   | {type: 'status'; text: string}
   | {type: 'reasoning_delta'; text: string}
   | {type: 'assistant_delta'; text: string}
+  | {type: 'usage'; inputTokens: number; outputTokens: number}
   | {type: 'assistant_turn_finished'}
   | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
@@ -58,6 +63,7 @@ export type AgentUiEvent =
   | {type: 'error'; message: string};
 
 export type UiEvent = AgentUiEvent
+  | {type: 'task_started'}
   | {type: 'input'; input: string}
   | {type: 'notice'; entry: UiEntry; phase?: UiPhase};
 
@@ -67,6 +73,8 @@ export const initialUiState: UiState = {
   transcript: [],
   liveReasoning: '',
   liveAssistant: '',
+  usedContext: 0,
+  showPreviousRoundUsage: false,
 };
 
 const toolSummary: Record<string, string> = {
@@ -127,6 +135,14 @@ function failureDetails(result: ToolResult): string {
 }
 
 export function uiReducer(state: UiState, event: UiEvent): UiState {
+  if (event.type === 'task_started') {
+    return {
+      ...state,
+      roundUsageTotal: undefined,
+      previousRoundTotal: undefined,
+      showPreviousRoundUsage: false,
+    };
+  }
   if (event.type === 'input') return {...state, input: event.input};
   if (event.type === 'notice') {
     return append(state, event.entry, event.phase === undefined ? {} : {phase: event.phase});
@@ -134,11 +150,17 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
 
   switch (event.type) {
     case 'status':
-      return {...state, phase: 'thinking', error: undefined};
+      return {
+        ...state,
+        phase: 'thinking',
+        showPreviousRoundUsage: false,
+        error: undefined,
+      };
     case 'reasoning_delta':
       return {
         ...state,
         phase: 'thinking',
+        showPreviousRoundUsage: false,
         error: undefined,
         liveReasoning: state.liveReasoning + event.text,
       };
@@ -146,15 +168,34 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       return {
         ...state,
         phase: 'thinking',
+        showPreviousRoundUsage: false,
         error: undefined,
         liveAssistant: state.liveAssistant + event.text,
       };
-    case 'assistant_turn_finished':
-      return finalizeLiveRound(state);
+    case 'usage': {
+      const total = event.inputTokens + event.outputTokens;
+      return {
+        ...state,
+        usedContext: total,
+        roundUsageTotal: total,
+      };
+    }
+    case 'assistant_turn_finished': {
+      const finalized = finalizeLiveRound(state);
+      return {
+        ...finalized,
+        roundUsageTotal: undefined,
+        previousRoundTotal: state.roundUsageTotal,
+        showPreviousRoundUsage: false,
+      };
+    }
     case 'assistant_message': {
       const finalized = finalizeLiveRound(state);
       return append(finalized, entry('assistant', '浩宸', event.text), {
         phase: 'thinking',
+        roundUsageTotal: undefined,
+        previousRoundTotal: state.roundUsageTotal,
+        showPreviousRoundUsage: false,
         error: undefined,
       });
     }
@@ -162,6 +203,9 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       const finalized = finalizeLiveRound(state);
       return append(finalized, entry('assistant', '浩宸', event.text), {
         phase: 'idle',
+        roundUsageTotal: undefined,
+        previousRoundTotal: undefined,
+        showPreviousRoundUsage: false,
         activeTool: undefined,
         error: undefined,
       });
@@ -175,6 +219,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
         summarizeToolInput(event.name, event.input),
       ), {
         phase: 'running_tool',
+        showPreviousRoundUsage: true,
         activeTool: {name: event.name, summary},
         error: undefined,
       });
@@ -184,29 +229,34 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       if (!event.result.ok) {
         return append(state, entry('error', event.name, failureDetails(event.result)), {
           phase: 'thinking',
+          showPreviousRoundUsage: false,
           activeTool: undefined,
           error: event.result.error?.message ?? event.result.summary,
         });
       }
       return append(state, entry('result', event.name, event.result.summary), {
         phase: 'thinking',
+        showPreviousRoundUsage: false,
         activeTool: undefined,
       });
     }
     case 'review':
       return append(state, entry('review', '红眼审查', `${event.decision.risk} 风险 · ${event.decision.summary}`), {
         phase: event.decision.verdict === 'ask_user' ? 'confirming' : 'reviewing',
+        showPreviousRoundUsage: true,
       });
     case 'limit_reached': {
       const finalized = finalizeLiveRound(state);
       return append(finalized, entry('error', '达到上限', `已达到${event.limit === 'turns' ? '轮次' : '工具调用'}上限`), {
         phase: 'idle',
+        showPreviousRoundUsage: false,
       });
     }
     case 'interrupted': {
       const finalized = finalizeLiveRound(state);
       return append(finalized, entry('error', '已中止', event.reason), {
         phase: 'idle',
+        showPreviousRoundUsage: false,
         activeTool: undefined,
       });
     }
@@ -214,6 +264,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       const finalized = finalizeLiveRound(state);
       return append(finalized, entry('error', '错误', event.message), {
         phase: 'error',
+        showPreviousRoundUsage: false,
         activeTool: undefined,
         error: event.message,
       });

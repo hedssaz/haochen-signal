@@ -223,6 +223,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     activeOperation.current = {kind: 'agent', controller};
     abortRequested.current = false;
     interruptedPersisted.current = false;
+    dispatch({type: 'task_started'});
     setStreamTokenCount(0);
     setStreamPhase('thinking');
     setRuntimeStatus('正在理解任务');
@@ -507,8 +508,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       <Text>{state.liveAssistant}</Text>
     </Box>}
     <Text dimColor>
-      {`↓ ${formatTokenCount(streamTokenCount)} tokens · ${phaseLabel(streamPhase)}`}
+      {`↓ ${formatTokenCount(streamTokenCount)} tokens · ${phaseLabel(streamPhase)} · 上下文 ${formatTokenCount(state.usedContext)} / ${formatTokenCount(props.contextTokens ?? 0)}`}
     </Text>
+    {!state.showPreviousRoundUsage && pendingConfirmation === undefined ? null : <Text dimColor>
+      {state.previousRoundTotal === undefined
+        ? '↑ -- tokens · 上一轮总量未知'
+        : `↑ ${formatTokenCount(state.previousRoundTotal)} tokens · 上一轮总量`}
+    </Text>}
     {pendingConfirmation === undefined ? null : <Box flexDirection="column" marginTop={1}>
       <Text color="yellow">◉ 确认请求 · {pendingConfirmation.operation.tool}</Text>
       <Text>{`风险：${pendingConfirmation.boundary.risk}\n范围：${pendingConfirmation.boundary.normalizedScope.join(', ')}\n${pendingConfirmation.boundary.reasons.join('；')}`}</Text>

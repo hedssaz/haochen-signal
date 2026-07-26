@@ -6,6 +6,7 @@
 
 ### 新增
 
+- 新增真实模型用量底栏：代理在验证唯一合法 `finish` 后、工具执行前发布 `inputTokens + outputTokens`，常驻显示已用/最大上下文；工具、审查、确认与上传阶段显示不重复累计的上一轮总量，缺失 usage 时明确标为未知，同时保留原有每个非空流分片计 1 的 `↓ tokens` 约定。
 - 新增供应商专属凭据与模型发现：环境变量与 macOS Keychain 服务名共用稳定供应商 ID 的 UTF-16 code unit 固定四位十六进制后缀，避免原始 ID 进入服务名，并区分大小写、标点、非 ASCII 与未配对代理项；仅当 `legacy-provider` 同时引用 `legacy` 凭据时显式兼容旧服务项，Linux/Windows 使用隐藏临时输入。OpenAI-compatible `GET /models` 支持取消、超时、2 MiB 响应上限、严格 `data[].id` 校验、稳定去重排序；所有内部错误按不可变 code 重建固定消息，外部传输与响应体错误统一脱敏，恶意 getter、`toString` 或 Proxy 原型 trap 都使用不依赖 `instanceof` 的 total 安全边界。
 - 新增仅创建的安全 `write_file` 工具：复用结构化补丁的同目录临时文件、同步与原子发布链路，拒绝覆盖、越界和符号链接路径；确定性边界按规范化路径及内容 SHA-256 绑定审查范围，终端摘要与审计输入不保存文件正文。
 - 新增多模型配置、真实上下文用量和安全 `write_file` 的可执行实施计划。

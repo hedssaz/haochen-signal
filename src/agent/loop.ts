@@ -17,6 +17,7 @@ export type AgentEvent =
   | {type: 'status'; text: string}
   | {type: 'reasoning_delta'; text: string}
   | {type: 'assistant_delta'; text: string}
+  | {type: 'usage'; inputTokens: number; outputTokens: number}
   | {type: 'assistant_turn_finished'}
   | {type: 'assistant_message'; text: string}
   | {type: 'assistant_text'; text: string}
@@ -198,6 +199,16 @@ function normalizeLimit(value: number): number {
     : 0;
 }
 
+function isValidUsage(
+  usage: {inputTokens: number; outputTokens: number} | undefined,
+): usage is {inputTokens: number; outputTokens: number} {
+  return usage !== undefined
+    && Number.isInteger(usage.inputTokens)
+    && Number.isInteger(usage.outputTokens)
+    && usage.inputTokens >= 0
+    && usage.outputTokens >= 0;
+}
+
 const PURE_GREETING = /^(?:你好(?:呀|啊|哇)?|您好|嗨|哈喽|在吗|hi|hello|hey)[\s!！?？。,.，]*$/iu;
 
 function taskAllowsTools(task: string): boolean {
@@ -353,6 +364,7 @@ export async function* runAgentTask(
       let reasoningText = '';
       let assistantText = '';
       let finishReason: string | undefined;
+      let finishUsage: {inputTokens: number; outputTokens: number} | undefined;
       let finishCount = 0;
       const calls = new Map<number, PendingToolCall>();
       const callOrder: number[] = [];
@@ -391,6 +403,7 @@ export async function* runAgentTask(
           call.arguments += event.arguments ?? '';
         } else if (event.type === 'finish') {
           finishReason = event.reason;
+          finishUsage = event.usage;
           finishCount += 1;
         }
       }
@@ -418,6 +431,14 @@ export async function* runAgentTask(
           message: `模型响应协议不一致：工具调用响应以 ${finishReason} 结束`,
         };
         return;
+      }
+
+      if (isValidUsage(finishUsage)) {
+        yield {
+          type: 'usage',
+          inputTokens: finishUsage.inputTokens,
+          outputTokens: finishUsage.outputTokens,
+        };
       }
 
       if (assistantText !== '') {

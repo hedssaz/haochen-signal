@@ -60,6 +60,71 @@ describe('uiReducer', () => {
     ]);
   });
 
+  it('stores real usage once and reuses the same total across one tool batch', () => {
+    const withUsage = uiReducer(initialUiState, {
+      type: 'usage',
+      inputTokens: 12,
+      outputTokens: 3,
+    });
+    const finishedRound = uiReducer(withUsage, {type: 'assistant_turn_finished'});
+    const firstTool = uiReducer(finishedRound, {
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'README.md'},
+    });
+    const firstResult = uiReducer(firstTool, {
+      type: 'tool_finished',
+      name: 'read_file',
+      result: {ok: true, summary: 'README.md'},
+    });
+    const secondTool = uiReducer(firstResult, {
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'CHANGELOG.md'},
+    });
+
+    expect(withUsage).toMatchObject({
+      usedContext: 15,
+      roundUsageTotal: 15,
+    });
+    expect(firstTool).toMatchObject({
+      previousRoundTotal: 15,
+      showPreviousRoundUsage: true,
+    });
+    expect(secondTool).toMatchObject({
+      previousRoundTotal: 15,
+      showPreviousRoundUsage: true,
+    });
+  });
+
+  it('marks a tool round without usage as unknown and hides it on the next model stream', () => {
+    const previousKnown = {
+      ...initialUiState,
+      usedContext: 21,
+      previousRoundTotal: 21,
+      roundUsageTotal: undefined,
+    };
+    const finishedWithoutUsage = uiReducer(previousKnown, {
+      type: 'assistant_turn_finished',
+    });
+    const tool = uiReducer(finishedWithoutUsage, {
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'README.md'},
+    });
+    const nextRound = uiReducer(tool, {
+      type: 'reasoning_delta',
+      text: '继续',
+    });
+
+    expect(tool).toMatchObject({
+      usedContext: 21,
+      showPreviousRoundUsage: true,
+    });
+    expect(tool.previousRoundTotal).toBeUndefined();
+    expect(nextRound.showPreviousRoundUsage).toBe(false);
+  });
+
   it.each([
     {type: 'assistant_message', text: '最终回答'} as const,
     {type: 'assistant_text', text: '最终回答'} as const,

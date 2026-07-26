@@ -246,6 +246,74 @@ describe('main agent loop', () => {
     ]);
   });
 
+  it('emits valid finish usage before starting any tool', async () => {
+    const iterator = runAgentTask(options(scriptedModel([[
+      {
+        type: 'tool_call_delta',
+        index: 0,
+        id: 'c1',
+        name: 'read_file',
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: 'finish',
+        reason: 'tool_calls',
+        usage: {inputTokens: 12, outputTokens: 3},
+      },
+    ], textResponse('完成')])));
+
+    let usageEvent: Awaited<ReturnType<typeof iterator.next>>['value'];
+    while (true) {
+      const next = await iterator.next();
+      expect(next.done).toBe(false);
+      if (next.value?.type === 'usage') {
+        usageEvent = next.value;
+        break;
+      }
+    }
+
+    expect(usageEvent).toEqual({
+      type: 'usage',
+      inputTokens: 12,
+      outputTokens: 3,
+    });
+    expect(executeRead).not.toHaveBeenCalled();
+
+    const remaining = await collect(iterator);
+    expect(remaining).toContainEqual({
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'README.md'},
+    });
+    expect(executeRead).toHaveBeenCalledOnce();
+  });
+
+  it('does not invent a usage event when finish usage is missing or invalid', async () => {
+    const events = await collect(runAgentTask(options(scriptedModel([
+      [
+        {
+          type: 'tool_call_delta',
+          index: 0,
+          id: 'c1',
+          name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+        {type: 'finish', reason: 'tool_calls', usage: undefined},
+      ],
+      [
+        {type: 'text_delta', text: '完成'},
+        {
+          type: 'finish',
+          reason: 'stop',
+          usage: {inputTokens: -1, outputTokens: 3.5},
+        },
+      ],
+    ]))));
+
+    expect(events.some(event => event.type === 'usage')).toBe(false);
+    expect(executeRead).toHaveBeenCalledOnce();
+  });
+
   it('omits reasoning_content when a tool-call turn has no reasoning', async () => {
     const model = recordingModel([
       toolResponse([{

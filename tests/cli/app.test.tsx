@@ -34,6 +34,90 @@ describe('App', () => {
     expect(formatTokenCount(count)).toBe(expected);
   });
 
+  it('shows real context usage and one unchanged previous-round total for multiple tools', async () => {
+    let releaseTools!: () => void;
+    let releaseNextRound!: () => void;
+    const toolsGate = new Promise<void>(resolve => { releaseTools = resolve; });
+    const nextRoundGate = new Promise<void>(resolve => { releaseNextRound = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'usage', inputTokens: 12, outputTokens: 3};
+      yield {type: 'assistant_turn_finished'};
+      yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
+      yield {
+        type: 'tool_finished',
+        name: 'read_file',
+        result: {ok: true, summary: 'README.md'},
+      };
+      yield {type: 'tool_started', name: 'read_file', input: {path: 'CHANGELOG.md'}};
+      await toolsGate;
+      yield {
+        type: 'tool_finished',
+        name: 'read_file',
+        result: {ok: true, summary: 'CHANGELOG.md'},
+      };
+      yield {type: 'reasoning_delta', text: '继续'};
+      await nextRoundGate;
+      yield {type: 'assistant_text', text: '完成'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      contextTokens={128_000}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取两个文件');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('上下文 15 / 128k');
+      expect(frame).toContain('↑ 15 tokens · 上一轮总量');
+      expect(frame).not.toContain('↑ 30 tokens');
+    });
+
+    releaseTools();
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('↓ 1 tokens · 思考中 · 上下文 15 / 128k');
+      expect(frame).not.toContain('上一轮总量');
+    });
+
+    releaseNextRound();
+  });
+
+  it('shows unknown previous-round usage instead of substituting stream deltas', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'reasoning_delta', text: '分析'};
+      yield {type: 'assistant_turn_finished'};
+      yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
+      await blocked;
+      yield {type: 'assistant_text', text: '完成'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      contextTokens={128_000}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取文件');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('上下文 0 / 128k');
+      expect(frame).toContain('↑ -- tokens · 上一轮总量未知');
+      expect(frame).not.toContain('↑ 1 tokens');
+    });
+
+    release();
+  });
+
   it('renders injected agent events after submitting a task', async () => {
     const app = render(<App
       runTask={() => scriptedEvents()}
