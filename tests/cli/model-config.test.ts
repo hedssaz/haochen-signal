@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import type {HaochenConfig} from '../../src/config/schema.js';
 import {
   createModelConfigState,
+  orderedModels,
   transitionModelConfig,
   type ModelConfigAction,
   type ModelConfigState,
@@ -51,6 +52,14 @@ const config: HaochenConfig = {
   activeModelId: 'deepseek-chat',
   timeoutMs: 60_000,
 };
+const interleavedConfig: HaochenConfig = {
+  ...config,
+  models: [
+    config.models[0]!,
+    config.models[2]!,
+    config.models[1]!,
+  ],
+};
 
 function step(
   state: ModelConfigState,
@@ -79,6 +88,34 @@ describe('model configuration state machine', () => {
     expect(state.selectedModelIndex).toBe(0);
     state = step(state, {type: 'move', delta: -1});
     expect(state.selectedModelIndex).toBe(2);
+  });
+
+  it('uses provider-group display order for interleaved config models', () => {
+    expect(orderedModels(interleavedConfig).map(model => model.id)).toEqual([
+      'deepseek-chat',
+      'deepseek-reasoner',
+      'claude-opus',
+    ]);
+
+    let state = createModelConfigState(interleavedConfig);
+    state = step(state, {type: 'move', delta: 1});
+    const transition = transitionModelConfig(state, {type: 'submit'});
+
+    expect(state.selectedModelIndex).toBe(1);
+    expect(transition.effect).toMatchObject({
+      type: 'save',
+      config: {activeModelId: 'deepseek-reasoner'},
+    });
+
+    const movedUp = step(
+      createModelConfigState(interleavedConfig),
+      {type: 'move', delta: -1},
+    );
+    expect(movedUp.selectedModelIndex).toBe(2);
+    expect(transitionModelConfig(movedUp, {type: 'submit'}).effect).toMatchObject({
+      type: 'save',
+      config: {activeModelId: 'claude-opus'},
+    });
   });
 
   it('proposes an atomic active-model save on Enter and applies it only after success', () => {

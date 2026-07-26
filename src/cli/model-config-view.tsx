@@ -1,6 +1,7 @@
 import React from 'react';
 import {Box, Text, useInput} from 'ink';
 import {
+  orderedModels,
   type ModelConfigAction,
   type ModelConfigState,
 } from './model-config.js';
@@ -34,7 +35,8 @@ function InputLine(props: {
 
 function ModelList(props: ModelConfigViewProps): React.JSX.Element {
   const {state} = props;
-  if (state.config.models.length === 0) {
+  const ordered = orderedModels(state.config);
+  if (ordered.length === 0) {
     return <Box flexDirection="column">
       <Text dimColor>尚未添加模型。</Text>
       <Text color="cyan">A 添加供应商</Text>
@@ -44,7 +46,7 @@ function ModelList(props: ModelConfigViewProps): React.JSX.Element {
 
   return <Box flexDirection="column">
     {state.config.providers.map(provider => {
-      const models = state.config.models
+      const models = ordered
         .map((model, index) => ({model, index}))
         .filter(item => item.model.providerId === provider.id);
       if (models.length === 0) return null;

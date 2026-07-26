@@ -35,6 +35,38 @@ const populatedConfig: HaochenConfig = {
   activeModelId: 'deepseek-chat',
   timeoutMs: 60_000,
 };
+const interleavedConfig: HaochenConfig = {
+  version: 2,
+  providers: [
+    populatedConfig.providers[0]!,
+    {
+      id: 'anthropic',
+      name: 'Anthropic',
+      baseUrl: 'https://api.anthropic.test/v1',
+      credentialRef: 'anthropic',
+      headers: {},
+    },
+  ],
+  models: [
+    populatedConfig.models[0]!,
+    {
+      id: 'claude-opus',
+      providerId: 'anthropic',
+      modelId: 'claude-opus',
+      displayName: 'Claude Opus',
+      contextWindow: 200_000,
+    },
+    {
+      id: 'deepseek-reasoner',
+      providerId: 'deepseek',
+      modelId: 'deepseek-reasoner',
+      displayName: 'DeepSeek Reasoner',
+      contextWindow: 128_000,
+    },
+  ],
+  activeModelId: 'deepseek-chat',
+  timeoutMs: 60_000,
+};
 
 function StatefulView(props: {initial: ModelConfigState}) {
   const [state, setState] = React.useState(props.initial);
@@ -68,6 +100,22 @@ describe('ModelConfigView', () => {
     expect(app.lastFrame()).toContain('128k');
     expect(app.lastFrame()).toContain('当前');
     expect(app.lastFrame()).toContain('A 添加供应商  E 编辑  D 删除  Enter 切换');
+  });
+
+  it('renders and selects interleaved models in the same provider-group order', () => {
+    let state = createModelConfigState(interleavedConfig);
+    state = transitionModelConfig(state, {type: 'move', delta: 1}).state;
+    const app = render(<ModelConfigView state={state} onAction={vi.fn()}/>);
+    const frame = app.lastFrame() ?? '';
+
+    expect(frame.indexOf('DeepSeek Chat')).toBeLessThan(
+      frame.indexOf('DeepSeek Reasoner'),
+    );
+    expect(frame.indexOf('DeepSeek Reasoner')).toBeLessThan(
+      frame.indexOf('Claude Opus'),
+    );
+    expect(frame).toContain('› ○ DeepSeek Reasoner');
+    expect(frame).not.toContain('› ○ Claude Opus');
   });
 
   it('renders API Key input as bullets rather than plaintext', async () => {

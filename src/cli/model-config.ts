@@ -109,9 +109,18 @@ const emptyForm = (): ModelConfigForm => ({
   contextWindow: '128000',
 });
 
+export function orderedModels(
+  config: Pick<HaochenConfig, 'providers' | 'models'>,
+): ModelProfile[] {
+  return config.providers.flatMap(provider => config.models.filter(
+    model => model.providerId === provider.id,
+  ));
+}
+
 function activeIndex(config: HaochenConfig): number {
-  if (config.models.length === 0) return -1;
-  const index = config.models.findIndex(model => model.id === config.activeModelId);
+  const models = orderedModels(config);
+  if (models.length === 0) return -1;
+  const index = models.findIndex(model => model.id === config.activeModelId);
   return index < 0 ? 0 : index;
 }
 
@@ -134,7 +143,7 @@ function wrap(index: number, delta: number, length: number): number {
 }
 
 function selectedModel(state: ModelConfigState): ModelProfile | undefined {
-  return state.config.models[state.selectedModelIndex];
+  return orderedModels(state.config)[state.selectedModelIndex];
 }
 
 function withError(state: ModelConfigState, error: string): ModelConfigTransition {
@@ -296,17 +305,19 @@ function transitionMove(
   delta: -1 | 1,
 ): ModelConfigTransition {
   switch (state.screen) {
-    case 'list':
+    case 'list': {
+      const models = orderedModels(state.config);
       return {
         state: {
           ...state,
           selectedModelIndex: wrap(
             state.selectedModelIndex,
             delta,
-            state.config.models.length,
+            models.length,
           ),
         },
       };
+    }
     case 'provider_actions':
       return {
         state: {
@@ -664,14 +675,15 @@ function transitionSaveSucceeded(
   if (state.screen !== 'saving') return {state};
   const parsed = parseConfig(config);
   const selectedId = state.pendingSave?.selectedModelId ?? parsed.activeModelId;
+  const models = orderedModels(parsed);
   const selectedIndex = selectedId === undefined
-    ? (parsed.models.length === 0 ? -1 : 0)
-    : parsed.models.findIndex(model => model.id === selectedId);
+    ? (models.length === 0 ? -1 : 0)
+    : models.findIndex(model => model.id === selectedId);
   return {
     state: {
       ...createModelConfigState(parsed),
       selectedModelIndex: selectedIndex < 0
-        ? (parsed.models.length === 0 ? -1 : 0)
+        ? (models.length === 0 ? -1 : 0)
         : selectedIndex,
     },
   };
