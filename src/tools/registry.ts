@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import type {
   ModelClient,
   ToolDefinition,
@@ -56,6 +57,50 @@ interface AuditDetails {
   confirmation?: ConfirmationResult;
   sessionGrant?: boolean;
   result: ToolResult;
+}
+
+function auditInput(tool: string, input: unknown): unknown {
+  if (tool !== 'write_file'
+    || input === null
+    || typeof input !== 'object'
+    || Array.isArray(input)) {
+    return input;
+  }
+  const pathDescriptor = Object.getOwnPropertyDescriptor(input, 'path');
+  const contentDescriptor = Object.getOwnPropertyDescriptor(input, 'content');
+  const path = pathDescriptor?.get === undefined
+    && pathDescriptor?.set === undefined
+    && typeof pathDescriptor?.value === 'string'
+    ? pathDescriptor.value
+    : undefined;
+  const content = contentDescriptor?.get === undefined
+    && contentDescriptor?.set === undefined
+    && typeof contentDescriptor?.value === 'string'
+    ? contentDescriptor.value
+    : undefined;
+  return {
+    ...(path === undefined ? {} : {path}),
+    ...(content === undefined
+      ? {}
+      : {
+          contentLength: Array.from(content).length,
+          contentSha256: createHash('sha256').update(content).digest('hex'),
+        }),
+  };
+}
+
+function auditReview(
+  tool: string,
+  review: ReviewDecision,
+  classification?: BoundaryDecision,
+): unknown {
+  if (tool !== 'write_file') return review;
+  return {
+    verdict: review.verdict,
+    risk: review.risk,
+    affected_scope: classification?.normalizedScope ?? [],
+    freeformOmitted: true,
+  };
 }
 
 function failure(code: string, message: string): ToolResult {
@@ -166,7 +211,7 @@ export class ToolRegistry {
     const rawEntry: AuditEntry = {
       at: Date.now(),
       tool: name,
-      input: details.input,
+      input: auditInput(name, details.input),
       decision: details.decision,
       ...(details.classification === undefined
         ? {}
@@ -174,7 +219,15 @@ export class ToolRegistry {
       ...(details.finalClassification === undefined
         ? {}
         : {finalClassification: details.finalClassification}),
-      ...(details.review === undefined ? {} : {review: details.review}),
+      ...(details.review === undefined
+        ? {}
+        : {
+            review: auditReview(
+              name,
+              details.review,
+              details.classification,
+            ),
+          }),
       ...(details.confirmation === undefined
         ? {}
         : {confirmation: details.confirmation}),

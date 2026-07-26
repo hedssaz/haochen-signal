@@ -859,5 +859,7 @@ describe('main agent system prompt', () => {
     expect(prompt).toContain('不要为了了解工作区主动扫描');
     expect(prompt).toContain('决定需要工具后立即调用');
     expect(prompt).toContain('禁止重复规划');
+    expect(prompt).toContain('新建文件使用 write_file');
+    expect(prompt).toContain('已有文件使用 apply_patch');
   });
 });

@@ -6,6 +6,7 @@ import {
 } from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {createHash} from 'node:crypto';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {z} from 'zod';
 import {scriptedModel} from '../helpers/scripted-model.js';
@@ -143,6 +144,98 @@ describe('tool execution registry', () => {
     });
     expect(classify).not.toHaveBeenCalled();
     expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it('registers write_file with an exact model and runtime schema', async () => {
+    const originalArgv = process.argv;
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    process.argv = [...process.argv, '--help'];
+    vi.resetModules();
+
+    try {
+      const cli = await import('../../src/cli/index.js') as unknown as {
+        toolDefinitions?: () => Map<string, ToolDefinitionSpec<unknown, unknown>>;
+      };
+      expect(cli.toolDefinitions).toBeTypeOf('function');
+      if (typeof cli.toolDefinitions !== 'function') return;
+
+      const definition = cli.toolDefinitions().get('write_file');
+      expect(definition).toBeDefined();
+      expect(definition?.description).toContain('新文件');
+      expect(definition?.jsonSchema).toEqual({
+        type: 'object',
+        properties: {
+          path: {type: 'string'},
+          content: {type: 'string'},
+        },
+        required: ['path', 'content'],
+        additionalProperties: false,
+      });
+      expect(definition?.inputSchema.safeParse({
+        path: 'src/new.ts',
+        content: 'export {};\n',
+      }).success).toBe(true);
+      expect(definition?.inputSchema.safeParse({
+        path: 'src/new.ts',
+        content: 'x',
+        overwrite: true,
+      }).success).toBe(false);
+    } finally {
+      process.argv = originalArgv;
+      write.mockRestore();
+    }
+  });
+
+  it('stores only write_file path, length and digest in the audit record', async () => {
+    const content = 'private contents that must not reach the audit';
+    const writeDefinition: ToolDefinitionSpec<unknown, unknown> = {
+      name: 'write_file',
+      description: '创建新文件',
+      inputSchema: z.strictObject({
+        path: z.string(),
+        content: z.string(),
+      }),
+      jsonSchema: {type: 'object'},
+      execute: executeTool,
+    };
+    tools = new Map([['write_file', writeDefinition]]);
+    executeTool.mockResolvedValue({
+      ok: true,
+      summary: '已创建文件 new.ts',
+      data: {path: 'new.ts', additions: 1, bytesWritten: 46},
+    });
+    review = vi.fn(async () => ({
+      verdict: 'ask_user' as const,
+      risk: 'high' as const,
+      summary: content,
+      reasons: [content],
+      affected_scope: [content],
+      constraints: [content],
+    }));
+
+    const result = await registry().execute(
+      'write_file',
+      {path: 'new.ts', content},
+      executionContext,
+    );
+    const auditText = await readFile(
+      audit.pathFor(workspaceId(workspace)),
+      'utf8',
+    );
+    const auditEntry = JSON.parse(auditText) as Record<string, unknown>;
+    const digest = createHash('sha256').update(content).digest('hex');
+
+    expect(result.ok).toBe(true);
+    expect(auditText).not.toContain(content);
+    expect(auditText).toContain(digest);
+    expect(auditText).toContain('"contentLength":46');
+    expect(auditText).toContain('"path":"new.ts"');
+    expect(auditEntry.review).toEqual({
+      verdict: 'ask_user',
+      risk: 'high',
+      affected_scope: [`write:new.ts:sha256:${digest}`],
+      freeformOmitted: true,
+    });
   });
 
   it.each([0, 11, 1.5])('rejects an invalid web search limit before classification: %s', async (limit) => {

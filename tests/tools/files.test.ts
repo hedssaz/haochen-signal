@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {writeFileSync} from 'node:fs';
+import {readdirSync, statSync, writeFileSync} from 'node:fs';
 import {
   chmod,
   link as linkFile,
@@ -23,6 +23,7 @@ import {
   listFiles,
   readFileTool,
   searchText,
+  writeFile as writeFileTool,
 } from '../../src/tools/files.js';
 import type {PatchFileOperations} from '../../src/tools/files.js';
 import type {ToolContext} from '../../src/tools/types.js';
@@ -437,6 +438,162 @@ describe('workspace file tools', () => {
     await expect(readFile(join(workspace, 'exists.txt'), 'utf8')).resolves.toBe(
       'original',
     );
+  });
+
+  it('atomically creates a new UTF-8 file and reports its size', async () => {
+    const content = '第一行\nsecond 😀\n';
+    let targetWasHiddenUntilPublish = false;
+
+    const result = await writeFileTool({
+      path: 'created.txt',
+      content,
+    }, context, signal, {
+      link: async (temporaryPath, targetPath) => {
+        await expect(readFile(targetPath, 'utf8')).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(readFile(temporaryPath, 'utf8')).resolves.toBe(content);
+        targetWasHiddenUntilPublish = true;
+        await linkFile(temporaryPath, targetPath);
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      data: {
+        path: 'created.txt',
+        additions: 2,
+        bytesWritten: Buffer.byteLength(content, 'utf8'),
+      },
+    });
+    expect(targetWasHiddenUntilPublish).toBe(true);
+    await expect(readFile(join(workspace, 'created.txt'), 'utf8')).resolves.toBe(
+      content,
+    );
+    await expect(readdir(workspace)).resolves.toEqual(['created.txt']);
+  });
+
+  it('refuses to overwrite an existing file with write_file', async () => {
+    await writeFile(join(workspace, 'exists.txt'), 'original');
+
+    const result = await writeFileTool({
+      path: 'exists.txt',
+      content: 'replacement',
+    }, context, signal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'FILE_EXISTS'},
+    });
+    await expect(readFile(join(workspace, 'exists.txt'), 'utf8')).resolves.toBe(
+      'original',
+    );
+  });
+
+  it('leaves no target or temp file when write_file sync fails', async () => {
+    const result = await writeFileTool({
+      path: 'atomic.txt',
+      content: 'complete contents',
+    }, context, signal, {
+      sync: async () => {
+        throw new Error('sync failed');
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'FILE_OPERATION_FAILED'},
+    });
+    await expect(readdir(workspace)).resolves.toEqual([]);
+  });
+
+  it('does not create a file when write_file is already canceled', async () => {
+    const controller = new AbortController();
+    controller.abort('取消创建');
+
+    const result = await writeFileTool({
+      path: 'canceled.txt',
+      content: 'must not be written',
+    }, context, controller.signal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    await expect(readdir(workspace)).resolves.toEqual([]);
+  });
+
+  it('removes the temp file when write_file is canceled before publish', async () => {
+    const controller = new AbortController();
+    const result = await writeFileTool({
+      path: 'canceled-during-sync.txt',
+      content: 'must not be published',
+    }, context, controller.signal, {
+      sync: async file => {
+        await file.sync();
+        controller.abort('同步后取消');
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    await expect(readdir(workspace)).resolves.toEqual([]);
+  });
+
+  it('rechecks cancellation immediately after the final target validation', async () => {
+    const controller = new AbortController();
+    const cancelDuringFinalValidation: ToolContext = {
+      tempDir: context.tempDir,
+      get workspace() {
+        if (readdirSync(workspace).some(name => (
+          name.includes('.haochen-')
+          && statSync(join(workspace, name)).size > 0
+        ))) {
+          controller.abort('最终目标复核期间取消');
+        }
+        return workspace;
+      },
+    };
+
+    const result = await writeFileTool({
+      path: 'last-moment-cancel.txt',
+      content: 'must not be published',
+    }, cancelDuringFinalValidation, controller.signal);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: {code: 'ABORTED'},
+    });
+    await expect(readdir(workspace)).resolves.toEqual([]);
+  });
+
+  it('rejects write_file traversal and symlink escapes', async () => {
+    const outsideDirectory = join(tempDirectory, 'outside');
+    await mkdir(outsideDirectory);
+    const outsideTarget = join(outsideDirectory, 'target.txt');
+    await writeFile(outsideTarget, 'outside');
+    await symlink(outsideDirectory, join(workspace, 'linked-directory'));
+    await symlink(outsideTarget, join(workspace, 'linked-target.txt'));
+
+    for (const path of [
+      '../outside/new.txt',
+      'linked-directory/new.txt',
+      'linked-target.txt',
+    ]) {
+      const result = await writeFileTool({
+        path,
+        content: 'must not escape',
+      }, context, signal);
+
+      expect(result).toMatchObject({
+        ok: false,
+        error: {code: 'PATH_BOUNDARY'},
+      });
+    }
+    await expect(readFile(outsideTarget, 'utf8')).resolves.toBe('outside');
+    await expect(readdir(outsideDirectory)).resolves.toEqual(['target.txt']);
   });
 
   it('rejects invalid add content before creating the file', async () => {

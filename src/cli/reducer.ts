@@ -73,6 +73,7 @@ const toolSummary: Record<string, string> = {
   list_files: '扫描信号',
   search_text: '扫描信号',
   read_file: '读取碎片',
+  write_file: '创建文件',
   apply_patch: '修改节点',
   run_command: '执行验证',
   git_status: '读取 Git 状态',

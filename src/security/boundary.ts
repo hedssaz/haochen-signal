@@ -32,6 +32,7 @@ const KNOWN_TOOLS = new Set([
   'list_files',
   'search_text',
   'read_file',
+  'write_file',
   'apply_patch',
   'run_command',
   'git_status',
@@ -1477,6 +1478,29 @@ async function normalizePatch(
   };
 }
 
+async function normalizeWriteFile(
+  value: unknown,
+  context: BoundaryContext,
+): Promise<NormalizedOperation> {
+  const input = record(value, 'write_file input');
+  onlyKeys(input, ['path', 'content'], 'write_file input');
+  const path = await normalizePath(context, input.path, 'new');
+  if (typeof input.content !== 'string') {
+    inputError('content 必须是字符串');
+  }
+  const content = input.content;
+  const digest = createHash('sha256').update(content).digest('hex');
+  return {
+    input: {path, content},
+    scope: [`write:${path}:sha256:${digest}`],
+    confirmReasons: sensitivePath(path)
+      ? ['创建目标是凭据或敏感配置文件']
+      : [],
+    reviewReasons: ['工作区内创建新文件需要审查'],
+    allowReason: '工作区新文件创建已完成审查',
+  };
+}
+
 function normalizeGitTool(
   tool: string,
   value: unknown,
@@ -1564,6 +1588,9 @@ async function normalizeOperation(
   }
   if (operation.tool === 'apply_patch') {
     return normalizePatch(operation.input, context);
+  }
+  if (operation.tool === 'write_file') {
+    return normalizeWriteFile(operation.input, context);
   }
   if (operation.tool === 'run_command') {
     return normalizeCommand(operation.input, context);

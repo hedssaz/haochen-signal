@@ -115,6 +115,26 @@ describe('uiReducer', () => {
     });
   });
 
+  it('maps write_file to a creation entry without exposing its content', () => {
+    const state = uiReducer(initialUiState, {
+      type: 'tool_started',
+      name: 'write_file',
+      input: {path: 'src/new.ts', content: 'private contents'},
+    });
+
+    expect(state).toMatchObject({
+      phase: 'running_tool',
+      activeTool: {name: 'write_file', summary: '创建文件'},
+    });
+    expect(state.transcript.at(-1)).toMatchObject({
+      kind: 'tool',
+      title: 'write_file',
+      text: '创建文件',
+      detail: '{"path":"src/new.ts","contentLength":16}',
+    });
+    expect(JSON.stringify(state)).not.toContain('private contents');
+  });
+
   it('renders a failed command without a completion mark', () => {
     const state = uiReducer(initialUiState, {
       type: 'tool_finished',

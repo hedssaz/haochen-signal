@@ -87,6 +87,18 @@ export interface ApplyPatchInput {
   operations: PatchOperation[];
 }
 
+export interface WriteFileInput {
+  path: string;
+  content: string;
+}
+
+export interface WriteFileOutput {
+  path: string;
+  additions: number;
+  bytesWritten: number;
+  warnings?: string[];
+}
+
 export interface FileChange {
   path: string;
   type: PatchOperation['type'];
@@ -1242,6 +1254,7 @@ async function assertAddTargetUnchanged(
 async function executeAdd(
   operation: PlannedAdd,
   context: ToolContext,
+  signal: AbortSignal,
   fileOperations: PatchFileOperations,
 ): Promise<ExecutedChange> {
   await assertAddTargetUnchanged(operation, context);
@@ -1255,7 +1268,9 @@ async function executeAdd(
     fileOperations,
   );
   try {
+    assertNotAborted(signal);
     await assertAddTargetUnchanged(operation, context);
+    assertNotAborted(signal);
     await fileOperations.link(temp.absolute, operation.resolved.absolute);
   } catch (error) {
     await removeTempFile(temp.absolute, fileOperations);
@@ -1471,7 +1486,12 @@ export async function applyPatch(
       assertNotAborted(signal);
       let executed: ExecutedChange;
       if (operation.type === 'add') {
-        executed = await executeAdd(operation, context, fileOperations);
+        executed = await executeAdd(
+          operation,
+          context,
+          signal,
+          fileOperations,
+        );
       } else if (operation.type === 'update') {
         executed = await executeUpdate(operation, context, fileOperations);
       } else {
@@ -1491,4 +1511,49 @@ export async function applyPatch(
   } catch (error) {
     return failure(error, signal);
   }
+}
+
+export async function writeFile(
+  input: WriteFileInput,
+  context: ToolContext,
+  signal: AbortSignal,
+  fileOperationOverrides: Partial<PatchFileOperations> = {},
+): Promise<ToolResult<WriteFileOutput>> {
+  const result = await applyPatch({
+    operations: [{
+      type: 'add',
+      path: input.path,
+      content: input.content,
+    }],
+  }, context, signal, fileOperationOverrides);
+  if (!result.ok) {
+    return {
+      ok: false,
+      summary: result.summary,
+      ...(result.error === undefined ? {} : {error: result.error}),
+      ...(result.warnings === undefined ? {} : {warnings: result.warnings}),
+      ...(result.truncated === undefined
+        ? {}
+        : {truncated: result.truncated}),
+    };
+  }
+
+  const change = result.data?.changes[0];
+  if (change === undefined) {
+    return failure(
+      new FileToolError('FILE_OPERATION_FAILED', '创建文件未返回变更结果'),
+      signal,
+    );
+  }
+  return success(
+    `已创建文件 ${change.path}`,
+    {
+      path: change.path,
+      additions: change.additions,
+      bytesWritten: Buffer.byteLength(input.content, 'utf8'),
+      ...(result.data?.warnings === undefined
+        ? {}
+        : {warnings: result.data.warnings}),
+    },
+  );
 }

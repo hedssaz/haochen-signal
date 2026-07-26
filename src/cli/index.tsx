@@ -18,7 +18,13 @@ import {createSessionId, SessionStore} from '../sessions/store.js';
 import {createSerializedSessionStore} from '../sessions/serialized-store.js';
 import {ToolRegistry} from '../tools/registry.js';
 import type {ToolDefinitionSpec} from '../tools/types.js';
-import {listFiles, searchText, readFileTool, applyPatch} from '../tools/files.js';
+import {
+  applyPatch,
+  listFiles,
+  readFileTool,
+  searchText,
+  writeFile,
+} from '../tools/files.js';
 import {runCommand} from '../tools/command.js';
 import {gitStatus, gitDiff, gitLog} from '../tools/git.js';
 import {webSearch, webFetch} from '../tools/web.js';
@@ -54,6 +60,7 @@ export function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unkno
     {name: 'list_files', description: '列出工作区文件', inputSchema: z.object({path: z.string().optional()}).strict(), jsonSchema: objectSchema({path: {type: 'string'}}), execute: (i, c, s) => listFiles(i as {path?: string}, c, s)},
     {name: 'search_text', description: '搜索工作区文本', inputSchema: z.object({query: z.string(), path: z.string().optional(), maxMatches: z.number().int().optional()}).strict(), jsonSchema: objectSchema({query: {type: 'string'}, path: {type: 'string'}, maxMatches: {type: 'integer'}}, ['query']), execute: (i, c, s) => searchText(i as {query: string; path?: string; maxMatches?: number}, c, s)},
     {name: 'read_file', description: '读取工作区文本文件；续读时保持 path、startLine、endLine 与上一页一致，并将上一页 nextCharacter 作为 startCharacter', inputSchema: z.object({path: z.string(), startLine: z.number().int().optional(), endLine: z.number().int().optional(), startCharacter: z.number().int().min(0).optional(), maxCharacters: z.number().int().min(1).max(65_536).optional()}).strict(), jsonSchema: objectSchema({path: {type: 'string'}, startLine: {type: 'integer'}, endLine: {type: 'integer'}, startCharacter: {type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER}, maxCharacters: {type: 'integer', minimum: 1, maximum: 65_536}}, ['path']), execute: (i, c, s) => readFileTool(i as {path: string; startLine?: number; endLine?: number; startCharacter?: number; maxCharacters?: number}, c, s)},
+    {name: 'write_file', description: '创建工作区内的新文件；目标已存在时拒绝覆盖', inputSchema: z.object({path: z.string(), content: z.string()}).strict(), jsonSchema: objectSchema({path: {type: 'string'}, content: {type: 'string'}}, ['path', 'content']), execute: (i, c, s) => writeFile(i as {path: string; content: string}, c, s)},
     {name: 'apply_patch', description: '通过结构化补丁修改工作区文件', inputSchema: z.object({operations: z.array(z.discriminatedUnion('type', [z.object({type: z.literal('add'), path: z.string(), content: z.string()}).strict(), z.object({type: z.literal('update'), path: z.string(), expected: z.string(), replacement: z.string()}).strict(), z.object({type: z.literal('delete'), path: z.string(), sha256: z.string()}).strict()]))}).strict(), jsonSchema: objectSchema({operations: {type: 'array'}}, ['operations']), execute: (i, c, s) => applyPatch(i as never, c, s)},
     {name: 'run_command', description: '执行前台命令', inputSchema: z.object({command: z.string(), args: z.array(z.string()).optional(), cwd: z.string().optional(), shell: z.boolean().optional(), timeoutMs: z.number().int().optional(), maxOutputBytes: z.number().int().optional()}).strict(), jsonSchema: objectSchema({command: {type: 'string'}, args: {type: 'array', items: {type: 'string'}}, cwd: {type: 'string'}, shell: {type: 'boolean'}, timeoutMs: {type: 'integer'}, maxOutputBytes: {type: 'integer'}}, ['command']), execute: (i, c, s) => runCommand(i as never, c, s)},
     {name: 'git_status', description: '读取 Git 状态', inputSchema: z.object({}).strict(), jsonSchema: objectSchema({}), execute: (_i, c, s) => gitStatus(c, s)},

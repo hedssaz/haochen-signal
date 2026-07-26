@@ -20,6 +20,28 @@ function patchSummary(input: unknown): unknown {
   };
 }
 
+function writeFileSummary(input: unknown): unknown {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return {input: '[无法摘要]'};
+  }
+  const pathDescriptor = Object.getOwnPropertyDescriptor(input, 'path');
+  const contentDescriptor = Object.getOwnPropertyDescriptor(input, 'content');
+  const path = pathDescriptor?.get === undefined
+    && pathDescriptor?.set === undefined
+    && typeof pathDescriptor?.value === 'string'
+    ? redactValue(pathDescriptor.value)
+    : undefined;
+  const contentLength = contentDescriptor?.get === undefined
+    && contentDescriptor?.set === undefined
+    && typeof contentDescriptor?.value === 'string'
+    ? Array.from(contentDescriptor.value).length
+    : undefined;
+  return {
+    ...(path === undefined ? {} : {path}),
+    ...(contentLength === undefined ? {} : {contentLength}),
+  };
+}
+
 function safeJson(value: unknown): string {
   try {
     const serialized = JSON.stringify(value);
@@ -41,7 +63,10 @@ export function summarizeToolInput(
   input: unknown,
   limit = 240,
 ): string {
-  const redacted = redactValue(input);
-  const summarized = tool === 'apply_patch' ? patchSummary(redacted) : redacted;
+  const summarized = tool === 'write_file'
+    ? writeFileSummary(input)
+    : tool === 'apply_patch'
+      ? patchSummary(redactValue(input))
+      : redactValue(input);
   return truncateCodePoints(safeJson(summarized), Math.max(0, Math.floor(limit)));
 }

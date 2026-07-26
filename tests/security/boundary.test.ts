@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {mkdtemp, mkdir, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -157,10 +158,57 @@ describe('classifyOperation', () => {
           }],
         },
       },
+      {
+        tool: 'write_file',
+        input: {
+          path: 'linked/new.ts',
+          content: 'x',
+        },
+      },
     ]) {
       const decision = await classifyOperation(operation, context);
       expect(decision.action).toBe('deny');
       expect(decision.risk).toBe('high');
+    }
+  });
+
+  it('reviews write_file and binds its normalized path and content digest', async () => {
+    const content = 'export const signal = "浩宸";\n';
+    const digest = createHash('sha256').update(content).digest('hex');
+    const first = await classifyOperation({
+      tool: 'write_file',
+      input: {path: 'src/new.ts', content},
+    }, context);
+    const changed = await classifyOperation({
+      tool: 'write_file',
+      input: {path: 'src/new.ts', content: `${content}// changed\n`},
+    }, context);
+
+    expect(first).toMatchObject({
+      action: 'review',
+      risk: 'medium',
+      normalizedScope: [`write:src/new.ts:sha256:${digest}`],
+    });
+    expect(first.fingerprint).not.toBe(changed.fingerprint);
+    expect(first.normalizedScope).not.toEqual(changed.normalizedScope);
+    expect(JSON.stringify(first)).not.toContain(content);
+  });
+
+  it('confirms write_file for a sensitive path and denies malformed input', async () => {
+    expect((await classifyOperation({
+      tool: 'write_file',
+      input: {path: '.env.local', content: 'TOKEN=value\n'},
+    }, context)).action).toBe('confirm');
+
+    for (const input of [
+      {path: 'src/new.ts', content: 42},
+      {path: 'src/new.ts', content: 'x', unexpected: true},
+      {path: '../outside.ts', content: 'x'},
+    ]) {
+      expect((await classifyOperation({
+        tool: 'write_file',
+        input,
+      }, context)).action).toBe('deny');
     }
   });
 
