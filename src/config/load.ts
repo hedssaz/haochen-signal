@@ -36,11 +36,12 @@ export async function saveConfig(
 ): Promise<void> {
   const directory = dirname(path);
   const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
+  const persistentConfig = parseConfig(config);
 
   await files.mkdir(directory, {recursive: true});
 
   try {
-    await files.writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
+    await files.writeFile(temporaryPath, `${JSON.stringify(persistentConfig, null, 2)}\n`, {
       encoding: 'utf8',
       mode: 0o600,
     });
