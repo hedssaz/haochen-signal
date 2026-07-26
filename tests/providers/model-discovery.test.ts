@@ -165,6 +165,30 @@ describe('discoverModels', () => {
     expect((error as Error).message).not.toContain(API_KEY);
   });
 
+  it('rebuilds and sanitizes a previously returned internal error after its message is mutated', async () => {
+    const invalidFetch = mockFetch(async () => new Response(
+      JSON.stringify({data: []}),
+    ));
+    const previous = await discoverModels(options(invalidFetch)).catch(
+      (caught: unknown) => caught,
+    ) as ModelDiscoveryError;
+    expect(previous.code).toBe('INVALID_RESPONSE');
+    previous.message = API_KEY;
+
+    const injectedFetch = mockFetch(async () => {
+      throw previous;
+    });
+    const error = await discoverModels(options(injectedFetch)).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(ModelDiscoveryError);
+    expect(error).not.toBe(previous);
+    expect((error as ModelDiscoveryError).code).toBe('TRANSPORT_ERROR');
+    expect((error as ModelDiscoveryError).message).not.toContain(API_KEY);
+    expect(Object.getOwnPropertyDescriptor(error, 'code')?.writable).toBe(false);
+  });
+
   it('accepts a JSON response exactly at the 2 MiB limit', async () => {
     const body = sizedModelList(TWO_MEBIBYTES);
     expect(Buffer.byteLength(body)).toBe(TWO_MEBIBYTES);

@@ -58,7 +58,8 @@ describe('resolveApiKey', () => {
     await expect(resolveApiKey({
       provider: deepSeekProvider,
       env: {
-        HAOCHEN_PROVIDER_646565707365656B_API_KEY: '  provider-env-value  ',
+        HAOCHEN_PROVIDER_0064006500650070007300650065006B_API_KEY:
+          '  provider-env-value  ',
         HAOCHEN_API_KEY: 'legacy-env-value',
       },
       readKeychain: keychain,
@@ -91,7 +92,7 @@ describe('resolveApiKey', () => {
       prompt: async () => 'prompt-value',
     })).resolves.toBe('provider-keychain-value');
 
-    expect(readKeychain).toHaveBeenCalledWith('deepseek');
+    expect(readKeychain).toHaveBeenCalledWith('deepseek', false);
   });
 
   it('keeps the generic environment variable for migrated legacy credentials', async () => {
@@ -103,6 +104,19 @@ describe('resolveApiKey', () => {
     })).resolves.toBe('legacy-value');
   });
 
+  it('explicitly allows Keychain fallback only for the complete legacy identity', async () => {
+    const readKeychain = vi.fn(async () => 'legacy-keychain-value');
+
+    await expect(resolveApiKey({
+      provider: {id: 'legacy-provider', credentialRef: 'legacy'},
+      env: {},
+      readKeychain,
+      prompt: async () => 'prompt-value',
+    })).resolves.toBe('legacy-keychain-value');
+
+    expect(readKeychain).toHaveBeenCalledWith('legacy-provider', true);
+  });
+
   it('does not treat a legacy credentialRef as the legacy provider identity', async () => {
     await expect(resolveApiKey({
       provider: {id: 'not-legacy', credentialRef: 'legacy'},
@@ -111,12 +125,28 @@ describe('resolveApiKey', () => {
       prompt: async () => 'temporary-value',
     })).resolves.toBe('temporary-value');
   });
+
+  it('requires both legacy provider ID and credentialRef for the generic environment fallback', async () => {
+    const readKeychain = vi.fn(async () => undefined);
+
+    await expect(resolveApiKey({
+      provider: {
+        id: 'legacy-provider',
+        credentialRef: 'not-legacy',
+      },
+      env: {HAOCHEN_API_KEY: 'legacy-value'},
+      readKeychain,
+      prompt: async () => 'temporary-value',
+    })).resolves.toBe('temporary-value');
+
+    expect(readKeychain).toHaveBeenCalledWith('legacy-provider', false);
+  });
 });
 
 describe('providerApiKeyEnvironmentVariable', () => {
   it.each([
-    ['deepseek', 'HAOCHEN_PROVIDER_646565707365656B_API_KEY'],
-    ['中文', 'HAOCHEN_PROVIDER_E4B8ADE69687_API_KEY'],
+    ['deepseek', 'HAOCHEN_PROVIDER_0064006500650070007300650065006B_API_KEY'],
+    ['中文', 'HAOCHEN_PROVIDER_4E2D6587_API_KEY'],
   ])('maps stable provider ID %j to %s', (providerId, expected) => {
     expect(providerApiKeyEnvironmentVariable(providerId)).toBe(expected);
   });
@@ -133,6 +163,21 @@ describe('providerApiKeyEnvironmentVariable', () => {
     expect(names).toEqual(names.map(name => expect.stringMatching(
       /^HAOCHEN_PROVIDER_[0-9A-F]+_API_KEY$/,
     )));
+  });
+
+  it('does not collapse unpaired surrogates into the replacement character', () => {
+    const names = [
+      '\uD800',
+      '\uD801',
+      '\uFFFD',
+    ].map(providerApiKeyEnvironmentVariable);
+
+    expect(names).toEqual([
+      'HAOCHEN_PROVIDER_D800_API_KEY',
+      'HAOCHEN_PROVIDER_D801_API_KEY',
+      'HAOCHEN_PROVIDER_FFFD_API_KEY',
+    ]);
+    expect(new Set(names)).toHaveLength(3);
   });
 
   it('rejects an empty provider ID', () => {
@@ -186,7 +231,7 @@ describe('macOS Keychain adapter', () => {
     });
 
     await expect(
-      readMacOsKeychain(run, 'darwin', 'legacy-provider'),
+      readMacOsKeychain(run, 'darwin', 'legacy-provider', true),
     ).resolves.toBe('old-key');
     expect(run).toHaveBeenNthCalledWith(1, 'security', [
       'find-generic-password',
@@ -204,6 +249,28 @@ describe('macOS Keychain adapter', () => {
       'haochen-signal',
       '-w',
     ]);
+  });
+
+  it('does not fall back for legacy-provider without explicit permission', async () => {
+    const run = vi.fn(async () => {
+      throw new Error('item not found');
+    });
+
+    await expect(
+      readMacOsKeychain(run, 'darwin', 'legacy-provider', false),
+    ).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('does not fall back for a non-legacy provider even with permission', async () => {
+    const run = vi.fn(async () => {
+      throw new Error('item not found');
+    });
+
+    await expect(
+      readMacOsKeychain(run, 'darwin', 'deepseek', true),
+    ).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it('returns undefined without running security outside macOS', async () => {

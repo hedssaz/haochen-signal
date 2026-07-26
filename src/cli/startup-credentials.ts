@@ -10,7 +10,10 @@ export interface StartupApiKeyOptions {
   provider?: CredentialProvider;
   platform?: NodeJS.Platform;
   env: NodeJS.ProcessEnv;
-  readKeychain: (providerId?: string) => Promise<string | undefined>;
+  readKeychain: (
+    providerId?: string,
+    allowLegacyFallback?: boolean,
+  ) => Promise<string | undefined>;
   createInput: () => TemporaryCredentialInput;
   write: (text: string) => void;
 }

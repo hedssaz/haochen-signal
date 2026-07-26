@@ -41,7 +41,9 @@ describe('resolveStartupApiKey', () => {
         name: 'DeepSeek',
         credentialRef: 'deepseek-credential',
       },
-      env: {HAOCHEN_PROVIDER_646565707365656B_API_KEY: 'provider-key'},
+      env: {
+        HAOCHEN_PROVIDER_0064006500650070007300650065006B_API_KEY: 'provider-key',
+      },
       readKeychain,
       createInput,
       write: () => undefined,
@@ -95,7 +97,7 @@ describe('resolveStartupApiKey', () => {
       write: () => undefined,
     })).resolves.toBe('keychain-provider-key');
 
-    expect(readKeychain).toHaveBeenCalledWith('deepseek');
+    expect(readKeychain).toHaveBeenCalledWith('deepseek', false);
     expect(createInput).not.toHaveBeenCalled();
   });
 });

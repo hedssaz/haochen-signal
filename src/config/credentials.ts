@@ -9,7 +9,10 @@ export type CredentialProvider = Pick<
 export interface CredentialOptions {
   provider?: CredentialProvider;
   env: NodeJS.ProcessEnv;
-  readKeychain: (providerId?: string) => Promise<string | undefined>;
+  readKeychain: (
+    providerId?: string,
+    allowLegacyFallback?: boolean,
+  ) => Promise<string | undefined>;
   prompt: () => Promise<string | undefined>;
 }
 
@@ -41,17 +44,25 @@ export function providerApiKeyEnvironmentVariable(providerId: string): string {
   if (providerId.length === 0) {
     throw new Error('供应商 ID 不能为空');
   }
-  const encodedId = Buffer.from(providerId, 'utf8')
-    .toString('hex')
-    .toUpperCase();
+  let encodedId = '';
+  for (let index = 0; index < providerId.length; index += 1) {
+    encodedId += providerId
+      .charCodeAt(index)
+      .toString(16)
+      .toUpperCase()
+      .padStart(4, '0');
+  }
   return `HAOCHEN_PROVIDER_${encodedId}_API_KEY`;
 }
 
-function isLegacyProvider(
+function allowsLegacyFallback(
   provider: CredentialProvider | undefined,
 ): boolean {
   return provider === undefined
-    || provider.id === 'legacy-provider';
+    || (
+      provider.id === 'legacy-provider'
+      && provider.credentialRef === 'legacy'
+    );
 }
 
 export async function resolveApiKey(options: CredentialOptions): Promise<string | undefined> {
@@ -62,12 +73,16 @@ export async function resolveApiKey(options: CredentialOptions): Promise<string 
     ]);
   if (providerEnvKey) return providerEnvKey;
 
-  const envKey = isLegacyProvider(options.provider)
+  const allowLegacyFallback = allowsLegacyFallback(options.provider);
+  const envKey = allowLegacyFallback
     ? trimmedCredential(options.env.HAOCHEN_API_KEY)
     : undefined;
   if (envKey) return envKey;
   const stored = trimmedCredential(
-    await options.readKeychain(options.provider?.id),
+    await options.readKeychain(
+      options.provider?.id,
+      allowLegacyFallback,
+    ),
   );
   if (stored) return stored;
   return trimmedCredential(await options.prompt());
@@ -101,16 +116,19 @@ async function readKeychainService(
 
 export function readMacOsKeychain(
   providerId?: string,
+  allowLegacyFallback?: boolean,
 ): Promise<string | undefined>;
 export function readMacOsKeychain(
   run?: ProcessRunner,
   platform?: NodeJS.Platform,
   providerId?: string,
+  allowLegacyFallback?: boolean,
 ): Promise<string | undefined>;
 export async function readMacOsKeychain(
-  providerIdOrRun: string | ProcessRunner = runProcess,
-  platform: NodeJS.Platform = process.platform,
+  providerIdOrRun?: string | ProcessRunner,
+  platformOrAllowFallback?: NodeJS.Platform | boolean,
   injectedProviderId?: string,
+  injectedAllowLegacyFallback = false,
 ): Promise<string | undefined> {
   const run = typeof providerIdOrRun === 'function'
     ? providerIdOrRun
@@ -118,9 +136,14 @@ export async function readMacOsKeychain(
   const providerId = typeof providerIdOrRun === 'string'
     ? providerIdOrRun
     : injectedProviderId;
-  const effectivePlatform = typeof providerIdOrRun === 'string'
-    ? process.platform
-    : platform;
+  const effectivePlatform =
+    typeof providerIdOrRun === 'function'
+    && typeof platformOrAllowFallback === 'string'
+      ? platformOrAllowFallback
+      : process.platform;
+  const allowLegacyFallback = typeof providerIdOrRun === 'function'
+    ? injectedAllowLegacyFallback
+    : platformOrAllowFallback === true;
   if (effectivePlatform !== 'darwin') return undefined;
 
   const stored = await readKeychainService(
@@ -129,7 +152,10 @@ export async function readMacOsKeychain(
   );
   if (stored !== undefined) return stored;
 
-  if (providerId === 'legacy-provider') {
+  if (
+    allowLegacyFallback
+    && providerId === 'legacy-provider'
+  ) {
     return readKeychainService(keychainService(undefined), run);
   }
   return undefined;

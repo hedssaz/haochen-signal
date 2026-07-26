@@ -14,31 +14,84 @@ export interface DiscoverModelsOptions {
 
 interface OperationSignal {
   signal: AbortSignal;
+  failure(): InternalFailure | undefined;
   dispose(): void;
 }
 
+export type ModelDiscoveryErrorCode =
+  | 'HTTP_ERROR'
+  | 'INVALID_JSON'
+  | 'INVALID_RESPONSE'
+  | 'INVALID_TIMEOUT'
+  | 'MISSING_API_KEY'
+  | 'RESPONSE_TOO_LARGE'
+  | 'TRANSPORT_ERROR';
+
 export class ModelDiscoveryError extends Error {
-  constructor(message: string) {
+  readonly code!: ModelDiscoveryErrorCode;
+
+  constructor(
+    message: string,
+    code: ModelDiscoveryErrorCode = 'TRANSPORT_ERROR',
+  ) {
     super(message);
     this.name = 'ModelDiscoveryError';
+    Object.defineProperty(this, 'code', {
+      value: code,
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
   }
 }
 
-class InternalModelDiscoveryError extends ModelDiscoveryError {}
+type InternalFailure =
+  | {code: 'ABORTED'}
+  | {code: 'HTTP_ERROR'; status: number}
+  | {code: 'INVALID_JSON'}
+  | {
+    code: 'INVALID_RESPONSE';
+    reason: 'EMPTY_DATA' | 'INVALID_ID' | 'MISSING_DATA';
+  }
+  | {code: 'INVALID_TIMEOUT'}
+  | {code: 'MISSING_API_KEY'}
+  | {code: 'RESPONSE_TOO_LARGE'}
+  | {code: 'TIMEOUT'; timeoutMs: number};
 
-function discoveryError(message: string): InternalModelDiscoveryError {
-  return new InternalModelDiscoveryError(message);
+const internalFailures = new WeakMap<Error, Readonly<InternalFailure>>();
+
+function internalFailure(failure: InternalFailure): Error {
+  const error = new Error('Internal model discovery failure');
+  internalFailures.set(error, Object.freeze({...failure}));
+  return error;
 }
 
-function safeAbortError(): DOMException {
-  return new DOMException('已取消获取模型。', 'AbortError');
-}
-
-function safeTimeoutError(timeoutMs: number): DOMException {
-  return new DOMException(
-    `获取模型请求超过 ${timeoutMs} 毫秒。`,
-    'TimeoutError',
-  );
+function failureMessage(failure: Readonly<InternalFailure>): string {
+  switch (failure.code) {
+    case 'ABORTED':
+      return '已取消获取模型。';
+    case 'HTTP_ERROR':
+      return `获取模型失败：HTTP ${failure.status}。`;
+    case 'INVALID_JSON':
+      return '模型列表响应不是有效 JSON。';
+    case 'INVALID_RESPONSE':
+      switch (failure.reason) {
+        case 'EMPTY_DATA':
+          return '模型列表响应格式无效：data 不能为空。';
+        case 'INVALID_ID':
+          return '模型列表响应格式无效：data[].id 必须是非空字符串。';
+        case 'MISSING_DATA':
+          return '模型列表响应格式无效：缺少 data 数组。';
+      }
+    case 'INVALID_TIMEOUT':
+      return '获取模型超时时间无效。';
+    case 'MISSING_API_KEY':
+      return '获取模型需要 API Key。';
+    case 'RESPONSE_TOO_LARGE':
+      return '模型列表响应超过 2 MiB。';
+    case 'TIMEOUT':
+      return `获取模型请求超过 ${failure.timeoutMs} 毫秒。`;
+  }
 }
 
 function createOperationSignal(
@@ -50,22 +103,31 @@ function createOperationSignal(
     || timeoutMs <= 0
     || timeoutMs > MAX_TIMER_DELAY_MS
   ) {
-    throw discoveryError('获取模型超时时间无效。');
+    throw internalFailure({code: 'INVALID_TIMEOUT'});
   }
 
   const controller = new AbortController();
-  const onCallerAbort = () => controller.abort(safeAbortError());
+  let abortFailure: InternalFailure | undefined;
+  const abortWith = (failure: InternalFailure) => {
+    if (controller.signal.aborted) return;
+    abortFailure = Object.freeze({...failure});
+    controller.abort();
+  };
+  const onCallerAbort = () => abortWith({code: 'ABORTED'});
   if (callerSignal.aborted) {
     onCallerAbort();
   } else {
     callerSignal.addEventListener('abort', onCallerAbort, {once: true});
   }
   const timeout = setTimeout(() => {
-    controller.abort(safeTimeoutError(timeoutMs));
+    abortWith({code: 'TIMEOUT', timeoutMs});
   }, timeoutMs);
 
   return {
     signal: controller.signal,
+    failure() {
+      return abortFailure;
+    },
     dispose() {
       clearTimeout(timeout);
       callerSignal.removeEventListener('abort', onCallerAbort);
@@ -73,13 +135,10 @@ function createOperationSignal(
   };
 }
 
-function sanitizedErrorDescription(
-  error: unknown,
+function sanitizedMessage(
+  raw: string,
   apiKey: string,
 ): string {
-  const raw = error instanceof Error
-    ? `${error.name}: ${error.message}`
-    : String(error);
   const generallyRedacted = redactValue(raw);
   const message = typeof generallyRedacted === 'string'
     ? generallyRedacted
@@ -87,6 +146,45 @@ function sanitizedErrorDescription(
   return apiKey.length === 0
     ? message
     : message.replaceAll(apiKey, '[REDACTED]');
+}
+
+function sanitizedErrorDescription(
+  error: unknown,
+  apiKey: string,
+): string {
+  return sanitizedMessage(
+    error instanceof Error
+      ? `${error.name}: ${error.message}`
+      : String(error),
+    apiKey,
+  );
+}
+
+function publicFailure(
+  failure: Readonly<InternalFailure>,
+  apiKey: string,
+): Error {
+  const message = sanitizedMessage(failureMessage(failure), apiKey);
+  if (failure.code === 'ABORTED') {
+    return new DOMException(message, 'AbortError');
+  }
+  if (failure.code === 'TIMEOUT') {
+    return new DOMException(message, 'TimeoutError');
+  }
+  return new ModelDiscoveryError(message, failure.code);
+}
+
+function publicTransportError(
+  error: unknown,
+  apiKey: string,
+): ModelDiscoveryError {
+  return new ModelDiscoveryError(
+    sanitizedMessage(
+      `获取模型失败：${sanitizedErrorDescription(error, apiKey)}`,
+      apiKey,
+    ),
+    'TRANSPORT_ERROR',
+  );
 }
 
 function compareModelIds(left: string, right: string): number {
@@ -102,12 +200,18 @@ function validateModelList(payload: unknown): string[] {
     || Array.isArray(payload)
     || !Array.isArray((payload as {data?: unknown}).data)
   ) {
-    throw discoveryError('模型列表响应格式无效：缺少 data 数组。');
+    throw internalFailure({
+      code: 'INVALID_RESPONSE',
+      reason: 'MISSING_DATA',
+    });
   }
 
   const data = (payload as {data: unknown[]}).data;
   if (data.length === 0) {
-    throw discoveryError('模型列表响应格式无效：data 不能为空。');
+    throw internalFailure({
+      code: 'INVALID_RESPONSE',
+      reason: 'EMPTY_DATA',
+    });
   }
 
   const modelIds = new Set<string>();
@@ -117,15 +221,17 @@ function validateModelList(payload: unknown): string[] {
       || entry === null
       || typeof (entry as {id?: unknown}).id !== 'string'
     ) {
-      throw discoveryError(
-        '模型列表响应格式无效：data[].id 必须是非空字符串。',
-      );
+      throw internalFailure({
+        code: 'INVALID_RESPONSE',
+        reason: 'INVALID_ID',
+      });
     }
     const id = (entry as {id: string}).id.trim();
     if (id.length === 0) {
-      throw discoveryError(
-        '模型列表响应格式无效：data[].id 必须是非空字符串。',
-      );
+      throw internalFailure({
+        code: 'INVALID_RESPONSE',
+        reason: 'INVALID_ID',
+      });
     }
     modelIds.add(id);
   }
@@ -179,7 +285,7 @@ async function readBoundedResponse(
       && parsedLength > MAX_RESPONSE_BYTES
     ) {
       cancelBody(response.body);
-      throw discoveryError('模型列表响应超过 2 MiB。');
+      throw internalFailure({code: 'RESPONSE_TOO_LARGE'});
     }
   }
 
@@ -209,7 +315,7 @@ async function readBoundedResponse(
       bytes += next.value.byteLength;
       if (bytes > MAX_RESPONSE_BYTES) {
         cancelReader(new Error('模型列表响应超过上限'));
-        throw discoveryError('模型列表响应超过 2 MiB。');
+        throw internalFailure({code: 'RESPONSE_TOO_LARGE'});
       }
       chunks.push(next.value);
     }
@@ -224,13 +330,14 @@ async function readBoundedResponse(
 export async function discoverModels(
   options: DiscoverModelsOptions,
 ): Promise<string[]> {
-  const apiKey = options.apiKey.trim();
-  if (apiKey.length === 0) {
-    throw discoveryError('获取模型需要 API Key。');
-  }
-
-  const operation = createOperationSignal(options.signal, options.timeoutMs);
+  let apiKey = '';
+  let operation: OperationSignal | undefined;
   try {
+    apiKey = options.apiKey.trim();
+    if (apiKey.length === 0) {
+      throw internalFailure({code: 'MISSING_API_KEY'});
+    }
+    operation = createOperationSignal(options.signal, options.timeoutMs);
     operation.signal.throwIfAborted();
     const headers = new Headers(options.provider.headers);
     headers.set('Accept', 'application/json');
@@ -248,9 +355,10 @@ export async function discoverModels(
 
     if (!response.ok) {
       cancelBody(response.body);
-      throw discoveryError(
-        `获取模型失败：HTTP ${response.status}。`,
-      );
+      const status = Number.isInteger(response.status)
+        ? response.status
+        : 0;
+      throw internalFailure({code: 'HTTP_ERROR', status});
     }
 
     const responseText = await readBoundedResponse(
@@ -261,20 +369,22 @@ export async function discoverModels(
     try {
       payload = JSON.parse(responseText);
     } catch {
-      throw discoveryError('模型列表响应不是有效 JSON。');
+      throw internalFailure({code: 'INVALID_JSON'});
     }
     return validateModelList(payload);
   } catch (error) {
-    if (operation.signal.aborted) {
-      const reason = operation.signal.reason;
-      if (reason instanceof DOMException) throw reason;
-      throw safeAbortError();
+    const operationFailure = operation?.failure();
+    if (operationFailure !== undefined) {
+      throw publicFailure(operationFailure, apiKey);
     }
-    if (error instanceof InternalModelDiscoveryError) throw error;
-    throw discoveryError(
-      `获取模型失败：${sanitizedErrorDescription(error, apiKey)}`,
-    );
+    const failure = error instanceof Error
+      ? internalFailures.get(error)
+      : undefined;
+    if (failure !== undefined) {
+      throw publicFailure(failure, apiKey);
+    }
+    throw publicTransportError(error, apiKey);
   } finally {
-    operation.dispose();
+    operation?.dispose();
   }
 }
