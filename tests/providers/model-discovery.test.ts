@@ -155,6 +155,24 @@ describe('discoverModels', () => {
     expect((error as Error).message).not.toContain(API_KEY);
   });
 
+  it('does not invoke getPrototypeOf on a thrown Proxy in the catch boundary', async () => {
+    const injected = new Proxy({}, {
+      getPrototypeOf() {
+        throw new Error(API_KEY);
+      },
+    });
+    const fetchImpl = mockFetch(async () => {
+      throw injected;
+    });
+
+    const error = await discoverModels(options(fetchImpl)).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(ModelDiscoveryError);
+    expect((error as Error).message).not.toContain(API_KEY);
+  });
+
   it('rejects non-success status without exposing status text containing the API key', async () => {
     const fetchImpl = mockFetch(async () => new Response('denied', {
       status: 401,

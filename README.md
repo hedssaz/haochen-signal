@@ -49,7 +49,7 @@ API Key 按以下顺序读取：
 
 首次运行会依次询问 API 地址、模型和 API Key；API Key 使用隐藏输入，终端必须保持在 Key 提示处等待输入，不会回显凭据。只有 macOS 会询问是否保存到 Keychain；Linux 和 Windows 请使用环境变量或本次启动的隐藏输入。
 
-添加供应商时可向规范化后的 `{baseUrl}/models` 发起 OpenAI-compatible `GET` 请求。响应体最多为 2 MiB，只接受对象中的非空 `data[].id`；模型 ID 会去重并按确定性字典序排列。请求支持取消和超时，响应正文、认证头与 API Key 不会进入界面错误。
+添加供应商时可向规范化后的 `{baseUrl}/models` 发起 OpenAI-compatible `GET` 请求。响应体最多为 2 MiB，只接受对象中的非空 `data[].id`；模型 ID 会去重并按确定性字典序排列。请求支持取消和超时，响应正文、认证头与 API Key 不会进入界面错误。错误边界不会对未知抛出值执行 `instanceof`；只在 `typeof` 证明可作为 WeakMap 键时查询内部错误，恶意 Proxy 的原型 trap 不会绕过 total 脱敏。
 
 最直接的启动方式是：
 

@@ -58,7 +58,7 @@ type InternalFailure =
   | {code: 'RESPONSE_TOO_LARGE'}
   | {code: 'TIMEOUT'; timeoutMs: number};
 
-const internalFailures = new WeakMap<Error, Readonly<InternalFailure>>();
+const internalFailures = new WeakMap<object, Readonly<InternalFailure>>();
 
 function internalFailure(failure: InternalFailure): Error {
   const error = new Error('Internal model discovery failure');
@@ -154,9 +154,26 @@ function sanitizedErrorDescription(
 ): string {
   let description: string;
   try {
-    description = error instanceof Error
-      ? `${error.name}: ${error.message}`
-      : String(error);
+    if (
+      (typeof error === 'object' && error !== null)
+      || typeof error === 'function'
+    ) {
+      const candidate = error as {
+        name?: unknown;
+        message?: unknown;
+      };
+      const name = candidate.name;
+      const message = candidate.message;
+      if (typeof name === 'string' && typeof message === 'string') {
+        description = `${name}: ${message}`;
+      } else if (typeof message === 'string') {
+        description = message;
+      } else {
+        description = String(error);
+      }
+    } else {
+      description = String(error);
+    }
   } catch {
     description = '模型列表请求失败';
   }
@@ -380,9 +397,11 @@ export async function discoverModels(
     if (operationFailure !== undefined) {
       throw publicFailure(operationFailure, apiKey);
     }
-    const failure = error instanceof Error
-      ? internalFailures.get(error)
-      : undefined;
+    const failure =
+      (typeof error === 'object' && error !== null)
+      || typeof error === 'function'
+        ? internalFailures.get(error)
+        : undefined;
     if (failure !== undefined) {
       throw publicFailure(failure, apiKey);
     }
