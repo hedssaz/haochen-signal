@@ -357,7 +357,7 @@ async function main(): Promise<void> {
       sessionId = nextSessionId;
       return sessionId;
     }} listSessions={() => store.list()} resumeSession={async id => { await sessionStore.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onExit={async () => undefined} confirmation={confirmations} gateReporter={gateReporter}
-  />);
+  />, {exitOnCtrlC: false});
   await instance.waitUntilExit();
 }
 

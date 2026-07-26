@@ -280,6 +280,15 @@ describe('CLI entrypoint', () => {
     expect(source).not.toContain('createFirstRunInput(process.stdin');
   });
 
+  it('delegates Ctrl+C to the App instead of letting Ink exit first', async () => {
+    const source = await readFile(
+      new URL('../../src/cli/index.tsx', import.meta.url),
+      'utf8',
+    );
+
+    expect(source).toContain('/>, {exitOnCtrlC: false});');
+  });
+
   it('exposes character pagination in the read_file model tool schema', async () => {
     const originalArgv = process.argv;
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);

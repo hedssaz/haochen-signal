@@ -200,6 +200,67 @@ describe('App', () => {
     expect(setRawMode).not.toHaveBeenCalledWith(false);
   });
 
+  it('aborts a pending credential prompt without exiting and restores command input', async () => {
+    const promptModule = await import(
+      '../../src/cli/credential-prompt.js'
+    );
+    const credentialPrompt = new promptModule.InteractiveCredentialPromptBroker(
+      true,
+    );
+    const provider = modelConfig.providers[0]!;
+    const onExit = vi.fn(async () => undefined);
+    const runTask = vi.fn(async function* (
+      _task: string,
+      signal: AbortSignal,
+    ): AsyncIterable<AgentUiEvent> {
+      await resolveStartupApiKey({
+        provider,
+        platform: 'linux',
+        env: {},
+        readKeychain: async () => undefined,
+        prompt: () => credentialPrompt.request(provider, signal),
+      });
+      yield {type: 'assistant_text', text: '不应执行'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="deepseek-chat"
+      modelConfig={modelConfig}
+      credentialPrompt={credentialPrompt}
+      onExit={onExit}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('触发模型');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(credentialPrompt.getPending()).toBeDefined();
+      expect(app.lastFrame()).toContain('DeepSeek API Key：');
+    });
+
+    app.stdin.write('partial-secret');
+    app.stdin.write('\u0003');
+
+    await vi.waitFor(() => {
+      expect(runTask.mock.calls[0]?.[1].aborted).toBe(true);
+      expect(credentialPrompt.getPending()).toBeUndefined();
+      expect(app.lastFrame()).not.toContain('DeepSeek API Key：');
+      expect(app.lastFrame()).toContain('浩宸 ›');
+    });
+    expect(onExit).not.toHaveBeenCalled();
+    expect(app.frames.join('\n')).not.toContain('partial-secret');
+
+    app.stdin.write('/help');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('内置命令：'));
+    expect(runTask).toHaveBeenCalledOnce();
+
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => expect(onExit).toHaveBeenCalledOnce());
+  });
+
   it('shows real context usage and one unchanged previous-round total for multiple tools', async () => {
     let releaseTools!: () => void;
     let releaseNextRound!: () => void;
