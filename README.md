@@ -43,8 +43,8 @@ haochen --version
 
 API Key 按以下顺序读取：
 
-1. 供应商专属环境变量，例如供应商稳定 ID 为 `deepseek` 时读取 `HAOCHEN_DEEPSEEK_API_KEY`；迁移的旧供应商继续兼容 `HAOCHEN_API_KEY`；
-2. 仅 macOS 的 Keychain；新版条目以 `haochen-signal:<credentialRef>` 区分供应商，迁移的旧供应商仍可读取服务名 `haochen-signal`、账户名 `haochen` 的旧条目；
+1. 供应商专属环境变量，格式为 `HAOCHEN_PROVIDER_<供应商 ID 的 UTF-8 十六进制>_API_KEY`；例如稳定 ID `deepseek` 对应 `HAOCHEN_PROVIDER_646565707365656B_API_KEY`。该编码区分大小写、标点和非 ASCII ID；只有迁移后的 `legacy-provider` 继续兼容 `HAOCHEN_API_KEY`；
+2. 仅 macOS 的 Keychain；新版条目以 `haochen-signal:<provider.id>` 区分供应商，只有迁移后的 `legacy-provider` 可回退读取服务名 `haochen-signal`、账户名 `haochen` 的旧条目；
 3. 启动时临时输入，且只保存在当前进程中。
 
 首次运行会依次询问 API 地址、模型和 API Key；API Key 使用隐藏输入，终端必须保持在 Key 提示处等待输入，不会回显凭据。只有 macOS 会询问是否保存到 Keychain；Linux 和 Windows 请使用环境变量或本次启动的隐藏输入。

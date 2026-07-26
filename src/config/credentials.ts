@@ -9,7 +9,7 @@ export type CredentialProvider = Pick<
 export interface CredentialOptions {
   provider?: CredentialProvider;
   env: NodeJS.ProcessEnv;
-  readKeychain: (credentialRef?: string) => Promise<string | undefined>;
+  readKeychain: (providerId?: string) => Promise<string | undefined>;
   prompt: () => Promise<string | undefined>;
 }
 
@@ -38,22 +38,20 @@ function trimmedCredential(value: string | undefined): string | undefined {
 }
 
 export function providerApiKeyEnvironmentVariable(providerId: string): string {
-  const normalizedId = providerId
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  if (normalizedId.length === 0) {
-    throw new Error('供应商 ID 无法生成环境变量名');
+  if (providerId.length === 0) {
+    throw new Error('供应商 ID 不能为空');
   }
-  return `HAOCHEN_${normalizedId}_API_KEY`;
+  const encodedId = Buffer.from(providerId, 'utf8')
+    .toString('hex')
+    .toUpperCase();
+  return `HAOCHEN_PROVIDER_${encodedId}_API_KEY`;
 }
 
 function isLegacyProvider(
   provider: CredentialProvider | undefined,
 ): boolean {
   return provider === undefined
-    || provider.credentialRef === 'legacy';
+    || provider.id === 'legacy-provider';
 }
 
 export async function resolveApiKey(options: CredentialOptions): Promise<string | undefined> {
@@ -69,16 +67,15 @@ export async function resolveApiKey(options: CredentialOptions): Promise<string 
     : undefined;
   if (envKey) return envKey;
   const stored = trimmedCredential(
-    await options.readKeychain(options.provider?.credentialRef),
+    await options.readKeychain(options.provider?.id),
   );
   if (stored) return stored;
   return trimmedCredential(await options.prompt());
 }
 
-function keychainService(credentialRef: string | undefined): string {
-  const normalizedRef = credentialRef?.trim();
-  return normalizedRef
-    ? `haochen-signal:${normalizedRef}`
+function keychainService(providerId: string | undefined): string {
+  return providerId
+    ? `haochen-signal:${providerId}`
     : 'haochen-signal';
 }
 
@@ -103,36 +100,36 @@ async function readKeychainService(
 }
 
 export function readMacOsKeychain(
-  credentialRef?: string,
+  providerId?: string,
 ): Promise<string | undefined>;
 export function readMacOsKeychain(
   run?: ProcessRunner,
   platform?: NodeJS.Platform,
-  credentialRef?: string,
+  providerId?: string,
 ): Promise<string | undefined>;
 export async function readMacOsKeychain(
-  credentialRefOrRun: string | ProcessRunner = runProcess,
+  providerIdOrRun: string | ProcessRunner = runProcess,
   platform: NodeJS.Platform = process.platform,
-  injectedCredentialRef?: string,
+  injectedProviderId?: string,
 ): Promise<string | undefined> {
-  const run = typeof credentialRefOrRun === 'function'
-    ? credentialRefOrRun
+  const run = typeof providerIdOrRun === 'function'
+    ? providerIdOrRun
     : runProcess;
-  const credentialRef = typeof credentialRefOrRun === 'string'
-    ? credentialRefOrRun
-    : injectedCredentialRef;
-  const effectivePlatform = typeof credentialRefOrRun === 'string'
+  const providerId = typeof providerIdOrRun === 'string'
+    ? providerIdOrRun
+    : injectedProviderId;
+  const effectivePlatform = typeof providerIdOrRun === 'string'
     ? process.platform
     : platform;
   if (effectivePlatform !== 'darwin') return undefined;
 
   const stored = await readKeychainService(
-    keychainService(credentialRef),
+    keychainService(providerId),
     run,
   );
   if (stored !== undefined) return stored;
 
-  if (credentialRef === 'legacy') {
+  if (providerId === 'legacy-provider') {
     return readKeychainService(keychainService(undefined), run);
   }
   return undefined;
@@ -142,7 +139,7 @@ export async function saveMacOsKeychain(
   key: string,
   run: ProcessRunner = runProcess,
   platform: NodeJS.Platform = process.platform,
-  credentialRef?: string,
+  providerId?: string,
 ): Promise<void> {
   if (platform !== 'darwin') return;
 
@@ -152,7 +149,7 @@ export async function saveMacOsKeychain(
     '-a',
     'haochen',
     '-s',
-    keychainService(credentialRef),
+    keychainService(providerId),
     '-w',
     key,
   ]);

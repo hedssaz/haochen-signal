@@ -24,6 +24,12 @@ export class ModelDiscoveryError extends Error {
   }
 }
 
+class InternalModelDiscoveryError extends ModelDiscoveryError {}
+
+function discoveryError(message: string): InternalModelDiscoveryError {
+  return new InternalModelDiscoveryError(message);
+}
+
 function safeAbortError(): DOMException {
   return new DOMException('已取消获取模型。', 'AbortError');
 }
@@ -44,7 +50,7 @@ function createOperationSignal(
     || timeoutMs <= 0
     || timeoutMs > MAX_TIMER_DELAY_MS
   ) {
-    throw new ModelDiscoveryError('获取模型超时时间无效。');
+    throw discoveryError('获取模型超时时间无效。');
   }
 
   const controller = new AbortController();
@@ -96,12 +102,12 @@ function validateModelList(payload: unknown): string[] {
     || Array.isArray(payload)
     || !Array.isArray((payload as {data?: unknown}).data)
   ) {
-    throw new ModelDiscoveryError('模型列表响应格式无效：缺少 data 数组。');
+    throw discoveryError('模型列表响应格式无效：缺少 data 数组。');
   }
 
   const data = (payload as {data: unknown[]}).data;
   if (data.length === 0) {
-    throw new ModelDiscoveryError('模型列表响应格式无效：data 不能为空。');
+    throw discoveryError('模型列表响应格式无效：data 不能为空。');
   }
 
   const modelIds = new Set<string>();
@@ -111,13 +117,13 @@ function validateModelList(payload: unknown): string[] {
       || entry === null
       || typeof (entry as {id?: unknown}).id !== 'string'
     ) {
-      throw new ModelDiscoveryError(
+      throw discoveryError(
         '模型列表响应格式无效：data[].id 必须是非空字符串。',
       );
     }
     const id = (entry as {id: string}).id.trim();
     if (id.length === 0) {
-      throw new ModelDiscoveryError(
+      throw discoveryError(
         '模型列表响应格式无效：data[].id 必须是非空字符串。',
       );
     }
@@ -173,7 +179,7 @@ async function readBoundedResponse(
       && parsedLength > MAX_RESPONSE_BYTES
     ) {
       cancelBody(response.body);
-      throw new ModelDiscoveryError('模型列表响应超过 2 MiB。');
+      throw discoveryError('模型列表响应超过 2 MiB。');
     }
   }
 
@@ -203,7 +209,7 @@ async function readBoundedResponse(
       bytes += next.value.byteLength;
       if (bytes > MAX_RESPONSE_BYTES) {
         cancelReader(new Error('模型列表响应超过上限'));
-        throw new ModelDiscoveryError('模型列表响应超过 2 MiB。');
+        throw discoveryError('模型列表响应超过 2 MiB。');
       }
       chunks.push(next.value);
     }
@@ -220,7 +226,7 @@ export async function discoverModels(
 ): Promise<string[]> {
   const apiKey = options.apiKey.trim();
   if (apiKey.length === 0) {
-    throw new ModelDiscoveryError('获取模型需要 API Key。');
+    throw discoveryError('获取模型需要 API Key。');
   }
 
   const operation = createOperationSignal(options.signal, options.timeoutMs);
@@ -242,7 +248,7 @@ export async function discoverModels(
 
     if (!response.ok) {
       cancelBody(response.body);
-      throw new ModelDiscoveryError(
+      throw discoveryError(
         `获取模型失败：HTTP ${response.status}。`,
       );
     }
@@ -255,7 +261,7 @@ export async function discoverModels(
     try {
       payload = JSON.parse(responseText);
     } catch {
-      throw new ModelDiscoveryError('模型列表响应不是有效 JSON。');
+      throw discoveryError('模型列表响应不是有效 JSON。');
     }
     return validateModelList(payload);
   } catch (error) {
@@ -264,8 +270,8 @@ export async function discoverModels(
       if (reason instanceof DOMException) throw reason;
       throw safeAbortError();
     }
-    if (error instanceof ModelDiscoveryError) throw error;
-    throw new ModelDiscoveryError(
+    if (error instanceof InternalModelDiscoveryError) throw error;
+    throw discoveryError(
       `获取模型失败：${sanitizedErrorDescription(error, apiKey)}`,
     );
   } finally {

@@ -58,7 +58,7 @@ describe('resolveApiKey', () => {
     await expect(resolveApiKey({
       provider: deepSeekProvider,
       env: {
-        HAOCHEN_DEEPSEEK_API_KEY: '  provider-env-value  ',
+        HAOCHEN_PROVIDER_646565707365656B_API_KEY: '  provider-env-value  ',
         HAOCHEN_API_KEY: 'legacy-env-value',
       },
       readKeychain: keychain,
@@ -81,7 +81,7 @@ describe('resolveApiKey', () => {
     expect(prompt).toHaveBeenCalledOnce();
   });
 
-  it('passes credentialRef to Keychain resolution', async () => {
+  it('passes provider.id to Keychain resolution', async () => {
     const readKeychain = vi.fn(async () => 'provider-keychain-value');
 
     await expect(resolveApiKey({
@@ -91,7 +91,7 @@ describe('resolveApiKey', () => {
       prompt: async () => 'prompt-value',
     })).resolves.toBe('provider-keychain-value');
 
-    expect(readKeychain).toHaveBeenCalledWith('deepseek-credential');
+    expect(readKeychain).toHaveBeenCalledWith('deepseek');
   });
 
   it('keeps the generic environment variable for migrated legacy credentials', async () => {
@@ -102,20 +102,42 @@ describe('resolveApiKey', () => {
       prompt: async () => 'prompt-value',
     })).resolves.toBe('legacy-value');
   });
+
+  it('does not treat a legacy credentialRef as the legacy provider identity', async () => {
+    await expect(resolveApiKey({
+      provider: {id: 'not-legacy', credentialRef: 'legacy'},
+      env: {HAOCHEN_API_KEY: 'legacy-value'},
+      readKeychain: async () => undefined,
+      prompt: async () => 'temporary-value',
+    })).resolves.toBe('temporary-value');
+  });
 });
 
 describe('providerApiKeyEnvironmentVariable', () => {
   it.each([
-    ['deepseek', 'HAOCHEN_DEEPSEEK_API_KEY'],
-    ['azure.openai-east', 'HAOCHEN_AZURE_OPENAI_EAST_API_KEY'],
-    ['  local provider  ', 'HAOCHEN_LOCAL_PROVIDER_API_KEY'],
+    ['deepseek', 'HAOCHEN_PROVIDER_646565707365656B_API_KEY'],
+    ['中文', 'HAOCHEN_PROVIDER_E4B8ADE69687_API_KEY'],
   ])('maps stable provider ID %j to %s', (providerId, expected) => {
     expect(providerApiKeyEnvironmentVariable(providerId)).toBe(expected);
   });
 
-  it('rejects a provider ID with no environment-safe characters', () => {
-    expect(() => providerApiKeyEnvironmentVariable('中文')).toThrow(
-      '供应商 ID 无法生成环境变量名',
+  it('does not collide for punctuation, case or non-ASCII provider IDs', () => {
+    const names = [
+      'acme-prod',
+      'acme_prod',
+      'ACME-PROD',
+      '中文',
+    ].map(providerApiKeyEnvironmentVariable);
+
+    expect(new Set(names)).toHaveLength(names.length);
+    expect(names).toEqual(names.map(name => expect.stringMatching(
+      /^HAOCHEN_PROVIDER_[0-9A-F]+_API_KEY$/,
+    )));
+  });
+
+  it('rejects an empty provider ID', () => {
+    expect(() => providerApiKeyEnvironmentVariable('')).toThrow(
+      '供应商 ID 不能为空',
     );
   });
 });
@@ -143,35 +165,35 @@ describe('macOS Keychain adapter', () => {
     const run = vi.fn(async () => ({stdout: ' provider-key\n'}));
 
     await expect(
-      readMacOsKeychain(run, 'darwin', 'deepseek-credential'),
+      readMacOsKeychain(run, 'darwin', 'deepseek'),
     ).resolves.toBe('provider-key');
     expect(run).toHaveBeenCalledWith('security', [
       'find-generic-password',
       '-a',
       'haochen',
       '-s',
-      'haochen-signal:deepseek-credential',
+      'haochen-signal:deepseek',
       '-w',
     ]);
   });
 
   it('falls back to the old Keychain service for a migrated legacy credential', async () => {
     const run = vi.fn(async (_file: string, args: string[]) => {
-      if (args.includes('haochen-signal:legacy')) {
+      if (args.includes('haochen-signal:legacy-provider')) {
         throw new Error('item not found');
       }
       return {stdout: ' old-key\n'};
     });
 
     await expect(
-      readMacOsKeychain(run, 'darwin', 'legacy'),
+      readMacOsKeychain(run, 'darwin', 'legacy-provider'),
     ).resolves.toBe('old-key');
     expect(run).toHaveBeenNthCalledWith(1, 'security', [
       'find-generic-password',
       '-a',
       'haochen',
       '-s',
-      'haochen-signal:legacy',
+      'haochen-signal:legacy-provider',
       '-w',
     ]);
     expect(run).toHaveBeenNthCalledWith(2, 'security', [
@@ -211,7 +233,7 @@ describe('macOS Keychain adapter', () => {
     const run = vi.fn(async () => ({stdout: ''}));
 
     await expect(
-      saveMacOsKeychain('stored-key', run, 'darwin', 'deepseek-credential'),
+      saveMacOsKeychain('stored-key', run, 'darwin', 'deepseek'),
     ).resolves.toBeUndefined();
     expect(run).toHaveBeenCalledWith('security', [
       'add-generic-password',
@@ -219,7 +241,7 @@ describe('macOS Keychain adapter', () => {
       '-a',
       'haochen',
       '-s',
-      'haochen-signal:deepseek-credential',
+      'haochen-signal:deepseek',
       '-w',
       'stored-key',
     ]);

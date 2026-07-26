@@ -41,7 +41,7 @@ describe('resolveStartupApiKey', () => {
         name: 'DeepSeek',
         credentialRef: 'deepseek-credential',
       },
-      env: {HAOCHEN_DEEPSEEK_API_KEY: 'provider-key'},
+      env: {HAOCHEN_PROVIDER_646565707365656B_API_KEY: 'provider-key'},
       readKeychain,
       createInput,
       write: () => undefined,
@@ -78,7 +78,7 @@ describe('resolveStartupApiKey', () => {
     },
   );
 
-  it('passes credentialRef to Keychain on macOS before opening temporary input', async () => {
+  it('passes provider.id to Keychain on macOS before opening temporary input', async () => {
     const createInput = vi.fn();
     const readKeychain = vi.fn(async () => 'keychain-provider-key');
 
@@ -95,7 +95,7 @@ describe('resolveStartupApiKey', () => {
       write: () => undefined,
     })).resolves.toBe('keychain-provider-key');
 
-    expect(readKeychain).toHaveBeenCalledWith('deepseek-credential');
+    expect(readKeychain).toHaveBeenCalledWith('deepseek');
     expect(createInput).not.toHaveBeenCalled();
   });
 });

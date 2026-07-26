@@ -1,5 +1,8 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {discoverModels} from '../../src/providers/model-discovery.js';
+import {
+  discoverModels,
+  ModelDiscoveryError,
+} from '../../src/providers/model-discovery.js';
 
 const TWO_MEBIBYTES = 2 * 1024 * 1024;
 const API_KEY = 'discovery-secret-key';
@@ -128,10 +131,30 @@ describe('discoverModels', () => {
     expect((error as Error).message).not.toContain(API_KEY);
   });
 
-  it('redacts the API key from transport errors', async () => {
+  it.each([
+    ['an ordinary Error', () => new Error(API_KEY)],
+    ['a public ModelDiscoveryError', () => new ModelDiscoveryError(API_KEY)],
+  ])('redacts the API key from %s thrown by the transport', async (_name, createError) => {
     const fetchImpl = mockFetch(async () => {
-      throw new Error(`failed with Authorization: Bearer ${API_KEY}`);
+      throw createError();
     });
+
+    const error = await discoverModels(options(fetchImpl)).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('获取模型失败');
+    expect((error as Error).message).not.toContain(API_KEY);
+  });
+
+  it('redacts the API key from an injected response body error', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new ModelDiscoveryError(API_KEY);
+      },
+    }, {highWaterMark: 0});
+    const fetchImpl = mockFetch(async () => new Response(body));
 
     const error = await discoverModels(options(fetchImpl)).catch(
       (caught: unknown) => caught,

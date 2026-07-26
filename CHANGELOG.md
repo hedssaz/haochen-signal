@@ -6,7 +6,7 @@
 
 ### 新增
 
-- 新增供应商专属凭据与模型发现：按稳定供应商 ID 生成环境变量名，macOS Keychain 以 `credentialRef` 隔离并兼容旧服务项，Linux/Windows 使用隐藏临时输入；OpenAI-compatible `GET /models` 支持取消、超时、2 MiB 响应上限、严格 `data[].id` 校验、稳定去重排序和认证脱敏。
+- 新增供应商专属凭据与模型发现：环境变量以稳定供应商 ID 的 UTF-8 十六进制生成，避免大小写、标点和非 ASCII ID 碰撞；macOS Keychain 以 `provider.id` 隔离且仅 `legacy-provider` 兼容旧服务项，Linux/Windows 使用隐藏临时输入。OpenAI-compatible `GET /models` 支持取消、超时、2 MiB 响应上限、严格 `data[].id` 校验、稳定去重排序，并统一脱敏传输与响应体错误。
 - 新增仅创建的安全 `write_file` 工具：复用结构化补丁的同目录临时文件、同步与原子发布链路，拒绝覆盖、越界和符号链接路径；确定性边界按规范化路径及内容 SHA-256 绑定审查范围，终端摘要与审计输入不保存文件正文。
 - 新增多模型配置、真实上下文用量和安全 `write_file` 的可执行实施计划。
 - 新增多供应商模型配置、独立 `/model` 管理界面、`GET /models` 模型选择、真实上下文/上一轮总 token 底栏，以及创建专用安全 `write_file` 的中文设计规格。
