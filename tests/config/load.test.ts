@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest';
-import {mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
+import {mkdtemp, readFile, readdir, rm, stat, utimes, writeFile} from 'node:fs/promises';
 import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {loadConfig, saveConfig} from '../../src/config/load.js';
@@ -101,6 +101,8 @@ describe('configuration', () => {
   it.each([
     'ftp://example.test/v1',
     'https://user:secret@example.test/v1',
+    'https://example.test/v1?tenant=alpha',
+    'https://example.test/v1#models',
     'not-a-url',
   ])('rejects an invalid provider URL: %s', baseUrl => {
     expect(() => parseConfig({
@@ -116,7 +118,16 @@ describe('configuration', () => {
     })).toThrow();
   });
 
-  it.each(['authorization', 'Proxy-Authorization', 'x-api-key', 'api-key'])(
+  it.each([
+    'authorization',
+    'Proxy-Authorization',
+    'proxy-auth',
+    'api-key',
+    'x-goog-api-key',
+    'service-api-key',
+    'x-auth-token',
+    'anthropic-api-key',
+  ])(
     'rejects a persisted authentication header: %s',
     header => {
       expect(() => parseConfig({
@@ -132,6 +143,35 @@ describe('configuration', () => {
       })).toThrow();
     },
   );
+
+  it.each([
+    {
+      name: 'a damaged v2 config with legacy fields',
+      input: {
+        version: 2,
+        baseUrl: 'https://example.test',
+        model: 'wolf-1',
+      },
+    },
+    {
+      name: 'an unknown version with legacy fields',
+      input: {
+        version: 3,
+        baseUrl: 'https://example.test',
+        model: 'wolf-1',
+      },
+    },
+    {
+      name: 'an explicitly undefined version with legacy fields',
+      input: {
+        version: undefined,
+        baseUrl: 'https://example.test',
+        model: 'wolf-1',
+      },
+    },
+  ])('does not fall back to legacy parsing for $name', ({input}) => {
+    expect(() => parseConfig(input)).toThrow();
+  });
 
   it('rejects a persisted authentication header in legacy configuration', () => {
     expect(() => parseConfig({
@@ -369,6 +409,83 @@ describe('config files', () => {
         }],
         activeModelId: 'legacy-primary-model',
       });
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('does not rewrite a legacy config while loading it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
+    const path = join(directory, 'config.json');
+    const legacyContents = [
+      '{',
+      '  "baseUrl": "https://example.test/v1/",',
+      '  "model": "wolf-1"',
+      '}',
+      '',
+    ].join('\n');
+    await writeFile(path, legacyContents);
+    const oldTimestamp = new Date('2000-01-01T00:00:00.000Z');
+    await utimes(path, oldTimestamp, oldTimestamp);
+    const beforeLoad = await stat(path);
+
+    try {
+      await expect(loadConfig(path)).resolves.toMatchObject({
+        version: 2,
+        activeModelId: 'legacy-primary-model',
+      });
+      await expect(readFile(path, 'utf8')).resolves.toBe(legacyContents);
+      expect((await stat(path)).mtimeMs).toBe(beforeLoad.mtimeMs);
+      expect(await readdir(directory)).toEqual(['config.json']);
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('round-trips multiple providers and models without data loss', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
+    const path = join(directory, 'config.json');
+    const config = parseConfig({
+      version: 2,
+      providers: [
+        {
+          id: 'remote',
+          name: 'Remote',
+          baseUrl: 'https://remote.example.test/v1/',
+          credentialRef: 'remote',
+          headers: {'x-tenant': 'alpha'},
+        },
+        {
+          id: 'local',
+          name: 'Local',
+          baseUrl: 'http://localhost:11434/v1',
+          credentialRef: 'local',
+          headers: {},
+        },
+      ],
+      models: [
+        {
+          id: 'remote-chat',
+          providerId: 'remote',
+          modelId: 'remote-chat',
+          displayName: 'Remote Chat',
+          contextWindow: 128_000,
+        },
+        {
+          id: 'local-chat',
+          providerId: 'local',
+          modelId: 'local-chat',
+          displayName: 'Local Chat',
+          contextWindow: 32_000,
+        },
+      ],
+      activeModelId: 'local-chat',
+      timeoutMs: 75_000,
+    });
+
+    try {
+      await saveConfig(path, config);
+      await expect(loadConfig(path)).resolves.toEqual(config);
     } finally {
       await rm(directory, {recursive: true, force: true});
     }

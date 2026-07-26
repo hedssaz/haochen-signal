@@ -1,14 +1,19 @@
 import {z} from 'zod';
 
-const BaseUrlSchema = z.string().url().transform(value => value.replace(/\/+$/, '')).refine(value => {
+const BaseUrlSchema = z.string().url().refine(value => {
   const url = new URL(value);
   return (url.protocol === 'http:' || url.protocol === 'https:')
     && url.username === ''
-    && url.password === '';
-}, 'API 地址必须是没有凭据的 HTTP(S) 地址');
+    && url.password === ''
+    && url.search === ''
+    && url.hash === '';
+}, 'API 地址必须是没有凭据、查询参数或片段的 HTTP(S) 地址').transform(value => {
+  const url = new URL(value);
+  return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+});
 
 const ProfileIdSchema = z.string().trim().min(1);
-const AuthenticationHeaderName = /^(?:(?:proxy-)?authorization|(?:x-)?api[-_]?key)$/i;
+const AuthenticationHeaderName = /(?:^|[-_])(?:(?:proxy[-_]?)?authorization|proxy[-_]?auth|api[-_]?key|auth[-_]?token|access[-_]?token|security[-_]?token|token|cookie|set[-_]?cookie)(?:$|[-_])/i;
 
 const ProviderProfileSchema = z.object({
   id: ProfileIdSchema,
@@ -141,9 +146,13 @@ function migrateLegacyConfig(
   };
 }
 
-const ConfigSchema = z.union([
-  ConfigV2Schema,
-  LegacyConfigSchema.transform(migrateLegacyConfig).pipe(ConfigV2Schema),
-]);
+function hasExplicitVersion(input: unknown): boolean {
+  return typeof input === 'object'
+    && input !== null
+    && Object.prototype.hasOwnProperty.call(input, 'version');
+}
 
-export const parseConfig = (input: unknown): HaochenConfig => ConfigSchema.parse(input);
+export const parseConfig = (input: unknown): HaochenConfig => {
+  if (hasExplicitVersion(input)) return ConfigV2Schema.parse(input);
+  return ConfigV2Schema.parse(migrateLegacyConfig(LegacyConfigSchema.parse(input)));
+};
