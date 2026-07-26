@@ -43,11 +43,13 @@ haochen --version
 
 API Key 按以下顺序读取：
 
-1. `HAOCHEN_API_KEY` 环境变量；
-2. 仅 macOS 的 Keychain 中服务名为 `haochen-signal`、账户名为 `haochen` 的凭据；
+1. 供应商专属环境变量，例如供应商稳定 ID 为 `deepseek` 时读取 `HAOCHEN_DEEPSEEK_API_KEY`；迁移的旧供应商继续兼容 `HAOCHEN_API_KEY`；
+2. 仅 macOS 的 Keychain；新版条目以 `haochen-signal:<credentialRef>` 区分供应商，迁移的旧供应商仍可读取服务名 `haochen-signal`、账户名 `haochen` 的旧条目；
 3. 启动时临时输入，且只保存在当前进程中。
 
 首次运行会依次询问 API 地址、模型和 API Key；API Key 使用隐藏输入，终端必须保持在 Key 提示处等待输入，不会回显凭据。只有 macOS 会询问是否保存到 Keychain；Linux 和 Windows 请使用环境变量或本次启动的隐藏输入。
+
+添加供应商时可向规范化后的 `{baseUrl}/models` 发起 OpenAI-compatible `GET` 请求。响应体最多为 2 MiB，只接受对象中的非空 `data[].id`；模型 ID 会去重并按确定性字典序排列。请求支持取消和超时，响应正文、认证头与 API Key 不会进入界面错误。
 
 最直接的启动方式是：
 
