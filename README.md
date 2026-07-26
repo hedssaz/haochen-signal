@@ -58,27 +58,43 @@ export HAOCHEN_API_KEY='你的 API Key'
 haochen
 ```
 
-默认配置文件位于 `~/.config/haochen/config.json`。可配置任意 OpenAI-compatible Chat Completions 地址、主模型和独立审查模型：
+默认配置文件位于 `~/.config/haochen/config.json`。新版配置用稳定 ID 关联多个供应商和模型，API Key 只保存凭据引用，不写入该 JSON：
 
 ```json
 {
-  "baseUrl": "https://api.example.com/v1",
-  "model": "signal-main",
-  "reviewModel": "signal-review",
-  "headers": {
-    "x-project": "example"
-  },
-  "timeoutMs": 60000,
-  "contextWindow": 128000
+  "version": 2,
+  "providers": [
+    {
+      "id": "provider-example",
+      "name": "Example",
+      "baseUrl": "https://api.example.com/v1",
+      "credentialRef": "provider-example",
+      "headers": {"x-project": "example"}
+    }
+  ],
+  "models": [
+    {
+      "id": "model-example-signal-main",
+      "providerId": "provider-example",
+      "modelId": "signal-main",
+      "displayName": "Signal Main",
+      "contextWindow": 128000
+    }
+  ],
+  "activeModelId": "model-example-signal-main",
+  "timeoutMs": 60000
 }
 ```
 
-- `baseUrl`：不含用户凭据的 HTTP(S) API 根地址，不含 `/chat/completions`；
-- `model`：主代理模型；
-- `reviewModel`：红眼审查模型；省略时与主模型相同；
-- `headers`：端点需要的额外请求头；
+- `providers[].baseUrl`：不含用户凭据的 HTTP(S) API 根地址，不含 `/chat/completions`；
+- `providers[].credentialRef`：供应商凭据引用，不是 API Key；
+- `models[].modelId`：发送给供应商的真实模型 ID；
+- `models[].displayName`：终端显示名称；
+- `models[].contextWindow`：模型上下文长度，最小为 8000，新增模型默认 128000；
+- `activeModelId`：当前模型的稳定本地 ID；
 - `timeoutMs`：单次模型请求的无流量超时，范围为 1 至 300 秒；每收到一个响应流分片都会重新计时，因此持续思考或回答不会在固定总时长到达时被强制截断；
-- `contextWindow`：模型上下文长度，最小为 8000。
+
+旧版单供应商配置会在加载时迁移到 v2 内存结构，并在首次实际保存模型设置时原子写回。
 
 ## 交互使用
 
@@ -133,7 +149,7 @@ CLI 只提供持续式交互会话；首版没有执行一次即退出的任务�
 |---|---|
 | `/help` | 查看帮助 |
 | `/status` | 查看会话、模型、工作区和上下文状态 |
-| `/model [名称]` | 查看或仅切换当前会话模型 |
+| `/model` | 打开独立模型配置界面 |
 | `/diff` | 查看当前 Git 差异 |
 | `/permissions` | 查看权限规则和本次会话许可 |
 | `/compact` | 主动压缩会话上下文 |
@@ -142,6 +158,8 @@ CLI 只提供持续式交互会话；首版没有执行一次即退出的任务�
 | `/exit` | 保存并退出 |
 
 所有斜杠命令只由本地界面处理，不会发送给模型。`/diff` 只调用固定的只读 Git 工具。
+
+`/model` 会隐藏普通输入和斜杠命令建议。列表按供应商分组，按 `↑/↓` 跨组选择模型、`Enter` 切换、`A` 添加供应商、`E` 编辑显示名称和最大上下文、`D` 删除、`Esc` 返回；空列表只显示添加入口，不显示无效光标。添加向导依次输入供应商名称、API 地址和隐藏的 API Key，可获取 `/models` 列表或手动填写 Model ID；选中模型后显示名称默认等于 Model ID，最大上下文默认 128000。切换会立即更新底栏最大上下文，并按模型隔离最近一次真实 usage。
 
 不带参数执行 `/resume` 会打开当前工作区的会话选择器：按 `↑/↓` 选择、`Enter` 恢复、`Esc` 取消。列表显示更新时间、首条用户输入预览和短 ID；旧版未记录工作区归属的会话位于“工作区未知”分组，其他工作区的会话不会混入。`/resume <ID>` 仍可直接使用。
 

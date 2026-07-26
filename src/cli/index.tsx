@@ -11,6 +11,7 @@ import {loadConfig, saveConfig} from '../config/load.js';
 import {getAppPaths} from '../config/paths.js';
 import {readMacOsKeychain, saveMacOsKeychain} from '../config/credentials.js';
 import {createOpenAiCompatibleClient} from '../providers/openai-compatible.js';
+import {discoverModels} from '../providers/model-discovery.js';
 import {classifyOperation} from '../security/boundary.js';
 import {reviewOperation} from '../security/reviewer.js';
 import {AuditStore, workspaceId} from '../sessions/audit.js';
@@ -156,7 +157,16 @@ async function main(): Promise<void> {
   }
   if (config === undefined) throw new Error('无法创建配置。');
   let activeConfig = config;
+  const initialModel = activeConfig.models.find(
+    candidate => candidate.id === activeConfig.activeModelId,
+  );
+  if (initialModel === undefined) throw new Error('当前未绑定模型。');
+  const initialProvider = activeConfig.providers.find(
+    candidate => candidate.id === initialModel.providerId,
+  );
+  if (initialProvider === undefined) throw new Error('当前模型的供应商不存在。');
   apiKey ??= await resolveStartupApiKey({
+    provider: initialProvider,
     env: process.env,
     readKeychain: readMacOsKeychain,
     createInput: () => createFirstRunInput(process.stdin, process.stdout),
@@ -166,7 +176,17 @@ async function main(): Promise<void> {
   const workspace = process.cwd();
   const currentWorkspaceId = workspaceId(workspace);
   const tempDir = join(tmpdir(), 'haochen'); await mkdir(tempDir, {recursive: true});
-  const model = createOpenAiCompatibleClient(activeConfig, apiKey);
+  const model = createOpenAiCompatibleClient({
+    baseUrl: initialProvider.baseUrl,
+    headers: initialProvider.headers,
+    timeoutMs: activeConfig.timeoutMs,
+  }, apiKey);
+  const temporaryProviderKeys = new Map<string, string>([
+    [initialProvider.id, apiKey],
+  ]);
+  const currentModel = () => activeConfig.models.find(
+    candidate => candidate.id === activeConfig.activeModelId,
+  ) ?? initialModel;
   const store = new SessionStore(paths.sessionsDir); const sessionStore = createSerializedSessionStore(store); const audit = new AuditStore(paths.auditDir); const grants = new Set<string>();
   const confirmations = new InteractiveConfirmationBroker(
     process.stdin.isTTY === true && process.stdout.isTTY === true,
@@ -178,9 +198,37 @@ async function main(): Promise<void> {
   let activeInterruptionWriter: ((reason: string) => Promise<void>) | undefined;
   clearTerminalScreen(process.stdout);
   const instance = render(<App
-    workspace={workspace} sessionId={sessionId} model={activeConfig.model} contextTokens={activeConfig.contextWindow} sessionGrants={grants}
+    workspace={workspace} sessionId={sessionId} model={initialModel.modelId} contextTokens={initialModel.contextWindow} sessionGrants={grants}
+    modelConfig={activeConfig}
+    modelConfigController={{
+      discover: request => discoverModels({
+        provider: request.provider,
+        apiKey: request.apiKey,
+        timeoutMs: activeConfig.timeoutMs,
+        signal: request.signal,
+      }),
+      save: async request => {
+        if (request.credential !== undefined && process.platform === 'darwin') {
+          await saveMacOsKeychain(
+            request.credential.apiKey,
+            undefined,
+            process.platform,
+            request.credential.providerId,
+          );
+        }
+        await saveConfig(paths.configFile, request.config);
+        if (request.credential !== undefined) {
+          temporaryProviderKeys.set(
+            request.credential.providerId,
+            request.credential.apiKey,
+          );
+        }
+        activeConfig = request.config;
+      },
+    }}
     workspaceId={currentWorkspaceId}
     runTask={(task, signal) => {
+      const selectedModel = currentModel();
       const taskSessionId = sessionId;
       let interruptedWrite: Promise<void> | undefined;
       const appendInterrupted = (reason: string): Promise<void> => {
@@ -190,10 +238,10 @@ async function main(): Promise<void> {
         return interruptedWrite;
       };
       activeInterruptionWriter = appendInterrupted;
-      return runAgentTask({task, model, modelName: activeConfig.model, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: activeConfig.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
+      return runAgentTask({task, model, modelName: selectedModel.modelId, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: model, reviewModel: selectedModel.modelId, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: selectedModel.contextWindow, appendInterrupted, reportGate: event => gateReporter.report(event)});
     }}
-    executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: activeConfig.reviewModel ?? activeConfig.model, signal, reportGate: event => gateReporter.report(event)})}
-    compact={(signal, onProgress) => compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model, modelName: activeConfig.model, signal, onProgress})}
+    executeTool={(name, input, signal) => registry.execute(name, input, {workspace, tempDir, taskSummary: '执行本地斜杠命令', reviewClient: model, reviewModel: currentModel().modelId, signal, reportGate: event => gateReporter.report(event)})}
+    compact={(signal, onProgress) => compactSessionHistory({readEvents: () => sessionStore.read(sessionId), appendSummary: summaryEvent => sessionStore.append(sessionId, summaryEvent), model, modelName: currentModel().modelId, signal, onProgress})}
     saveSession={async reason => { await sessionStore.append(sessionId, {type: 'checkpoint', at: Date.now(), reason}); }} appendInterrupted={async reason => {
       if (activeInterruptionWriter !== undefined) return activeInterruptionWriter(reason);
       await sessionStore.append(sessionId, {type: 'interrupted', at: Date.now(), reason});
@@ -202,7 +250,7 @@ async function main(): Promise<void> {
       await store.initialize(nextSessionId, currentWorkspaceId);
       sessionId = nextSessionId;
       return sessionId;
-    }} listSessions={() => store.list()} resumeSession={async id => { await sessionStore.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onModelChange={next => { activeConfig = {...activeConfig, model: next}; }} onExit={async () => undefined} confirmation={confirmations} gateReporter={gateReporter}
+    }} listSessions={() => store.list()} resumeSession={async id => { await sessionStore.read(id); sessionId = id; return {id, message: `已恢复会话：${id}`}; }} onExit={async () => undefined} confirmation={confirmations} gateReporter={gateReporter}
   />);
   await instance.waitUntilExit();
 }

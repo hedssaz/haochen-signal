@@ -1,0 +1,289 @@
+import {describe, expect, it} from 'vitest';
+import type {HaochenConfig} from '../../src/config/schema.js';
+import {
+  createModelConfigState,
+  transitionModelConfig,
+  type ModelConfigAction,
+  type ModelConfigState,
+} from '../../src/cli/model-config.js';
+
+const config: HaochenConfig = {
+  version: 2,
+  providers: [
+    {
+      id: 'deepseek',
+      name: 'DeepSeek',
+      baseUrl: 'https://api.deepseek.test/v1',
+      credentialRef: 'deepseek',
+      headers: {},
+    },
+    {
+      id: 'anthropic',
+      name: 'Anthropic',
+      baseUrl: 'https://api.anthropic.test/v1',
+      credentialRef: 'anthropic',
+      headers: {},
+    },
+  ],
+  models: [
+    {
+      id: 'deepseek-chat',
+      providerId: 'deepseek',
+      modelId: 'deepseek-chat',
+      displayName: 'DeepSeek Chat',
+      contextWindow: 128_000,
+    },
+    {
+      id: 'deepseek-reasoner',
+      providerId: 'deepseek',
+      modelId: 'deepseek-reasoner',
+      displayName: 'DeepSeek Reasoner',
+      contextWindow: 128_000,
+    },
+    {
+      id: 'claude-opus',
+      providerId: 'anthropic',
+      modelId: 'claude-opus',
+      displayName: 'Claude Opus',
+      contextWindow: 200_000,
+    },
+  ],
+  activeModelId: 'deepseek-chat',
+  timeoutMs: 60_000,
+};
+
+function step(
+  state: ModelConfigState,
+  action: ModelConfigAction,
+): ModelConfigState {
+  return transitionModelConfig(state, action).state;
+}
+
+function typeText(state: ModelConfigState, text: string): ModelConfigState {
+  let current = state;
+  for (const character of text) {
+    current = step(current, {type: 'character', value: character});
+  }
+  return current;
+}
+
+describe('model configuration state machine', () => {
+  it('moves across provider groups and wraps at the ends', () => {
+    let state = createModelConfigState(config);
+
+    state = step(state, {type: 'move', delta: 1});
+    expect(state.selectedModelIndex).toBe(1);
+    state = step(state, {type: 'move', delta: 1});
+    expect(state.selectedModelIndex).toBe(2);
+    state = step(state, {type: 'move', delta: 1});
+    expect(state.selectedModelIndex).toBe(0);
+    state = step(state, {type: 'move', delta: -1});
+    expect(state.selectedModelIndex).toBe(2);
+  });
+
+  it('proposes an atomic active-model save on Enter and applies it only after success', () => {
+    let state = createModelConfigState(config);
+    state = step(state, {type: 'move', delta: 1});
+
+    const transition = transitionModelConfig(state, {type: 'submit'});
+
+    expect(transition.effect).toMatchObject({
+      type: 'save',
+      config: {activeModelId: 'deepseek-reasoner'},
+    });
+    expect(transition.state.config.activeModelId).toBe('deepseek-chat');
+    expect(transition.state.screen).toBe('saving');
+
+    state = step(transition.state, {
+      type: 'save_succeeded',
+      config: (transition.effect as Extract<typeof transition.effect, {type: 'save'}>).config,
+    });
+    expect(state.config.activeModelId).toBe('deepseek-reasoner');
+    expect(state.screen).toBe('list');
+  });
+
+  it('opens add/edit/delete actions and Esc closes the list', () => {
+    let state = createModelConfigState(config);
+
+    state = step(state, {type: 'add'});
+    expect(state.screen).toBe('provider_name');
+
+    state = createModelConfigState(config);
+    state = step(state, {type: 'edit'});
+    expect(state.screen).toBe('edit_display_name');
+    expect(state.form.displayName).toBe('DeepSeek Chat');
+
+    state = createModelConfigState(config);
+    const deletion = transitionModelConfig(state, {type: 'delete'});
+    expect(deletion.effect).toMatchObject({
+      type: 'save',
+      config: {
+        activeModelId: undefined,
+        models: expect.not.arrayContaining([
+          expect.objectContaining({id: 'deepseek-chat'}),
+        ]),
+      },
+    });
+
+    const close = transitionModelConfig(createModelConfigState(config), {type: 'escape'});
+    expect(close.effect).toEqual({type: 'close'});
+  });
+
+  it('collects provider fields, validates the URL and emits a discovery request', () => {
+    let state = step(createModelConfigState(config), {type: 'add'});
+    state = typeText(state, '  Moonshot  ');
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('provider_base_url');
+    expect(state.form.providerName).toBe('Moonshot');
+
+    state = typeText(state, 'ftp://bad.test');
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('provider_base_url');
+    expect(state.error).toContain('HTTP(S)');
+
+    while (state.form.baseUrl.length > 0) {
+      state = step(state, {type: 'backspace'});
+    }
+    state = typeText(state, 'https://api.moonshot.test/v1/');
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('provider_api_key');
+    expect(state.form.baseUrl).toBe('https://api.moonshot.test/v1');
+
+    state = typeText(state, 'super-secret');
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('provider_actions');
+
+    const discovery = transitionModelConfig(state, {type: 'submit'});
+    expect(discovery.state.screen).toBe('discovering');
+    expect(discovery.effect).toMatchObject({
+      type: 'discover',
+      apiKey: 'super-secret',
+      provider: {
+        name: 'Moonshot',
+        baseUrl: 'https://api.moonshot.test/v1',
+        headers: {},
+      },
+    });
+  });
+
+  it('selects a discovered model and defaults details to 128000', () => {
+    let state = step(createModelConfigState(config), {type: 'add'});
+    state = typeText(state, 'Moonshot');
+    state = step(state, {type: 'submit'});
+    state = typeText(state, 'https://api.moonshot.test/v1');
+    state = step(state, {type: 'submit'});
+    state = typeText(state, 'secret');
+    state = step(state, {type: 'submit'});
+    state = step(state, {type: 'submit'});
+    state = step(state, {
+      type: 'discovery_succeeded',
+      modelIds: ['moonshot-v1', 'moonshot-v1', 'moonshot-a'],
+    });
+
+    expect(state.screen).toBe('discovered_models');
+    expect(state.discoveredModelIds).toEqual(['moonshot-a', 'moonshot-v1']);
+    state = step(state, {type: 'move', delta: 1});
+    state = step(state, {type: 'submit'});
+
+    expect(state.screen).toBe('model_display_name');
+    expect(state.form.modelId).toBe('moonshot-v1');
+    expect(state.form.displayName).toBe('moonshot-v1');
+    expect(state.form.contextWindow).toBe('128000');
+  });
+
+  it('supports manual Model ID and keeps the API key out of saved config', () => {
+    let state = step(createModelConfigState(config), {type: 'add'});
+    state = typeText(state, 'Moonshot');
+    state = step(state, {type: 'submit'});
+    state = typeText(state, 'https://api.moonshot.test/v1');
+    state = step(state, {type: 'submit'});
+    state = typeText(state, 'super-secret');
+    state = step(state, {type: 'submit'});
+    state = step(state, {type: 'move', delta: 1});
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('manual_model_id');
+
+    state = typeText(state, 'moonshot-v1');
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('model_display_name');
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('model_context_window');
+
+    const save = transitionModelConfig(state, {type: 'submit'});
+    expect(save.effect).toMatchObject({
+      type: 'save',
+      credential: {
+        apiKey: 'super-secret',
+      },
+      config: {
+        activeModelId: expect.any(String),
+        providers: expect.arrayContaining([
+          expect.objectContaining({name: 'Moonshot'}),
+        ]),
+        models: expect.arrayContaining([
+          expect.objectContaining({
+            modelId: 'moonshot-v1',
+            displayName: 'moonshot-v1',
+            contextWindow: 128_000,
+          }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(
+      (save.effect as Extract<typeof save.effect, {type: 'save'}>).config,
+    )).not.toContain('super-secret');
+  });
+
+  it('edits display name and context while rejecting context below 8000', () => {
+    let state = step(createModelConfigState(config), {type: 'edit'});
+    while (state.form.displayName.length > 0) state = step(state, {type: 'backspace'});
+    state = typeText(state, 'DeepSeek V4 Pro');
+    state = step(state, {type: 'submit'});
+    expect(state.screen).toBe('edit_context_window');
+
+    while (state.form.contextWindow.length > 0) state = step(state, {type: 'backspace'});
+    state = typeText(state, '7999');
+    state = step(state, {type: 'submit'});
+    expect(state.error).toContain('8,000');
+
+    while (state.form.contextWindow.length > 0) state = step(state, {type: 'backspace'});
+    state = typeText(state, '256000');
+    const save = transitionModelConfig(state, {type: 'submit'});
+    expect(save.effect).toMatchObject({
+      type: 'save',
+      config: {
+        models: expect.arrayContaining([
+          expect.objectContaining({
+            id: 'deepseek-chat',
+            displayName: 'DeepSeek V4 Pro',
+            contextWindow: 256_000,
+          }),
+        ]),
+      },
+    });
+  });
+
+  it('shows discovery errors without discarding provider fields', () => {
+    let state = step(createModelConfigState(config), {type: 'add'});
+    state = typeText(state, 'Moonshot');
+    state = step(state, {type: 'submit'});
+    state = typeText(state, 'https://api.moonshot.test/v1');
+    state = step(state, {type: 'submit'});
+    state = typeText(state, 'secret');
+    state = step(state, {type: 'submit'});
+    state = step(state, {type: 'submit'});
+
+    state = step(state, {
+      type: 'discovery_failed',
+      message: '获取模型失败：HTTP 401。',
+    });
+
+    expect(state.screen).toBe('provider_actions');
+    expect(state.error).toContain('HTTP 401');
+    expect(state.form).toMatchObject({
+      providerName: 'Moonshot',
+      baseUrl: 'https://api.moonshot.test/v1',
+      apiKey: 'secret',
+    });
+  });
+});

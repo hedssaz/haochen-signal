@@ -5,6 +5,7 @@ import {App, formatTokenCount} from '../../src/cli/app.js';
 import type {AgentUiEvent} from '../../src/cli/reducer.js';
 import type {ToolResult} from '../../src/tools/types.js';
 import {GateReporter} from '../../src/cli/gate-reporter.js';
+import type {HaochenConfig} from '../../src/config/schema.js';
 
 async function* scriptedEvents(): AsyncIterable<AgentUiEvent> {
   yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
@@ -18,6 +19,38 @@ async function* scriptedEvents(): AsyncIterable<AgentUiEvent> {
 
 const idleTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {});
 const toolResult: ToolResult = {ok: true, summary: '当前差异为空'};
+const modelConfig: HaochenConfig = {
+  version: 2,
+  providers: [{
+    id: 'deepseek',
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.test/v1',
+    credentialRef: 'deepseek',
+    headers: {},
+  }],
+  models: [{
+    id: 'deepseek-chat',
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    displayName: 'DeepSeek Chat',
+    contextWindow: 128_000,
+  }],
+  activeModelId: 'deepseek-chat',
+  timeoutMs: 60_000,
+};
+const multiModelConfig: HaochenConfig = {
+  ...modelConfig,
+  models: [
+    modelConfig.models[0]!,
+    {
+      id: 'deepseek-reasoner',
+      providerId: 'deepseek',
+      modelId: 'deepseek-reasoner',
+      displayName: 'DeepSeek Reasoner',
+      contextWindow: 256_000,
+    },
+  ],
+};
 
 async function waitForInputListener(): Promise<void> {
   await new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -194,7 +227,7 @@ describe('App', () => {
     await vi.waitFor(() => expect(app.lastFrame()).toContain('浩宸 › /help'));
   });
 
-  it.each(['/help', '/status', '/model wolf-3', '/diff', '/permissions', '/compact', '/clear', '/resume abc', '/exit'])(
+  it.each(['/help', '/status', '/model', '/diff', '/permissions', '/compact', '/clear', '/resume abc', '/exit'])(
     'handles %s locally without sending it to the model',
     async command => {
       const onExit = vi.fn(async () => undefined);
@@ -219,6 +252,91 @@ describe('App', () => {
       expect(idleTask).not.toHaveBeenCalled();
     },
   );
+
+  it('opens /model as an independent panel and hides ordinary input and suggestions', async () => {
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="deepseek-chat"
+      modelConfig={modelConfig}
+      modelConfigController={{
+        discover: vi.fn(async () => []),
+        save: vi.fn(async () => undefined),
+      }}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/model');
+    app.stdin.write('\r');
+
+    await vi.waitFor(() => {
+      const frame = app.lastFrame();
+      expect(frame).toContain('模型配置');
+      expect(frame).toContain('DeepSeek Chat');
+      expect(frame).not.toContain('浩宸 › ');
+      expect(frame).not.toContain('斜杠命令');
+    });
+
+    app.stdin.write('\u001B');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).not.toContain('A 添加供应商');
+      expect(app.lastFrame()).toContain('浩宸 ›');
+    });
+  });
+
+  it('updates the context limit immediately and isolates recent usage by model', async () => {
+    const save = vi.fn(async () => undefined);
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'usage', inputTokens: 12, outputTokens: 3};
+      yield {type: 'assistant_text', text: '完成'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="deepseek-chat"
+      modelConfig={multiModelConfig}
+      modelConfigController={{
+        discover: vi.fn(async () => []),
+        save,
+      }}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('记录用量');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('上下文 15 / 128k');
+    });
+
+    app.stdin.write('/model');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('模型配置'));
+    app.stdin.write('\u001B[B');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalledWith(expect.objectContaining({
+        config: expect.objectContaining({activeModelId: 'deepseek-reasoner'}),
+      }));
+      expect(app.lastFrame()).toContain('● DeepSeek Reasoner');
+    });
+    app.stdin.write('\u001B');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('上下文 0 / 256k');
+    });
+
+    app.stdin.write('/model');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('模型配置'));
+    app.stdin.write('\u001B[A');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('● DeepSeek Chat'));
+    app.stdin.write('\u001B');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('上下文 15 / 128k');
+    });
+  });
 
   it('reads the latest session grant count when permissions are requested', async () => {
     const sessionGrants = new Set<string>();

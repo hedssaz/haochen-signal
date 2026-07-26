@@ -34,7 +34,7 @@ export interface SlashCommandDefinition {
 export const slashCommandDefinitions: readonly SlashCommandDefinition[] = [
   {name: 'help', usage: '/help', description: '查看帮助'},
   {name: 'status', usage: '/status', description: '查看会话状态'},
-  {name: 'model', usage: '/model [名称]', description: '查看或切换模型'},
+  {name: 'model', usage: '/model', description: '打开模型配置'},
   {name: 'diff', usage: '/diff', description: '查看 Git 差异'},
   {name: 'permissions', usage: '/permissions', description: '查看权限规则'},
   {name: 'compact', usage: '/compact', description: '压缩会话上下文'},

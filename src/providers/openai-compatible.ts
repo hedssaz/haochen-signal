@@ -10,6 +10,16 @@ interface ClientOptions {
   now?: () => number;
 }
 
+export interface OpenAiCompatibleEndpointConfig {
+  baseUrl: string;
+  headers: Record<string, string>;
+  timeoutMs: number;
+}
+
+export type OpenAiCompatibleClientConfig =
+  | OpenAiCompatibleEndpointConfig
+  | HaochenConfig;
+
 interface ToolCallDelta {
   index: number;
   id?: string;
@@ -377,27 +387,45 @@ async function* streamResponse(
 }
 
 export function createOpenAiCompatibleClient(
-  config: HaochenConfig,
+  config: OpenAiCompatibleClientConfig,
   apiKey: string,
   options: ClientOptions = {},
 ): ModelClient {
+  const endpointConfig: OpenAiCompatibleEndpointConfig = 'baseUrl' in config
+    ? config
+    : (() => {
+      const model = config.models.find(
+        candidate => candidate.id === config.activeModelId,
+      );
+      const provider = config.providers.find(
+        candidate => candidate.id === model?.providerId,
+      );
+      if (model === undefined || provider === undefined) {
+        throw new ModelProviderError('No active model provider is configured');
+      }
+      return {
+        baseUrl: provider.baseUrl,
+        headers: provider.headers,
+        timeoutMs: config.timeoutMs,
+      };
+    })();
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const sleep = options.sleep ?? defaultSleep;
   const now = options.now ?? Date.now;
 
   return {
     async *stream(request: ModelRequest, callerSignal: AbortSignal) {
-      const operation = createOperationSignal(callerSignal, config.timeoutMs);
+      const operation = createOperationSignal(callerSignal, endpointConfig.timeoutMs);
 
       try {
         let secrets = collectSensitiveValues(
-          Object.entries(config.headers),
+          Object.entries(endpointConfig.headers),
           apiKey,
         );
         let headers: Headers;
         let body: string;
         try {
-          headers = new Headers(config.headers);
+          headers = new Headers(endpointConfig.headers);
           headers.set('content-type', 'application/json');
           headers.set('authorization', `Bearer ${apiKey}`);
           secrets = collectSensitiveValues(headers, apiKey, secrets);
@@ -416,7 +444,7 @@ export function createOpenAiCompatibleClient(
             fetchImpl,
             sleep,
             now,
-            `${config.baseUrl}/chat/completions`,
+            `${endpointConfig.baseUrl}/chat/completions`,
             {
               method: 'POST',
               headers,

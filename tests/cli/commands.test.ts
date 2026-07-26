@@ -5,7 +5,7 @@ describe('parseSlashCommand', () => {
   it.each([
     ['/help', {name: 'help', args: []}],
     ['/status', {name: 'status', args: []}],
-    ['/model wolf-2', {name: 'model', args: ['wolf-2']}],
+    ['/model', {name: 'model', args: []}],
     ['/diff', {name: 'diff', args: []}],
     ['/permissions', {name: 'permissions', args: []}],
     ['/compact', {name: 'compact', args: []}],

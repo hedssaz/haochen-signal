@@ -11,6 +11,20 @@ import {
   type ResumePickerState,
 } from './resume-picker.js';
 import type {GateReporter} from './gate-reporter.js';
+import type {
+  HaochenConfig,
+  ModelProfile,
+} from '../config/schema.js';
+import {redactValue} from '../security/redact.js';
+import {
+  createModelConfigState,
+  transitionModelConfig,
+  type ModelConfigAction,
+  type ModelConfigController,
+  type ModelConfigEffect,
+  type ModelConfigState,
+} from './model-config.js';
+import {ModelConfigView} from './model-config-view.js';
 
 export interface SessionSummary {
   id: string;
@@ -38,6 +52,8 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   sessionId: string;
   model: string;
   contextTokens?: number;
+  modelConfig?: HaochenConfig;
+  modelConfigController?: ModelConfigController;
   sessionGrants?: ReadonlySet<string>;
   executeTool?: (name: string, input: unknown, signal: AbortSignal) => Promise<ToolResult>;
   compact?: (
@@ -50,6 +66,10 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   listSessions?: () => Promise<SessionSummary[]>;
   resumeSession?: (id: string) => Promise<ResumeResult>;
   onModelChange?: (model: string) => void;
+  onActiveModelChange?: (
+    model: ModelProfile | undefined,
+    config: HaochenConfig,
+  ) => void;
   onExit?: () => Promise<void> | void;
   confirmation?: ConfirmationBroker;
   gateReporter?: GateReporter;
@@ -63,7 +83,7 @@ const banner = [
 
 const helpText = [
   '内置命令：',
-  '/help  帮助  /status  状态  /model [名称]  模型',
+  '/help  帮助  /status  状态  /model  模型配置',
   '/diff  差异  /permissions  权限  /compact  压缩',
   '/clear  新会话  /resume [ID]  恢复  /exit  退出',
 ].join('\n');
@@ -74,6 +94,37 @@ type ForegroundOperation = {
   kind: 'agent' | 'compact';
   controller: AbortController;
 };
+
+function safeErrorMessage(
+  error: unknown,
+  fallback: string,
+  secrets: readonly string[] = [],
+): string {
+  let message: string;
+  try {
+    if (
+      (typeof error === 'object' && error !== null)
+      || typeof error === 'function'
+    ) {
+      const candidate = error as {message?: unknown};
+      message = typeof candidate.message === 'string'
+        ? candidate.message
+        : String(error);
+    } else {
+      message = String(error);
+    }
+  } catch {
+    return fallback;
+  }
+  const redacted = redactValue(message);
+  if (typeof redacted !== 'string' || redacted.trim().length === 0) return fallback;
+  return secrets.reduce(
+    (result, secret) => secret.length === 0
+      ? result
+      : result.replaceAll(secret, '[REDACTED]'),
+    redacted,
+  );
+}
 
 export function formatTokenCount(count: number): string {
   if (count >= 1_000_000) {
@@ -135,6 +186,8 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const {exit} = useApp();
   const [state, setState] = useState(initialUiState);
   const [model, setModel] = useState(props.model);
+  const [modelConfiguration, setModelConfiguration] = useState(props.modelConfig);
+  const [modelConfigState, setModelConfigState] = useState<ModelConfigState | undefined>();
   const [sessionId, setSessionId] = useState(props.sessionId);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | undefined>(
     () => props.confirmation?.getPending(),
@@ -144,11 +197,31 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
   const [streamPhase, setStreamPhase] = useState<StreamPhase>('complete');
   const [streamTokenCount, setStreamTokenCount] = useState(0);
   const resumePickerRef = useRef<ResumePickerState | undefined>(undefined);
+  const modelConfigurationRef = useRef(props.modelConfig);
+  const modelConfigStateRef = useRef<ModelConfigState | undefined>(undefined);
+  const modelConfigEffectRef = useRef<(effect: ModelConfigEffect) => void>(() => undefined);
+  const modelDiscoveryController = useRef<AbortController | undefined>(undefined);
+  const usageByModelId = useRef(new Map<string, number>());
   const inputRef = useRef('');
   const activeOperation = useRef<ForegroundOperation | undefined>(undefined);
   const abortRequested = useRef(false);
   const interruptedPersisted = useRef(false);
   const exiting = useRef(false);
+
+  const activeConfiguredModel = modelConfiguration?.models.find(
+    candidate => candidate.id === modelConfiguration.activeModelId,
+  );
+  const displayedModel = modelConfiguration === undefined
+    ? model
+    : activeConfiguredModel?.displayName ?? '未绑定模型';
+  const displayedContextLimit = modelConfiguration === undefined
+    ? props.contextTokens ?? 0
+    : activeConfiguredModel?.contextWindow ?? 0;
+  const displayedUsedContext = modelConfiguration === undefined
+    ? state.usedContext
+    : modelConfiguration.activeModelId === undefined
+      ? 0
+      : usageByModelId.current.get(modelConfiguration.activeModelId) ?? 0;
 
   const dispatch = useCallback((event: Parameters<typeof uiReducer>[1]) => {
     setState(previous => uiReducer(previous, event));
@@ -158,9 +231,130 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     dispatch({type: 'notice', entry: localEntry(prefix, text)});
   }, [dispatch]);
 
+  const applyModelConfigAction = useCallback((action: ModelConfigAction) => {
+    const current = modelConfigStateRef.current;
+    if (current === undefined) return;
+    const transition = transitionModelConfig(current, action);
+    modelConfigStateRef.current = transition.state;
+    setModelConfigState(transition.state);
+    if (transition.effect !== undefined) {
+      modelConfigEffectRef.current(transition.effect);
+    }
+  }, []);
+
+  const performModelConfigEffect = useCallback((effect: ModelConfigEffect) => {
+    switch (effect.type) {
+      case 'close':
+        modelDiscoveryController.current?.abort();
+        modelDiscoveryController.current = undefined;
+        modelConfigStateRef.current = undefined;
+        setModelConfigState(undefined);
+        return;
+      case 'cancel_discovery':
+        modelDiscoveryController.current?.abort();
+        modelDiscoveryController.current = undefined;
+        return;
+      case 'discover': {
+        const controller = new AbortController();
+        modelDiscoveryController.current?.abort();
+        modelDiscoveryController.current = controller;
+        if (props.modelConfigController === undefined) {
+          applyModelConfigAction({
+            type: 'discovery_failed',
+            message: '当前未配置模型发现控制器。',
+          });
+          return;
+        }
+        void props.modelConfigController.discover({
+          provider: effect.provider,
+          apiKey: effect.apiKey,
+          signal: controller.signal,
+        }).then(
+          modelIds => {
+            if (
+              controller.signal.aborted
+              || modelDiscoveryController.current !== controller
+            ) return;
+            modelDiscoveryController.current = undefined;
+            applyModelConfigAction({type: 'discovery_succeeded', modelIds});
+          },
+          error => {
+            if (
+              controller.signal.aborted
+              || modelDiscoveryController.current !== controller
+            ) return;
+            modelDiscoveryController.current = undefined;
+            applyModelConfigAction({
+              type: 'discovery_failed',
+              message: safeErrorMessage(
+                error,
+                '获取模型失败。',
+                [effect.apiKey],
+              ),
+            });
+          },
+        );
+        return;
+      }
+      case 'save': {
+        if (props.modelConfigController === undefined) {
+          applyModelConfigAction({
+            type: 'save_failed',
+            message: '当前未配置模型保存控制器。',
+          });
+          return;
+        }
+        void props.modelConfigController.save({
+          config: effect.config,
+          credential: effect.credential,
+        }).then(
+          () => {
+            modelConfigurationRef.current = effect.config;
+            setModelConfiguration(effect.config);
+            const active = effect.config.models.find(
+              candidate => candidate.id === effect.config.activeModelId,
+            );
+            if (active !== undefined) {
+              setModel(active.modelId);
+              props.onModelChange?.(active.modelId);
+            }
+            props.onActiveModelChange?.(active, effect.config);
+            applyModelConfigAction({
+              type: 'save_succeeded',
+              config: effect.config,
+            });
+          },
+          error => applyModelConfigAction({
+            type: 'save_failed',
+            message: safeErrorMessage(
+              error,
+              '保存模型配置失败。',
+              effect.credential === undefined
+                ? []
+                : [effect.credential.apiKey],
+            ),
+          }),
+        );
+        return;
+      }
+    }
+  }, [
+    applyModelConfigAction,
+    props.modelConfigController,
+    props.onActiveModelChange,
+    props.onModelChange,
+  ]);
+
+  modelConfigEffectRef.current = performModelConfigEffect;
+
   useEffect(() => props.confirmation?.subscribe(() => {
     setPendingConfirmation(props.confirmation?.getPending());
   }), [props.confirmation]);
+
+  useEffect(() => {
+    modelConfigurationRef.current = props.modelConfig;
+    setModelConfiguration(props.modelConfig);
+  }, [props.modelConfig]);
 
   useEffect(() => props.gateReporter?.subscribe(event => {
     if (event.type === 'review_started') {
@@ -227,6 +421,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     setStreamTokenCount(0);
     setStreamPhase('thinking');
     setRuntimeStatus('正在理解任务');
+    const taskModelId = modelConfigurationRef.current?.activeModelId;
     try {
       for await (const event of props.runTask(task, controller.signal)) {
         if (event.type === 'interrupted') interruptedPersisted.current = true;
@@ -238,6 +433,12 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
           setStreamPhase('answering');
         } else if (event.type === 'assistant_turn_finished' || event.type === 'assistant_message') {
           setStreamPhase('complete');
+        }
+        if (event.type === 'usage' && taskModelId !== undefined) {
+          usageByModelId.current.set(
+            taskModelId,
+            event.inputTokens + event.outputTokens,
+          );
         }
         if (event.type === 'assistant_delta' || event.type === 'assistant_message') {
           setRuntimeStatus('正在规划');
@@ -283,22 +484,25 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         return;
       case 'status':
         appendNotice('◆', [
-          `模型：${model}`,
+          `模型：${displayedModel}`,
           `工作区：${props.workspace}`,
           `会话：${sessionId}`,
-          `上下文估算：${props.contextTokens ?? 0} tokens`,
+          `上下文估算：${displayedContextLimit} tokens`,
           `当前阶段：${state.phase}`,
         ].join('\n'));
         return;
       case 'model': {
-        const nextModel = command.args.join(' ').trim();
-        if (nextModel.length === 0) {
-          appendNotice('◆', `当前模型：${model}`);
+        if (command.args.length > 0) {
+          appendNotice('✗', '/model 不接受参数，请在独立界面中选择模型。');
           return;
         }
-        setModel(nextModel);
-        props.onModelChange?.(nextModel);
-        appendNotice('◆', `当前会话模型已切换为：${nextModel}`);
+        if (modelConfiguration === undefined) {
+          appendNotice('✗', '当前未提供模型配置。');
+          return;
+        }
+        const nextState = createModelConfigState(modelConfiguration);
+        modelConfigStateRef.current = nextState;
+        setModelConfigState(nextState);
         return;
       }
       case 'diff': {
@@ -384,9 +588,21 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         appendNotice('✗', `未知命令：${command.raw}`);
         return;
     }
-  }, [appendNotice, dispatch, leave, model, props, runTask, sessionId, state.phase]);
+  }, [
+    appendNotice,
+    dispatch,
+    displayedContextLimit,
+    displayedModel,
+    leave,
+    modelConfiguration,
+    props,
+    runTask,
+    sessionId,
+    state.phase,
+  ]);
 
   useInput((input, key) => {
+    if (modelConfigState !== undefined) return;
     if (key.ctrl && input.toLowerCase() === 'c') {
       const operation = activeOperation.current;
       if (operation === undefined) {
@@ -486,6 +702,13 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     ? []
     : visibleResumeItems(resumePicker, 8);
 
+  if (modelConfigState !== undefined) {
+    return <ModelConfigView
+      state={modelConfigState}
+      onAction={applyModelConfigAction}
+    />;
+  }
+
   return <Box flexDirection="column">
     <Text>{banner}</Text>
     <Box flexDirection="column" marginTop={1}>
@@ -508,7 +731,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       <Text>{state.liveAssistant}</Text>
     </Box>}
     <Text dimColor>
-      {`↓ ${formatTokenCount(streamTokenCount)} tokens · ${phaseLabel(streamPhase)} · 上下文 ${formatTokenCount(state.usedContext)} / ${formatTokenCount(props.contextTokens ?? 0)}`}
+      {`↓ ${formatTokenCount(streamTokenCount)} tokens · ${phaseLabel(streamPhase)} · 上下文 ${formatTokenCount(displayedUsedContext)} / ${formatTokenCount(displayedContextLimit)}`}
     </Text>
     {!state.showPreviousRoundUsage && pendingConfirmation === undefined ? null : <Text dimColor>
       {state.previousRoundTotal === undefined
