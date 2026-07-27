@@ -452,6 +452,7 @@ describe('App', () => {
       workspace="/workspace"
       sessionId="signal-1"
       model="wolf-2"
+      maxToolCalls={32}
     />);
 
     await waitForInputListener();
@@ -1170,7 +1171,7 @@ describe('App', () => {
     app.stdin.write('\r');
     await vi.waitFor(() => {
       expect(app.lastFrame()).toContain(
-        '状态 › 运行中 · 正在调用 read_file · Ctrl+C 中止',
+        '状态 › 运行中 · 正在调用 read_file · 工具 1/32 次 · Ctrl+C 中止',
       );
       expect(app.lastFrame()).toContain('输入已锁定 · 等待任务完成，Ctrl+C 中止');
       expect(app.lastFrame()).not.toContain('状态 › 状态');
@@ -1181,6 +1182,39 @@ describe('App', () => {
     await vi.waitFor(() => {
       expect(app.lastFrame()).not.toContain('状态 › 运行中');
       expect((app.lastFrame() ?? '').trimEnd()).toMatch(/浩宸 ›$/);
+    });
+  });
+
+  it('shows the latest tool count while a task is running', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
+      yield {type: 'tool_started', name: 'git_status', input: {}};
+      await blocked;
+      yield {type: 'assistant_text', text: '完成'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+      maxToolCalls={5}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('检查项目');
+    app.stdin.write('\r');
+
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain(
+        '状态 › 运行中 · 正在调用 git_status · 工具 2/5 次 · Ctrl+C 中止',
+      );
+    });
+
+    release();
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).not.toContain('状态 › 运行中');
     });
   });
 

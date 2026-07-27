@@ -337,6 +337,28 @@ describe('uiReducer', () => {
     });
   });
 
+  it('resets and counts real tool starts for each task', () => {
+    const previous = {
+      ...initialUiState,
+      toolCallCount: 7,
+    };
+    const started = uiReducer(previous, {type: 'task_started'});
+    const first = uiReducer(started, {
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'README.md'},
+    });
+    const second = uiReducer(first, {
+      type: 'tool_started',
+      name: 'git_status',
+      input: {},
+    });
+
+    expect(started.toolCallCount).toBe(0);
+    expect(first.toolCallCount).toBe(1);
+    expect(second.toolCallCount).toBe(2);
+  });
+
   it('maps write_file to a creation entry without exposing its content', () => {
     const state = uiReducer(initialUiState, {
       type: 'tool_started',

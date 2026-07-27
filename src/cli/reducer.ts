@@ -41,6 +41,7 @@ export interface UiState {
   roundUsageTotal?: number;
   previousRoundTotal?: number;
   showPreviousRoundUsage: boolean;
+  toolCallCount: number;
   taskTranscriptStart?: number;
   activeTool?: {name: string; summary: string};
   error?: string;
@@ -78,6 +79,7 @@ export const initialUiState: UiState = {
   liveAssistant: '',
   usedContext: 0,
   showPreviousRoundUsage: false,
+  toolCallCount: 0,
 };
 
 const toolSummary: Record<string, string> = {
@@ -203,6 +205,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       roundUsageTotal: undefined,
       previousRoundTotal: undefined,
       showPreviousRoundUsage: false,
+      toolCallCount: 0,
       taskTranscriptStart: state.transcript.length,
     };
   }
@@ -301,6 +304,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       }, {
         phase: 'running_tool',
         showPreviousRoundUsage: true,
+        toolCallCount: state.toolCallCount + 1,
         activeTool: {name: event.name, summary},
         error: undefined,
       });

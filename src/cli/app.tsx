@@ -62,6 +62,7 @@ export interface AppProps<Event extends AgentUiEvent = AgentUiEvent> {
   sessionId: string;
   model: string;
   contextTokens?: number;
+  maxToolCalls?: number;
   modelConfig?: HaochenConfig;
   modelConfigController?: ModelConfigController;
   sessionGrants?: ReadonlySet<string>;
@@ -944,7 +945,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       <Text dimColor>↑/↓ 选择 · Enter 恢复 · Esc 取消</Text>
     </Box>}
     {runtimeStatus === undefined ? null : <Text color="yellow">
-      {`状态 › 运行中 · ${runtimeStatus} · Ctrl+C 中止`}
+      {`状态 › 运行中 · ${runtimeStatus} · 工具 ${state.toolCallCount}/${props.maxToolCalls ?? 32} 次 · Ctrl+C 中止`}
     </Text>}
     {pendingCredential !== undefined ? null : runtimeStatus === undefined ? <Box marginTop={1}>
       <Text color="cyan">浩宸 › </Text><Text>{state.input}</Text>

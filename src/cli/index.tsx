@@ -61,6 +61,8 @@ export {createTaskInterruptionRouter} from './task-interruption.js';
 export {createLatestModelConfigSaver} from './model-config.js';
 
 const args = new Set(process.argv.slice(2));
+const MAX_AGENT_TURNS = 16;
+const MAX_AGENT_TOOL_CALLS = 32;
 
 function showHelp(): void {
   process.stdout.write(`${PRODUCT_NAME} · ${PRODUCT_ENGLISH_NAME}\n\nUsage: ${CLI_NAME} [--help] [--version]\n`);
@@ -337,6 +339,7 @@ async function main(): Promise<void> {
   clearTerminalScreen(process.stdout);
   const instance = render(<App
     workspace={workspace} sessionId={sessionId} model={initialModel?.modelId ?? ''} contextTokens={initialModel?.contextWindow ?? 0} sessionGrants={grants}
+    maxToolCalls={MAX_AGENT_TOOL_CALLS}
     modelConfig={activeConfig}
     modelConfigController={{
       discover: async request => {
@@ -377,7 +380,7 @@ async function main(): Promise<void> {
       const taskInterruption = interruptionRouter.beginTask(taskSessionId);
       try {
         const runtime = await resolveModelRuntime(signal);
-        yield* runAgentTask({task, model: runtime.client, modelName: runtime.model.modelId, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: runtime.client, reviewModel: runtime.model.modelId, limits: {maxTurns: 16, maxToolCalls: 32}, signal, maxContextTokens: runtime.model.contextWindow, appendInterrupted: taskInterruption.appendInterrupted, reportGate: event => gateReporter.report(event)});
+        yield* runAgentTask({task, model: runtime.client, modelName: runtime.model.modelId, registry, session: {id: taskSessionId, store: sessionStore}, workspace, tempDir, reviewClient: runtime.client, reviewModel: runtime.model.modelId, limits: {maxTurns: MAX_AGENT_TURNS, maxToolCalls: MAX_AGENT_TOOL_CALLS}, signal, maxContextTokens: runtime.model.contextWindow, appendInterrupted: taskInterruption.appendInterrupted, reportGate: event => gateReporter.report(event)});
       } finally {
         taskInterruption.finish();
       }
