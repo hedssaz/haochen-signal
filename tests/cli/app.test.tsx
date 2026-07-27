@@ -9,6 +9,7 @@ import type {HaochenConfig} from '../../src/config/schema.js';
 import {resolveStartupApiKey} from '../../src/cli/startup-credentials.js';
 import {createTaskInterruptionRouter} from '../../src/cli/task-interruption.js';
 import type {SessionEvent} from '../../src/sessions/types.js';
+import {createLatestModelConfigSaver} from '../../src/cli/model-config.js';
 
 async function* scriptedEvents(): AsyncIterable<AgentUiEvent> {
   yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
@@ -765,6 +766,79 @@ describe('App', () => {
       expect(app.lastFrame()).toContain('上下文 0 / 512k');
     });
   });
+
+  it.each([
+    ['canceled before persistence', 'cancel'],
+    ['rejected by persistence', 'reject'],
+  ] as const)(
+    'reconciles the UI to committed A when queued B is %s',
+    async (_description, outcome) => {
+      let releaseA!: () => void;
+      const aGate = new Promise<void>(resolve => {
+        releaseA = resolve;
+      });
+      let diskConfig: HaochenConfig = threeModelConfig;
+      let committedConfig: HaochenConfig = threeModelConfig;
+      const persistFailure = new Error('B persistence failed');
+      const save = createLatestModelConfigSaver({
+        persist: async request => {
+          if (request.config.activeModelId === 'deepseek-reasoner') {
+            await aGate;
+            diskConfig = request.config;
+            return;
+          }
+          throw persistFailure;
+        },
+        commit: request => {
+          committedConfig = request.config;
+        },
+      });
+      const onActiveModelChange = vi.fn();
+      const modelConfigController = {
+        discover: vi.fn(async () => []),
+        save,
+        getCommittedConfig: () => committedConfig,
+      };
+      const app = render(<App
+        runTask={idleTask}
+        workspace="/workspace"
+        sessionId="signal-1"
+        model="deepseek-chat"
+        modelConfig={threeModelConfig}
+        modelConfigController={modelConfigController}
+        onActiveModelChange={onActiveModelChange}
+      />);
+
+      await waitForInputListener();
+      app.stdin.write('/model');
+      app.stdin.write('\r');
+      await vi.waitFor(() => expect(app.lastFrame()).toContain('模型配置'));
+      app.stdin.write('\u001B[B');
+      app.stdin.write('\r');
+      await vi.waitFor(() => expect(app.lastFrame()).toContain('正在保存模型配置'));
+      app.stdin.write('\u0003');
+      await vi.waitFor(() => expect(app.lastFrame()).not.toContain('正在保存模型配置'));
+
+      app.stdin.write('\u001B[B');
+      app.stdin.write('\r');
+      await vi.waitFor(() => expect(app.lastFrame()).toContain('正在保存模型配置'));
+      if (outcome === 'cancel') {
+        app.stdin.write('\u0003');
+        await vi.waitFor(() => expect(app.lastFrame()).not.toContain('正在保存模型配置'));
+      }
+      releaseA();
+
+      await vi.waitFor(() => {
+        expect(diskConfig.activeModelId).toBe('deepseek-reasoner');
+        expect(committedConfig.activeModelId).toBe('deepseek-reasoner');
+        expect(onActiveModelChange).toHaveBeenLastCalledWith(
+          expect.objectContaining({id: 'deepseek-reasoner'}),
+          expect.objectContaining({activeModelId: 'deepseek-reasoner'}),
+        );
+        expect(app.lastFrame()).toContain('› ● DeepSeek Reasoner');
+      });
+    },
+  );
 
   it('updates the context limit immediately and isolates recent usage by model', async () => {
     const save = vi.fn(async () => undefined);

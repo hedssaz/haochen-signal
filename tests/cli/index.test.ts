@@ -353,7 +353,7 @@ describe('CLI entrypoint', () => {
     expect(source).toContain('taskInterruption.finish()');
   });
 
-  it('serializes model config saves and lets only the latest generation update runtime state', async () => {
+  it('serializes model config saves and applies runtime commits in persistence order', async () => {
     const cli = await importCliForTest();
     expect(cli.createLatestModelConfigSaver).toBeTypeOf('function');
     if (cli.createLatestModelConfigSaver === undefined) return;
@@ -368,6 +368,7 @@ describe('CLI entrypoint', () => {
     const persistOrder: string[] = [];
     let diskConfig: HaochenConfig | undefined;
     let runtimeState: HaochenConfig | undefined;
+    const runtimeCommits: string[] = [];
     let temporaryContents = '';
     const files = {
       mkdir: vi.fn(async () => undefined),
@@ -402,6 +403,7 @@ describe('CLI entrypoint', () => {
       },
       commit: request => {
         runtimeState = request.config;
+        runtimeCommits.push(request.config.activeModelId ?? 'none');
       },
     });
 
@@ -419,7 +421,7 @@ describe('CLI entrypoint', () => {
     await Promise.resolve();
     expect(persistOrder).toEqual(['start:A']);
     releaseA();
-    await expect(saveA).rejects.toMatchObject({name: 'AbortError'});
+    await expect(saveA).resolves.toBeUndefined();
     await expect(saveB).resolves.toBeUndefined();
 
     expect(persistOrder).toEqual([
@@ -428,6 +430,7 @@ describe('CLI entrypoint', () => {
       'start:B',
       'finish:B',
     ]);
+    expect(runtimeCommits).toEqual(['model-a', 'model-b']);
     expect(diskConfig).toEqual(configB);
     expect(runtimeState).toBe(configB);
     expect(files.unlink).not.toHaveBeenCalled();
@@ -490,6 +493,89 @@ describe('CLI entrypoint', () => {
     expect(runtimeState).toBe(configA);
     expect(files.unlink).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['canceled before persistence', 'cancel'],
+    ['rejected by persistence', 'reject'],
+  ] as const)(
+    'keeps committed A when queued B is %s',
+    async (_description, outcome) => {
+      const cli = await importCliForTest();
+      expect(cli.createLatestModelConfigSaver).toBeTypeOf('function');
+      if (cli.createLatestModelConfigSaver === undefined) return;
+      const configA = runtimeConfig();
+      const configB = {...runtimeConfig(), activeModelId: 'model-b'};
+      const controllerA = new AbortController();
+      const controllerB = new AbortController();
+      let markRenameAStarted!: () => void;
+      let releaseRenameA!: () => void;
+      const renameAStarted = new Promise<void>(resolve => {
+        markRenameAStarted = resolve;
+      });
+      const renameAGate = new Promise<void>(resolve => {
+        releaseRenameA = resolve;
+      });
+      const persistFailure = new Error('B persistence failed');
+      let temporaryContents = '';
+      let diskConfig: HaochenConfig | undefined;
+      let runtimeState: HaochenConfig | undefined;
+      const files = {
+        mkdir: vi.fn(async () => undefined),
+        writeFile: vi.fn(async (
+          _path: string,
+          contents: string,
+        ) => {
+          temporaryContents = contents;
+        }),
+        rename: vi.fn(async () => {
+          const parsed = JSON.parse(temporaryContents) as HaochenConfig;
+          if (parsed.activeModelId === 'model-a') {
+            markRenameAStarted();
+            await renameAGate;
+            diskConfig = parsed;
+            return;
+          }
+          throw persistFailure;
+        }),
+        unlink: vi.fn(async () => undefined),
+      };
+      const save = cli.createLatestModelConfigSaver({
+        persist: request => saveConfig(
+          '/virtual/config.json',
+          request.config,
+          files,
+          request.signal,
+        ),
+        commit: request => {
+          runtimeState = request.config;
+        },
+      });
+
+      const saveA = save({
+        config: configA,
+        signal: controllerA.signal,
+      });
+      await renameAStarted;
+      controllerA.abort(new DOMException('A rename 已开始', 'AbortError'));
+      const saveB = save({
+        config: configB,
+        signal: controllerB.signal,
+      });
+      if (outcome === 'cancel') {
+        controllerB.abort(new DOMException('B 开始前取消', 'AbortError'));
+      }
+      releaseRenameA();
+
+      await expect(saveA).resolves.toBeUndefined();
+      if (outcome === 'cancel') {
+        await expect(saveB).rejects.toMatchObject({name: 'AbortError'});
+      } else {
+        await expect(saveB).rejects.toBe(persistFailure);
+      }
+      expect(diskConfig).toEqual(configA);
+      expect(runtimeState).toBe(configA);
+    },
+  );
 
   it('exposes character pagination in the read_file model tool schema', async () => {
     const originalArgv = process.argv;

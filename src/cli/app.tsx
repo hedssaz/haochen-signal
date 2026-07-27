@@ -263,6 +263,28 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
     }
   }, []);
 
+  const applyCommittedModelConfig = useCallback((config: HaochenConfig) => {
+    modelConfigurationRef.current = config;
+    setModelConfiguration(config);
+    const validModelIds = new Set(
+      config.models.map(candidate => candidate.id),
+    );
+    for (const id of usageByModelId.current.keys()) {
+      if (!validModelIds.has(id)) usageByModelId.current.delete(id);
+    }
+    const active = config.models.find(
+      candidate => candidate.id === config.activeModelId,
+    );
+    if (active !== undefined) {
+      setModel(active.modelId);
+      props.onModelChange?.(active.modelId);
+    }
+    props.onActiveModelChange?.(active, config);
+  }, [
+    props.onActiveModelChange,
+    props.onModelChange,
+  ]);
+
   const performModelConfigEffect = useCallback((effect: ModelConfigEffect) => {
     switch (effect.type) {
       case 'close':
@@ -338,32 +360,36 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         }).then(
           () => {
             if (!modelConfigOperationController.current.isCurrent(signal)) return;
-            modelConfigurationRef.current = effect.config;
-            setModelConfiguration(effect.config);
-            const validModelIds = new Set(
-              effect.config.models.map(candidate => candidate.id),
-            );
-            for (const id of usageByModelId.current.keys()) {
-              if (!validModelIds.has(id)) usageByModelId.current.delete(id);
-            }
-            const active = effect.config.models.find(
-              candidate => candidate.id === effect.config.activeModelId,
-            );
-            if (active !== undefined) {
-              setModel(active.modelId);
-              props.onModelChange?.(active.modelId);
-            }
-            props.onActiveModelChange?.(active, effect.config);
+            applyCommittedModelConfig(effect.config);
             applyModelConfigAction({
               type: 'save_succeeded',
               config: effect.config,
             });
           },
           error => {
-            if (
-              signal.aborted
-              || !modelConfigOperationController.current.isCurrent(signal)
-            ) return;
+            if (!modelConfigOperationController.current.isCurrent(signal)) return;
+            const committedConfig =
+              props.modelConfigController?.getCommittedConfig?.();
+            if (committedConfig !== undefined) {
+              applyCommittedModelConfig(committedConfig);
+              applyModelConfigAction({
+                type: 'reconcile_committed',
+                config: committedConfig,
+                ...(signal.aborted
+                  ? {}
+                  : {
+                    message: safeErrorMessage(
+                      error,
+                      '保存模型配置失败。',
+                      effect.credential === undefined
+                        ? []
+                        : [effect.credential.apiKey],
+                    ),
+                  }),
+              });
+              return;
+            }
+            if (signal.aborted) return;
             applyModelConfigAction({
               type: 'save_failed',
               message: safeErrorMessage(
@@ -382,10 +408,9 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       }
     }
   }, [
+    applyCommittedModelConfig,
     applyModelConfigAction,
     props.modelConfigController,
-    props.onActiveModelChange,
-    props.onModelChange,
   ]);
 
   modelConfigEffectRef.current = performModelConfigEffect;

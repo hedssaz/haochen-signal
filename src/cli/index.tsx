@@ -368,6 +368,7 @@ async function main(): Promise<void> {
         });
       },
       save: saveModelConfig,
+      getCommittedConfig: () => activeConfig,
     }}
     workspaceId={currentWorkspaceId}
     credentialPrompt={credentialPrompts}

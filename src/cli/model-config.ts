@@ -68,6 +68,7 @@ export interface ModelConfigSaveRequest {
 export interface ModelConfigController {
   discover: (request: ModelConfigDiscoverRequest) => Promise<readonly string[]>;
   save: (request: ModelConfigSaveRequest) => Promise<void>;
+  getCommittedConfig?: () => HaochenConfig | undefined;
 }
 
 export interface LatestModelConfigSaverOptions {
@@ -75,23 +76,15 @@ export interface LatestModelConfigSaverOptions {
   commit: (request: ModelConfigSaveRequest) => void;
 }
 
-function supersededSave(): DOMException {
-  return new DOMException('模型配置保存已被更新操作取代', 'AbortError');
-}
-
 export function createLatestModelConfigSaver(
   options: LatestModelConfigSaverOptions,
 ): ModelConfigController['save'] {
-  let latestGeneration = 0;
   let tail: Promise<void> = Promise.resolve();
 
   return (request) => {
-    const generation = ++latestGeneration;
     const operation = tail.then(async () => {
       request.signal.throwIfAborted();
-      if (generation !== latestGeneration) throw supersededSave();
       await options.persist(request);
-      if (generation !== latestGeneration) throw supersededSave();
       options.commit(request);
     });
     tail = operation.catch(() => undefined);
@@ -132,6 +125,7 @@ export type ModelConfigAction =
   | {type: 'discovery_succeeded'; modelIds: readonly string[]}
   | {type: 'discovery_failed'; message: string}
   | {type: 'save_succeeded'; config: HaochenConfig}
+  | {type: 'reconcile_committed'; config: HaochenConfig; message?: string}
   | {type: 'save_failed'; message: string};
 
 export type ModelConfigOperationStatus = 'idle' | 'discovering' | 'saving';
@@ -911,6 +905,15 @@ export function transitionModelConfig(
         };
     case 'save_succeeded':
       return transitionSaveSucceeded(state, action.config);
+    case 'reconcile_committed': {
+      const reconciled = transitionSaveSucceeded(
+        {...state, pendingSave: undefined},
+        action.config,
+      );
+      return action.message === undefined
+        ? reconciled
+        : {state: {...reconciled.state, error: action.message}};
+    }
     case 'save_failed':
       return state.screen !== 'saving'
         ? {state}

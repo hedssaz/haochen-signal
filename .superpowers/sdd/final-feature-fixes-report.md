@@ -355,3 +355,46 @@ git diff --check
 ```
 
 结果：全量测试退出码 0，41 个测试文件、709 项全部通过；typecheck 与 build 均退出码 0；最终差异检查通过。
+
+## 最后 P1：B 请求但取消或失败
+
+### 根因与 RED
+
+保存队列在“请求 B”时立即递增 `latestGeneration`，导致已进入 A rename 的持久化虽然成功，A 的全局 commit 仍被代际检查拒绝。若 B 随后在开始前取消或持久化失败，磁盘停在 A，`activeConfig` 与 UI 却停在旧配置。
+
+新增两组 deferred 回归，各覆盖 B 开始前取消与 B persist reject：
+
+- 队列层要求 A 成功 Promise、磁盘 A、全局 runtime A；
+- App 层要求最新 committed config 为 A，回调与当前标记均协调到 A。
+
+RED：
+
+```text
+npx vitest run tests/cli/index.test.ts tests/cli/app.test.tsx \
+  -t "keeps committed A when queued B|reconciles the UI to committed A"
+```
+
+结果：退出码 1；4 项全部失败。A 已写盘，但 saver 以“被更新操作取代”的 `AbortError` 拒绝 A，运行时和 UI 都仍为旧配置。
+
+### GREEN
+
+- 保存队列继续严格串行，但移除请求时的全局代际抢占；每次 `persist` 成功都按顺序调用 commit；
+- B 成功时提交顺序为 A、B，最终三层均为 B；B 取消或失败时最后成功提交仍为 A；
+- controller 提供当前 committed config 只读快照；
+- App 仍以当前 signal 身份阻止旧 Promise 直接覆盖 B 编辑状态；当前 B 失败或取消时读取 committed A，通过 `reconcile_committed` 同步配置、活动模型与光标，真实失败同时保留错误信息。
+
+聚焦验证：
+
+```text
+npx vitest run tests/cli/index.test.ts tests/cli/app.test.tsx \
+  -t "serializes model config saves|commits runtime state when cancellation|applies a save that commits|ignores a canceled save|keeps committed A|reconciles the UI"
+```
+
+结果：退出码 0；2 个文件、8 项全部通过。
+
+最终验证：
+
+- 相关回归：4 个文件、133 项全部通过；
+- 全量测试：41 个文件、713 项全部通过；
+- `npm run typecheck` 与 `npm run build` 均退出码 0；
+- `git diff --check` 通过。
