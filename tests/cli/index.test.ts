@@ -8,6 +8,7 @@ import type {
 import type {ModelClient} from '../../src/providers/types.js';
 import type {SessionEvent} from '../../src/sessions/types.js';
 import type {ToolDefinitionSpec} from '../../src/tools/types.js';
+import type {ModelConfigSaveRequest} from '../../src/cli/model-config.js';
 
 interface ModelRuntime {
   client: ModelClient;
@@ -43,6 +44,10 @@ interface CliTestExports {
     };
     appendCurrent: (sessionId: string, reason: string) => Promise<void>;
   };
+  createLatestModelConfigSaver?: (options: {
+    persist: (request: ModelConfigSaveRequest) => Promise<void>;
+    commit: (request: ModelConfigSaveRequest) => void;
+  }) => (request: ModelConfigSaveRequest) => Promise<void>;
 }
 
 async function importCliForTest(): Promise<CliTestExports> {
@@ -345,6 +350,64 @@ describe('CLI entrypoint', () => {
       source.indexOf('resolveModelRuntime(signal)'),
     );
     expect(source).toContain('taskInterruption.finish()');
+  });
+
+  it('serializes model config saves and lets only the latest generation update runtime state', async () => {
+    const cli = await importCliForTest();
+    expect(cli.createLatestModelConfigSaver).toBeTypeOf('function');
+    if (cli.createLatestModelConfigSaver === undefined) return;
+    const configA = runtimeConfig();
+    const configB = {...runtimeConfig(), activeModelId: 'model-b'};
+    const controllerA = new AbortController();
+    const controllerB = new AbortController();
+    let markAStarted!: () => void;
+    let releaseA!: () => void;
+    const aStarted = new Promise<void>(resolve => { markAStarted = resolve; });
+    const aGate = new Promise<void>(resolve => { releaseA = resolve; });
+    const persistOrder: string[] = [];
+    let diskConfig: HaochenConfig | undefined;
+    let runtimeState: HaochenConfig | undefined;
+    const save = cli.createLatestModelConfigSaver({
+      persist: async request => {
+        const label = request.config.activeModelId === 'model-a' ? 'A' : 'B';
+        persistOrder.push(`start:${label}`);
+        if (label === 'A') {
+          markAStarted();
+          await aGate;
+        }
+        diskConfig = request.config;
+        persistOrder.push(`finish:${label}`);
+      },
+      commit: request => {
+        runtimeState = request.config;
+      },
+    });
+
+    const saveA = save({
+      config: configA,
+      signal: controllerA.signal,
+    });
+    await aStarted;
+    controllerA.abort(new DOMException('取消 A', 'AbortError'));
+    const saveB = save({
+      config: configB,
+      signal: controllerB.signal,
+    });
+
+    await Promise.resolve();
+    expect(persistOrder).toEqual(['start:A']);
+    releaseA();
+    await expect(saveA).rejects.toMatchObject({name: 'AbortError'});
+    await expect(saveB).resolves.toBeUndefined();
+
+    expect(persistOrder).toEqual([
+      'start:A',
+      'finish:A',
+      'start:B',
+      'finish:B',
+    ]);
+    expect(diskConfig).toBe(configB);
+    expect(runtimeState).toBe(configB);
   });
 
   it('exposes character pagination in the read_file model tool schema', async () => {

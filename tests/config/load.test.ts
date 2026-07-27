@@ -686,4 +686,35 @@ describe('config files', () => {
       await rm(directory, {recursive: true, force: true});
     }
   });
+
+  it('cancels before rename and removes the unpublished temporary config', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
+    const path = join(directory, 'nested', 'config.json');
+    const config = parseConfig({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    });
+    const controller = new AbortController();
+    const files = {
+      mkdir: vi.fn(async () => undefined),
+      writeFile: vi.fn(async () => {
+        controller.abort(new DOMException('取消保存', 'AbortError'));
+      }),
+      rename: vi.fn(async () => undefined),
+      unlink: vi.fn(async () => undefined),
+    };
+
+    try {
+      await expect(
+        saveConfig(path, config, files, controller.signal),
+      ).rejects.toMatchObject({name: 'AbortError'});
+      expect(files.rename).not.toHaveBeenCalled();
+      expect(files.unlink).toHaveBeenCalledOnce();
+      expect(files.unlink).toHaveBeenCalledWith(
+        expect.stringMatching(/\.config\.json\.[0-9a-f-]{36}\.tmp$/),
+      );
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
 });

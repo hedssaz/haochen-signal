@@ -1251,34 +1251,6 @@ async function assertAddTargetUnchanged(
   );
 }
 
-async function rollbackPublishedAdd(
-  operation: PlannedAdd,
-  temp: ResolvedPath,
-  fileOperations: PatchFileOperations,
-): Promise<void> {
-  let tempIdentity: FileIdentity;
-  try {
-    const tempStat = await lstat(temp.absolute);
-    tempIdentity = fileIdentity(tempStat);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-
-  let targetStat;
-  try {
-    targetStat = await lstat(operation.resolved.absolute);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-  if (!sameIdentity(tempIdentity, fileIdentity(targetStat))) return;
-
-  const rechecked = await lstat(operation.resolved.absolute);
-  if (!sameIdentity(tempIdentity, fileIdentity(rechecked))) return;
-  await fileOperations.unlink(operation.resolved.absolute);
-}
-
 async function executeAdd(
   operation: PlannedAdd,
   context: ToolContext,
@@ -1300,10 +1272,6 @@ async function executeAdd(
     await assertAddTargetUnchanged(operation, context);
     assertNotAborted(signal);
     await fileOperations.link(temp.absolute, operation.resolved.absolute);
-    if (signal.aborted) {
-      await rollbackPublishedAdd(operation, temp, fileOperations);
-      assertNotAborted(signal);
-    }
   } catch (error) {
     await removeTempFile(temp.absolute, fileOperations);
     throw error;

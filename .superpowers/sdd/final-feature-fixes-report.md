@@ -210,10 +210,92 @@ git diff --check
 - 现有 provider 的手动添加路径不会读取或保存新 Key；GET 路径仍通过同一个可取消凭据 broker，Key 不进入配置、会话或错误文本。
 - provider 保存逻辑只在 `targetProviderId` 为空时追加 provider；现有 provider 路径保持 providers 数组不变。
 - usage 过滤仅删除配置中已经不存在的本地模型 ID，不改动仍存在模型的真实最近 usage。
-- write_file 回滚只有在临时文件与当前目标身份一致并复核后才 unlink；测试明确覆盖目标在 abort 前被替换的情况。
+- write_file 把硬链接调用视为不可逆提交点，发布开始后不再尝试 unlink 目标；代理循环会等待变更工具结束并先记录真实结果。
 - task interruption router 对每个任务幂等，使用函数身份保护清理；旧任务迟到的 finish 不会清除新任务 writer。
 - README 与 CHANGELOG 均已用中文同步更新；未写入凭据、构建产物或无关重构。
 
 ## 关注点
 
 无遗留 blocker。全量集成测试需要允许绑定本机临时回环端口；获准后同一测试命令 703/703 通过。
+
+## 最终复审追加修复
+
+### 1. 模型配置保存取消与乱序
+
+RED 新增两层回归：
+
+- `saveConfig` 在临时文件写完、目标重命名前收到取消时必须抛出 `AbortError`，不得调用 `rename`，并清理未发布临时文件；
+- 保存 A 已开始后取消，再提交 B 时必须串行等待 A 收尾；即使 A 忽略取消并晚返回，最终磁盘与运行时都只能是 B。
+
+聚焦 RED 结果：退出码 1；`saveConfig` 仍完成重命名，CLI 保存器尚不存在。
+
+GREEN 实现：
+
+- `saveConfig` 接收 `AbortSignal`，在创建目录前、写临时文件前和 `rename` 前检查取消；
+- `createLatestModelConfigSaver` 以 Promise 尾链串行保存，并以单调代际阻止旧请求提交运行时状态；
+- App 保留 signal 身份保护，补充 A 取消、B 成功、A 晚返回后界面仍保持 B 的回归。
+
+### 2. write_file 不可逆提交点
+
+RED 将原回滚断言改为提交点契约：
+
+- `link` 已发布但尚未返回时取消，工具最终必须返回真实成功并保留目标；
+- `link` 开始后不得对已发布目标调用 `unlink`；
+- 代理循环在变更工具执行期间取消时，必须先发出并持久化工具成功，再发出中断，且模型只收到一轮请求。
+
+聚焦 RED 结果：退出码 1；工具仍把发布成功误报为取消，代理循环也会先结束而看不到工具结果。
+
+GREEN 实现：
+
+- 删除发布后的 `lstat + unlink` 回滚路径，最后一次取消检查停在 `link` 调用之前；
+- 主循环对 `write_file` 与 `apply_patch` 等待真实执行结果，取消已发生时直接持久化工具事件，再进入统一中断出口；
+- 不构造下一轮 tool message/model request。
+
+聚焦 GREEN：
+
+```text
+npx vitest run tests/config/load.test.ts tests/cli/index.test.ts \
+  tests/agent/loop.test.ts tests/tools/files.test.ts \
+  -t "cancels before rename|serializes model config saves|waits for a mutating tool|link publication|never attempts to unlink"
+```
+
+结果：退出码 0；4 个文件、5 项通过。
+
+UI 乱序回归：
+
+```text
+npx vitest run tests/cli/app.test.tsx -t "ignores a canceled save"
+```
+
+结果：退出码 0；1 项通过。
+
+相关文件全量回归：
+
+```text
+npx vitest run tests/config/load.test.ts tests/cli/index.test.ts \
+  tests/cli/model-config.test.ts tests/cli/app.test.tsx \
+  tests/agent/loop.test.ts tests/tools/files.test.ts \
+  tests/tools/registry.test.ts
+```
+
+结果：退出码 0；7 个文件、243 项全部通过。
+
+最终完整验证：
+
+```text
+npm test
+npm run typecheck
+npm run build
+node dist/cli.mjs --version
+node dist/haochen-onefile.mjs --version
+git diff --check
+```
+
+结果：
+
+- 全量测试退出码 0；41 个测试文件、707 项全部通过；
+- typecheck 与 build 均退出码 0；
+- 两个发布入口均输出 `0.1.0`；
+- `git diff --check` 退出码 0。
+
+最终自审确认：配置保存的取消检查位于 `rename` 前，保存尾链保证最终磁盘顺序，代际检查保证运行时与 UI 只接受最新请求；文件发布后不存在任何目标路径回滚，变更工具中止顺序为真实工具结果、持久化工具事件、中断事件，且不会发起下一轮模型请求。无遗留 blocker。

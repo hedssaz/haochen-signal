@@ -210,6 +210,7 @@ function isValidUsage(
 }
 
 const PURE_GREETING = /^(?:你好(?:呀|啊|哇)?|您好|嗨|哈喽|在吗|hi|hello|hey)[\s!！?？。,.，]*$/iu;
+const MUTATING_TOOLS = new Set(['write_file', 'apply_patch']);
 
 function taskAllowsTools(task: string): boolean {
   return !PURE_GREETING.test(task.trim());
@@ -539,7 +540,7 @@ export async function* runAgentTask(
           name: toolCall.function.name,
           input,
         };
-        const result = await abortableCall(() => options.registry.execute(
+        const execution = options.registry.execute(
           toolCall.function.name,
           input,
           {
@@ -551,19 +552,28 @@ export async function* runAgentTask(
             signal: options.signal,
             reportGate: options.reportGate,
           },
-        ), options.signal);
+        );
+        const waitForExecution = MUTATING_TOOLS.has(toolCall.function.name);
+        const result = waitForExecution
+          ? await execution
+          : await abortable(execution, options.signal);
         yield {
           type: 'tool_finished',
           name: toolCall.function.name,
           result,
         };
-        await appendSessionEvent(options.session, {
+        const toolEvent: SessionEvent = {
           type: 'tool',
           at: Date.now(),
           tool: toolCall.function.name,
           input,
           result,
-        }, options.signal);
+        };
+        if (waitForExecution && options.signal.aborted) {
+          await options.session.store.append(options.session.id, toolEvent);
+          throw new AgentAbortError(abortReason(options.signal));
+        }
+        await appendSessionEvent(options.session, toolEvent, options.signal);
         const toolMessage: ModelMessage = {
           role: 'tool',
           tool_call_id: toolCall.id,

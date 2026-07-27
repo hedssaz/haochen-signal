@@ -569,7 +569,7 @@ describe('workspace file tools', () => {
     await expect(readdir(workspace)).resolves.toEqual([]);
   });
 
-  it('rolls back its own target when canceled after link publishes it', async () => {
+  it('treats link publication as committed when canceled before link returns', async () => {
     const controller = new AbortController();
     let markPublished!: () => void;
     let releaseLink!: () => void;
@@ -593,37 +593,53 @@ describe('workspace file tools', () => {
     const result = await running;
 
     expect(result).toMatchObject({
-      ok: false,
-      error: {code: 'ABORTED'},
+      ok: true,
+      data: {
+        path: 'canceled-after-link.txt',
+        bytesWritten: Buffer.byteLength('must be rolled back', 'utf8'),
+      },
     });
-    await expect(readdir(workspace)).resolves.toEqual([]);
+    await expect(
+      readFile(join(workspace, 'canceled-after-link.txt'), 'utf8'),
+    ).resolves.toBe('must be rolled back');
+    await expect(readdir(workspace)).resolves.toEqual([
+      'canceled-after-link.txt',
+    ]);
   });
 
-  it('never deletes a replacement target while rolling back an aborted add', async () => {
+  it('never attempts to unlink the published target after link starts', async () => {
     const controller = new AbortController();
-    const replacement = 'written by another actor';
+    let targetPath = '';
+    let targetUnlinkAttempts = 0;
 
     const result = await writeFileTool({
-      path: 'replaced-after-link.txt',
+      path: 'committed-after-link.txt',
       content: 'tool contents',
     }, context, controller.signal, {
-      link: async (temporaryPath, targetPath) => {
-        await linkFile(temporaryPath, targetPath);
-        await unlinkFile(targetPath);
-        await writeFile(targetPath, replacement);
-        controller.abort('目标被替换后取消');
+      link: async (temporaryPath, publishedPath) => {
+        targetPath = publishedPath;
+        await linkFile(temporaryPath, publishedPath);
+        controller.abort('发布后取消');
+      },
+      unlink: async path => {
+        if (path === targetPath) {
+          targetUnlinkAttempts += 1;
+          throw new Error('不得回滚已发布目标');
+        }
+        await unlinkFile(path);
       },
     });
 
     expect(result).toMatchObject({
-      ok: false,
-      error: {code: 'ABORTED'},
+      ok: true,
+      data: {path: 'committed-after-link.txt'},
     });
+    expect(targetUnlinkAttempts).toBe(0);
     await expect(
-      readFile(join(workspace, 'replaced-after-link.txt'), 'utf8'),
-    ).resolves.toBe(replacement);
+      readFile(join(workspace, 'committed-after-link.txt'), 'utf8'),
+    ).resolves.toBe('tool contents');
     await expect(readdir(workspace)).resolves.toEqual([
-      'replaced-after-link.txt',
+      'committed-after-link.txt',
     ]);
   });
 

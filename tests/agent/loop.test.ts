@@ -865,6 +865,90 @@ describe('main agent loop', () => {
     );
   });
 
+  it('waits for a mutating tool result after abort and emits committed success before interruption', async () => {
+    const controller = new AbortController();
+    let markWriteStarted!: () => void;
+    let releaseWrite!: () => void;
+    const writeStarted = new Promise<void>(resolve => {
+      markWriteStarted = resolve;
+    });
+    const writeGate = new Promise<void>(resolve => {
+      releaseWrite = resolve;
+    });
+    const executeWrite = vi.fn(async (): Promise<ToolResult> => {
+      markWriteStarted();
+      await writeGate;
+      return {
+        ok: true,
+        summary: '已创建文件 committed.txt',
+        data: {path: 'committed.txt'},
+      };
+    });
+    const writeRegistry = {
+      modelToolDefinitions: () => [{
+        type: 'function' as const,
+        function: {
+          name: 'write_file',
+          description: '创建文件',
+          parameters: {type: 'object'},
+        },
+      }],
+      execute: executeWrite,
+    } as unknown as ToolRegistry;
+    const model = recordingModel([
+      toolResponse([{
+        id: 'call_write',
+        name: 'write_file',
+        arguments: {path: 'committed.txt', content: 'committed'},
+      }]),
+    ]);
+
+    const running = collect(runAgentTask(options(model.client, {
+      registry: writeRegistry,
+      signal: controller.signal,
+    })));
+    await writeStarted;
+    controller.abort('提交期间取消');
+    releaseWrite();
+    const events = await running;
+
+    const toolFinishedIndex = events.findIndex(event => (
+      event.type === 'tool_finished'
+      && event.name === 'write_file'
+      && event.result.ok
+    ));
+    const interruptedIndex = events.findIndex(event => (
+      event.type === 'interrupted'
+    ));
+    expect(toolFinishedIndex).toBeGreaterThan(-1);
+    expect(interruptedIndex).toBeGreaterThan(toolFinishedIndex);
+    expect(events[toolFinishedIndex]).toMatchObject({
+      type: 'tool_finished',
+      result: {
+        ok: true,
+        summary: '已创建文件 committed.txt',
+      },
+    });
+    expect(events.at(-1)).toEqual({
+      type: 'interrupted',
+      reason: '提交期间取消',
+    });
+    expect(model.requests).toHaveLength(1);
+    await expect(sessionStore.read('session-1')).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'tool',
+          tool: 'write_file',
+          result: expect.objectContaining({ok: true}),
+        }),
+        expect.objectContaining({
+          type: 'interrupted',
+          reason: '提交期间取消',
+        }),
+      ]),
+    );
+  });
+
   it('serializes an interrupted event after an already-started session append', async () => {
     const controller = new AbortController();
     const persistedTypes: SessionEvent['type'][] = [];

@@ -70,6 +70,36 @@ export interface ModelConfigController {
   save: (request: ModelConfigSaveRequest) => Promise<void>;
 }
 
+export interface LatestModelConfigSaverOptions {
+  persist: (request: ModelConfigSaveRequest) => Promise<void>;
+  commit: (request: ModelConfigSaveRequest) => void;
+}
+
+function supersededSave(): DOMException {
+  return new DOMException('模型配置保存已被更新操作取代', 'AbortError');
+}
+
+export function createLatestModelConfigSaver(
+  options: LatestModelConfigSaverOptions,
+): ModelConfigController['save'] {
+  let latestGeneration = 0;
+  let tail: Promise<void> = Promise.resolve();
+
+  return (request) => {
+    const generation = ++latestGeneration;
+    const operation = tail.then(async () => {
+      request.signal.throwIfAborted();
+      if (generation !== latestGeneration) throw supersededSave();
+      await options.persist(request);
+      request.signal.throwIfAborted();
+      if (generation !== latestGeneration) throw supersededSave();
+      options.commit(request);
+    });
+    tail = operation.catch(() => undefined);
+    return operation;
+  };
+}
+
 export type ModelConfigEffect =
   | {type: 'close'}
   | {type: 'abort_active'}

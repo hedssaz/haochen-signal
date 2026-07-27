@@ -33,18 +33,22 @@ export async function saveConfig(
   path: string,
   config: HaochenConfig,
   files: SaveFileOperations = defaultSaveFileOperations,
+  signal?: AbortSignal,
 ): Promise<void> {
   const directory = dirname(path);
   const temporaryPath = join(directory, `.${basename(path)}.${randomUUID()}.tmp`);
   const persistentConfig = parseConfig(config);
 
+  signal?.throwIfAborted();
   await files.mkdir(directory, {recursive: true});
 
   try {
+    signal?.throwIfAborted();
     await files.writeFile(temporaryPath, `${JSON.stringify(persistentConfig, null, 2)}\n`, {
       encoding: 'utf8',
       mode: 0o600,
     });
+    signal?.throwIfAborted();
     await files.rename(temporaryPath, path);
   } catch (error: unknown) {
     await files.unlink(temporaryPath).catch(() => undefined);

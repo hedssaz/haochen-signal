@@ -55,8 +55,10 @@ import {CLI_NAME, PRODUCT_ENGLISH_NAME, PRODUCT_NAME, VERSION} from '../meta.js'
 import type {ModelClient} from '../providers/types.js';
 import type {SessionEvent} from '../sessions/types.js';
 import {createTaskInterruptionRouter} from './task-interruption.js';
+import {createLatestModelConfigSaver} from './model-config.js';
 
 export {createTaskInterruptionRouter} from './task-interruption.js';
+export {createLatestModelConfigSaver} from './model-config.js';
 
 const args = new Set(process.argv.slice(2));
 
@@ -302,6 +304,35 @@ async function main(): Promise<void> {
   const interruptionRouter = createTaskInterruptionRouter(
     (id, event) => sessionStore.append(id, event),
   );
+  const saveModelConfig = createLatestModelConfigSaver({
+    persist: async request => {
+      request.signal.throwIfAborted();
+      if (request.credential !== undefined && process.platform === 'darwin') {
+        await saveMacOsKeychain(
+          request.credential.apiKey,
+          undefined,
+          process.platform,
+          request.credential.providerId,
+        );
+        request.signal.throwIfAborted();
+      }
+      await saveConfig(
+        paths.configFile,
+        request.config,
+        undefined,
+        request.signal,
+      );
+    },
+    commit: request => {
+      if (request.credential !== undefined) {
+        temporaryProviderKeys.set(
+          request.credential.providerId,
+          request.credential.apiKey,
+        );
+      }
+      activeConfig = request.config;
+    },
+  });
   const initialModel = currentModel();
   clearTerminalScreen(process.stdout);
   const instance = render(<App
@@ -336,27 +367,7 @@ async function main(): Promise<void> {
           signal: request.signal,
         });
       },
-      save: async request => {
-        request.signal.throwIfAborted();
-        if (request.credential !== undefined && process.platform === 'darwin') {
-          await saveMacOsKeychain(
-            request.credential.apiKey,
-            undefined,
-            process.platform,
-            request.credential.providerId,
-          );
-          request.signal.throwIfAborted();
-        }
-        request.signal.throwIfAborted();
-        await saveConfig(paths.configFile, request.config);
-        if (request.credential !== undefined) {
-          temporaryProviderKeys.set(
-            request.credential.providerId,
-            request.credential.apiKey,
-          );
-        }
-        activeConfig = request.config;
-      },
+      save: saveModelConfig,
     }}
     workspaceId={currentWorkspaceId}
     credentialPrompt={credentialPrompts}

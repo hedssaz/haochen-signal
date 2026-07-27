@@ -54,6 +54,19 @@ const multiModelConfig: HaochenConfig = {
     },
   ],
 };
+const threeModelConfig: HaochenConfig = {
+  ...multiModelConfig,
+  models: [
+    ...multiModelConfig.models,
+    {
+      id: 'deepseek-coder',
+      providerId: 'deepseek',
+      modelId: 'deepseek-coder',
+      displayName: 'DeepSeek Coder',
+      contextWindow: 512_000,
+    },
+  ],
+};
 const emptyModelConfig: HaochenConfig = {
   version: 2,
   providers: [],
@@ -630,6 +643,72 @@ describe('App', () => {
 
     app.stdin.write('\u0003');
     await vi.waitFor(() => expect(onExit).toHaveBeenCalledOnce());
+  });
+
+  it('ignores a canceled save that resolves after a newer model save', async () => {
+    let saveCount = 0;
+    let releaseFirstSave!: () => void;
+    const firstSave = new Promise<void>(resolve => {
+      releaseFirstSave = resolve;
+    });
+    const save = vi.fn(async () => {
+      saveCount += 1;
+      if (saveCount === 1) await firstSave;
+    });
+    const onActiveModelChange = vi.fn();
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="deepseek-chat"
+      modelConfig={threeModelConfig}
+      modelConfigController={{
+        discover: vi.fn(async () => []),
+        save,
+      }}
+      onActiveModelChange={onActiveModelChange}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/model');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('模型配置'));
+
+    app.stdin.write('\u001B[B');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalledOnce();
+      expect(app.lastFrame()).toContain('正在保存模型配置');
+    });
+
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('DeepSeek Reasoner');
+      expect(app.lastFrame()).not.toContain('正在保存模型配置');
+    });
+
+    app.stdin.write('\u001B[B');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(onActiveModelChange).toHaveBeenCalledOnce();
+      expect(onActiveModelChange).toHaveBeenCalledWith(
+        expect.objectContaining({id: 'deepseek-coder'}),
+        expect.objectContaining({activeModelId: 'deepseek-coder'}),
+      );
+      expect(app.lastFrame()).toContain('● DeepSeek Coder');
+    });
+
+    releaseFirstSave();
+    await vi.waitFor(() => {
+      expect(onActiveModelChange).toHaveBeenCalledOnce();
+      expect(app.lastFrame()).toContain('● DeepSeek Coder');
+    });
+
+    app.stdin.write('\u001B');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('上下文 0 / 512k');
+    });
   });
 
   it('updates the context limit immediately and isolates recent usage by model', async () => {
