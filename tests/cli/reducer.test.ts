@@ -2,6 +2,93 @@ import {describe, expect, it} from 'vitest';
 import {initialUiState, uiReducer} from '../../src/cli/reducer.js';
 
 describe('uiReducer', () => {
+  it('collapses only the current task process when any non-empty answer starts', () => {
+    const previous = {
+      ...initialUiState,
+      transcript: [
+        {kind: 'assistant', title: '浩宸', text: '之前的回答'} as const,
+      ],
+    };
+    const started = uiReducer(previous, {type: 'task_started'});
+    const reasoning = uiReducer(started, {
+      type: 'reasoning_delta',
+      text: '本轮思考',
+    });
+    const tool = uiReducer(reasoning, {
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'README.md'},
+    });
+    const result = uiReducer(tool, {
+      type: 'tool_finished',
+      name: 'read_file',
+      result: {ok: true, summary: '已读取 README.md'},
+    });
+    const answering = uiReducer(result, {
+      type: 'assistant_delta',
+      text: '现在回答',
+    });
+
+    expect(answering.transcript).toEqual([
+      {kind: 'assistant', title: '浩宸', text: '之前的回答'},
+    ]);
+    expect(answering.liveReasoning).toBe('');
+    expect(answering.liveAssistant).toBe('现在回答');
+  });
+
+  it('does not collapse the current task process for an empty answer delta', () => {
+    const started = uiReducer(initialUiState, {type: 'task_started'});
+    const reasoning = uiReducer(started, {
+      type: 'reasoning_delta',
+      text: '继续思考',
+    });
+    const unchanged = uiReducer(reasoning, {
+      type: 'assistant_delta',
+      text: '',
+    });
+
+    expect(unchanged.liveReasoning).toBe('继续思考');
+  });
+
+  it.each([
+    {
+      label: 'success',
+      result: {ok: true, summary: '已读取 README.md'} as const,
+      toolStatus: 'success',
+    },
+    {
+      label: 'failure',
+      result: {
+        ok: false,
+        summary: '读取失败',
+        error: {code: 'READ_FAILED', message: '没有权限'},
+      } as const,
+      toolStatus: 'failure',
+    },
+  ])('merges a tool $label result into its single pending line', ({
+    result,
+    toolStatus,
+  }) => {
+    const started = uiReducer(initialUiState, {
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'README.md'},
+    });
+    const finished = uiReducer(started, {
+      type: 'tool_finished',
+      name: 'read_file',
+      result,
+    });
+
+    expect(finished.transcript).toHaveLength(1);
+    expect(finished.transcript[0]).toMatchObject({
+      kind: 'tool',
+      title: 'read_file',
+      compact: true,
+      toolStatus,
+    });
+  });
+
   it('keeps transient status out of the transcript', () => {
     const state = uiReducer(initialUiState, {
       type: 'status',
@@ -15,7 +102,7 @@ describe('uiReducer', () => {
   it.each([
     {type: 'assistant_message', text: '开始回答'} as const,
     {type: 'assistant_text', text: '开始回答'} as const,
-  ])('finalizes reasoning and assistant text independently on $type', (event) => {
+  ])('keeps only assistant text after answering starts on $type', (event) => {
     const withReasoning = uiReducer(initialUiState, {
       type: 'reasoning_delta',
       text: '检查协议',
@@ -26,7 +113,7 @@ describe('uiReducer', () => {
     });
 
     expect(streaming).toMatchObject({
-      liveReasoning: '检查协议',
+      liveReasoning: '',
       liveAssistant: '开始回答',
     });
     expect(streaming.transcript).toEqual([]);
@@ -35,7 +122,6 @@ describe('uiReducer', () => {
 
     expect(complete).toMatchObject({liveReasoning: '', liveAssistant: ''});
     expect(complete.transcript).toEqual([
-      {kind: 'reasoning', title: '思考', text: '检查协议'},
       {kind: 'assistant', title: '浩宸', text: '开始回答'},
     ]);
   });

@@ -27,6 +27,8 @@ export interface UiEntry {
   title: string;
   text: string;
   detail?: string;
+  compact?: boolean;
+  toolStatus?: 'pending' | 'success' | 'failure';
 }
 
 export interface UiState {
@@ -39,6 +41,7 @@ export interface UiState {
   roundUsageTotal?: number;
   previousRoundTotal?: number;
   showPreviousRoundUsage: boolean;
+  taskTranscriptStart?: number;
   activeTool?: {name: string; summary: string};
   error?: string;
 }
@@ -115,6 +118,65 @@ function finalizeLiveRound(state: UiState): UiState {
   };
 }
 
+const collapsibleProcessKinds = new Set<UiEntryKind>([
+  'reasoning',
+  'tool',
+  'result',
+  'approval',
+  'review',
+  'status',
+]);
+
+function collapseCurrentTaskProcess(state: UiState): UiEntry[] {
+  if (state.taskTranscriptStart === undefined) return state.transcript;
+  return [
+    ...state.transcript.slice(0, state.taskTranscriptStart),
+    ...state.transcript
+      .slice(state.taskTranscriptStart)
+      .filter(item => !collapsibleProcessKinds.has(item.kind)),
+  ];
+}
+
+function singleLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function updatePendingTool(
+  state: UiState,
+  name: string,
+  result: ToolResult,
+): UiState | undefined {
+  let index = -1;
+  for (let itemIndex = state.transcript.length - 1; itemIndex >= 0; itemIndex -= 1) {
+    const item = state.transcript[itemIndex];
+    if (
+      item?.kind === 'tool'
+      && item.title === name
+      && item.toolStatus === 'pending'
+    ) {
+      index = itemIndex;
+      break;
+    }
+  }
+  if (index < 0) return undefined;
+
+  const current = state.transcript[index]!;
+  const outcome = result.ok
+    ? `✓ ${singleLine(result.summary)}`
+    : `✗ ${singleLine(failureDetails(result))}`;
+  const updated: UiEntry = {
+    ...current,
+    detail: [current.detail, outcome].filter(Boolean).join(' · '),
+    toolStatus: result.ok ? 'success' : 'failure',
+  };
+  return {
+    ...state,
+    transcript: state.transcript.map((item, itemIndex) => (
+      itemIndex === index ? updated : item
+    )),
+  };
+}
+
 function describeTool(name: string): string {
   return toolSummary[name] ?? `执行工具 ${name}`;
 }
@@ -141,6 +203,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       roundUsageTotal: undefined,
       previousRoundTotal: undefined,
       showPreviousRoundUsage: false,
+      taskTranscriptStart: state.transcript.length,
     };
   }
   if (event.type === 'input') return {...state, input: event.input};
@@ -165,11 +228,14 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
         liveReasoning: state.liveReasoning + event.text,
       };
     case 'assistant_delta':
+      if (event.text.length === 0) return state;
       return {
         ...state,
         phase: 'thinking',
         showPreviousRoundUsage: false,
         error: undefined,
+        transcript: collapseCurrentTaskProcess(state),
+        liveReasoning: '',
         liveAssistant: state.liveAssistant + event.text,
       };
     case 'usage': {
@@ -206,18 +272,23 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
         roundUsageTotal: undefined,
         previousRoundTotal: undefined,
         showPreviousRoundUsage: false,
+        taskTranscriptStart: undefined,
         activeTool: undefined,
         error: undefined,
       });
     }
     case 'tool_started': {
       const summary = describeTool(event.name);
-      return append(state, entry(
-        'tool',
-        event.name,
-        summary,
-        summarizeToolInput(event.name, event.input),
-      ), {
+      return append(state, {
+        ...entry(
+          'tool',
+          event.name,
+          summary,
+          summarizeToolInput(event.name, event.input),
+        ),
+        compact: true,
+        toolStatus: 'pending',
+      }, {
         phase: 'running_tool',
         showPreviousRoundUsage: true,
         activeTool: {name: event.name, summary},
@@ -226,6 +297,18 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
     }
     case 'tool_finished': {
       const summary = describeTool(event.name);
+      const merged = updatePendingTool(state, event.name, event.result);
+      if (merged !== undefined) {
+        return {
+          ...merged,
+          phase: 'thinking',
+          showPreviousRoundUsage: false,
+          activeTool: undefined,
+          ...(event.result.ok
+            ? {}
+            : {error: event.result.error?.message ?? event.result.summary}),
+        };
+      }
       if (!event.result.ok) {
         return append(state, entry('error', event.name, failureDetails(event.result)), {
           phase: 'thinking',
@@ -250,6 +333,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       return append(finalized, entry('error', '达到上限', `已达到${event.limit === 'turns' ? '轮次' : '工具调用'}上限`), {
         phase: 'idle',
         showPreviousRoundUsage: false,
+        taskTranscriptStart: undefined,
       });
     }
     case 'interrupted': {
@@ -257,6 +341,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       return append(finalized, entry('error', '已中止', event.reason), {
         phase: 'idle',
         showPreviousRoundUsage: false,
+        taskTranscriptStart: undefined,
         activeTool: undefined,
       });
     }
@@ -265,6 +350,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       return append(finalized, entry('error', '错误', event.message), {
         phase: 'error',
         showPreviousRoundUsage: false,
+        taskTranscriptStart: undefined,
         activeTool: undefined,
         error: event.message,
       });
