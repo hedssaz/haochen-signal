@@ -36,7 +36,7 @@
 ```ts
 it('keeps shallow files when deep files exceed the listing limit', async () => {
   await mkdir(join(workspace, 'deep', 'nested'), {recursive: true});
-  await writeFile(join(workspace, 'README.md'), 'root');
+  await writeFile(join(workspace, 'z-root.txt'), 'root');
   await Promise.all(Array.from({length: 500}, (_, index) =>
     writeFile(
       join(workspace, 'deep', 'nested', `${String(index).padStart(3, '0')}.txt`),
@@ -48,7 +48,7 @@ it('keeps shallow files when deep files exceed the listing limit', async () => {
 
   expect(result.truncated).toBe(true);
   expect(result.data?.files).toHaveLength(500);
-  expect(result.data?.files[0]).toBe('README.md');
+  expect(result.data?.files[0]).toBe('z-root.txt');
 });
 ```
 
