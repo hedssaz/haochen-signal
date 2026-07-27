@@ -188,6 +188,17 @@ function rejectedBatchResult(): ToolResult {
   };
 }
 
+function toolLimitResult(): ToolResult {
+  return {
+    ok: false,
+    summary: '工具调用上限已达到，本次调用未执行',
+    error: {
+      code: 'TOOL_LIMIT_REACHED',
+      message: '工具调用上限已达到，本次调用未执行',
+    },
+  };
+}
+
 function safeErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return String(redactValue(message));
@@ -322,6 +333,7 @@ export async function* runAgentTask(
     let turns = 0;
     let toolCallCount = 0;
     let toolProtocolCorrectionPending = false;
+    let finalizingAfterToolLimit = false;
 
     let history: SessionEvent[];
     try {
@@ -356,11 +368,14 @@ export async function* runAgentTask(
       : undefined;
 
     while (true) {
-      if (turns >= maxTurns) {
-        yield {type: 'limit_reached', limit: 'turns'};
-        return;
+      const finalizing = finalizingAfterToolLimit;
+      if (!finalizing) {
+        if (turns >= maxTurns) {
+          yield {type: 'limit_reached', limit: 'turns'};
+          return;
+        }
+        turns += 1;
       }
-      turns += 1;
 
       let reasoningText = '';
       let assistantText = '';
@@ -373,8 +388,8 @@ export async function* runAgentTask(
       const iterator = options.model.stream({
         model: modelName,
         messages,
-        tools,
-        toolChoice: allowTools ? 'auto' : 'none',
+        tools: finalizing ? undefined : tools,
+        toolChoice: finalizing ? 'none' : allowTools ? 'auto' : 'none',
       }, options.signal)[Symbol.asyncIterator]();
 
       while (true) {
@@ -414,6 +429,13 @@ export async function* runAgentTask(
         yield {
           type: 'error',
           message: '模型响应协议不一致：必须且只能包含一个 finish 事件',
+        };
+        return;
+      }
+      if (finalizing && hasToolCalls) {
+        yield {
+          type: 'error',
+          message: '工具调用上限后的最终回答仍请求了工具',
         };
         return;
       }
@@ -528,10 +550,11 @@ export async function* runAgentTask(
         tool_calls: toolCalls,
       });
 
-      for (const {toolCall, input} of batch.prepared) {
+      let firstUnexecutedIndex: number | undefined;
+      for (const [index, {toolCall, input}] of batch.prepared.entries()) {
         if (toolCallCount >= maxToolCalls) {
-          yield {type: 'limit_reached', limit: 'tools'};
-          return;
+          firstUnexecutedIndex = index;
+          break;
         }
 
         toolCallCount += 1;
@@ -580,6 +603,40 @@ export async function* runAgentTask(
           content: serializeResult(result),
         };
         messages.push(toolMessage);
+        if (toolCallCount >= maxToolCalls) {
+          firstUnexecutedIndex = index + 1;
+          break;
+        }
+      }
+
+      if (firstUnexecutedIndex !== undefined) {
+        for (const pending of batch.prepared.slice(firstUnexecutedIndex)) {
+          const result = toolLimitResult();
+          await appendSessionEvent(options.session, {
+            type: 'tool',
+            at: Date.now(),
+            tool: pending.toolCall.function.name,
+            input: pending.input,
+            result,
+          }, options.signal);
+          messages.push({
+            role: 'tool',
+            tool_call_id: pending.toolCall.id,
+            content: serializeResult(result),
+          });
+        }
+        messages.push({
+          role: 'system',
+          content: [
+            '工具调用上限已达到，后续不得再调用工具。',
+            '请仅根据已有对话和工具结果，向用户总结已完成内容、当前结论与未完成项。',
+          ].join('\n'),
+        });
+        finalizingAfterToolLimit = true;
+        yield {
+          type: 'status',
+          text: '工具调用已达上限，正在整理最终回答',
+        };
       }
     }
   } catch (error) {

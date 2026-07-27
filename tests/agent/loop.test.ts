@@ -391,18 +391,59 @@ describe('main agent loop', () => {
     ]);
   });
 
-  it('executes exactly maxToolCalls calls and stops before the overflowing call', async () => {
-    const events = await collect(runAgentTask(options(scriptedModel([
+  it('executes only the tool budget and then requests one tool-free final answer', async () => {
+    const model = recordingModel([
       toolResponse([
         {id: 'call_1', name: 'read_file', arguments: {path: 'README.md'}},
         {id: 'call_2', name: 'read_file', arguments: {path: 'README.md'}},
       ]),
-    ]), {
-      limits: {maxTurns: 8, maxToolCalls: 1},
+      textResponse('已读取一个文件，其余文件因工具上限未读取。'),
+    ]);
+
+    const events = await collect(runAgentTask(options(model.client, {
+      limits: {maxTurns: 1, maxToolCalls: 1},
     })));
 
     expect(executeRead).toHaveBeenCalledTimes(1);
-    expect(events.at(-1)).toEqual({type: 'limit_reached', limit: 'tools'});
+    expect(events).toContainEqual({
+      type: 'status',
+      text: '工具调用已达上限，正在整理最终回答',
+    });
+    expect(events.at(-1)).toEqual({
+      type: 'assistant_text',
+      text: '已读取一个文件，其余文件因工具上限未读取。',
+    });
+    expect(model.requests).toHaveLength(2);
+    expect(model.requests[1]).toMatchObject({toolChoice: 'none'});
+    expect(model.requests[1]?.tools).toBeUndefined();
+    expect(model.requests[1]?.messages).toContainEqual({
+      role: 'tool',
+      tool_call_id: 'call_2',
+      content: expect.stringContaining('TOOL_LIMIT_REACHED'),
+    });
+  });
+
+  it('fails if the tool-free final answer still requests a tool', async () => {
+    const events = await collect(runAgentTask(options(scriptedModel([
+      toolResponse([{
+        id: 'call_1',
+        name: 'read_file',
+        arguments: {path: 'README.md'},
+      }]),
+      toolResponse([{
+        id: 'call_2',
+        name: 'read_file',
+        arguments: {path: 'README.md'},
+      }]),
+    ]), {
+      limits: {maxTurns: 1, maxToolCalls: 1},
+    })));
+
+    expect(executeRead).toHaveBeenCalledOnce();
+    expect(events.at(-1)).toEqual({
+      type: 'error',
+      message: '工具调用上限后的最终回答仍请求了工具',
+    });
   });
 
   it('allows exactly maxTurns model requests and then reports the turn limit', async () => {
