@@ -425,7 +425,7 @@ describe('App', () => {
     release();
   });
 
-  it('renders injected agent events after submitting a task', async () => {
+  it('renders the injected answer after collapsing its tool events', async () => {
     const app = render(<App
       runTask={() => scriptedEvents()}
       workspace="/workspace"
@@ -441,7 +441,7 @@ describe('App', () => {
       expect(app.lastFrame()).toContain('README 描述了浩宸信号');
     });
 
-    expect(app.lastFrame()).toContain('工具 › read_file');
+    expect(app.lastFrame()).not.toContain('工具 › read_file');
     expect(app.lastFrame()).toContain('README 描述了浩宸信号');
   });
 
@@ -1024,7 +1024,7 @@ describe('App', () => {
     });
   });
 
-  it('separates user, assistant, tool, approval and result entries', async () => {
+  it('keeps the user and answer after collapsing completed process entries', async () => {
     const gateReporter = new GateReporter();
     const app = render(<App
       runTask={() => scriptedEvents()}
@@ -1049,11 +1049,70 @@ describe('App', () => {
       const frame = app.lastFrame();
       expect(frame).toContain('你 ›');
       expect(frame).toContain('浩宸 ›');
-      expect(frame).toContain('工具 › read_file');
-      expect(frame).toContain('参数  {"path":"README.md"}');
-      expect(frame).toContain('审批 › read_file');
-      expect(frame).toContain('无需 AI 审查');
-      expect(frame).toContain('结果 › read_file');
+      expect(frame).toContain('README 描述了浩宸信号');
+      expect(frame).not.toContain('工具 › read_file');
+      expect(frame).not.toContain('{"path":"README.md"}');
+      expect(frame).not.toContain('审批 › read_file');
+      expect(frame).not.toContain('无需 AI 审查');
+      expect(frame).not.toContain('结果 › read_file');
+    });
+  });
+
+  it('renders each tool call as one line and hides this task process when answering starts', async () => {
+    let releaseTool!: () => void;
+    let releaseAnswer!: () => void;
+    const toolGate = new Promise<void>(resolve => { releaseTool = resolve; });
+    const answerGate = new Promise<void>(resolve => { releaseAnswer = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {type: 'reasoning_delta', text: '先读取文件'};
+      yield {type: 'assistant_turn_finished'};
+      yield {type: 'tool_started', name: 'read_file', input: {path: 'README.md'}};
+      await toolGate;
+      yield {
+        type: 'tool_finished',
+        name: 'read_file',
+        result: {ok: true, summary: '已读取 README.md'},
+      };
+      yield {type: 'reasoning_delta', text: '组织回答'};
+      await answerGate;
+      yield {type: 'assistant_delta', text: '开始输出'};
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取后回答');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      const toolLines = (app.lastFrame() ?? '')
+        .split('\n')
+        .filter(line => line.includes('工具 › read_file'));
+      expect(toolLines).toEqual([
+        expect.stringContaining('工具 › read_file · 读取碎片 · {"path":"README.md"}'),
+      ]);
+    });
+
+    releaseTool();
+    await vi.waitFor(() => {
+      const toolLines = (app.lastFrame() ?? '')
+        .split('\n')
+        .filter(line => line.includes('工具 › read_file'));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain('✓ 已读取 README.md');
+    });
+
+    releaseAnswer();
+    await vi.waitFor(() => {
+      const frame = app.lastFrame() ?? '';
+      expect(frame).toContain('开始输出');
+      expect(frame).not.toContain('先读取文件');
+      expect(frame).not.toContain('组织回答');
+      expect(frame).not.toContain('工具 › read_file');
+      expect(frame).not.toContain('已读取 README.md');
     });
   });
 

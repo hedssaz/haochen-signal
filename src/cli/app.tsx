@@ -178,8 +178,10 @@ function entryLabel(item: UiEntry): string {
   }
 }
 
-function entryColor(kind: UiEntry['kind']): 'cyan' | 'white' | 'magenta' | 'green' | 'yellow' | 'red' | 'gray' {
-  switch (kind) {
+function entryColor(item: UiEntry): 'cyan' | 'white' | 'magenta' | 'green' | 'yellow' | 'red' | 'gray' {
+  if (item.toolStatus === 'success') return 'green';
+  if (item.toolStatus === 'failure') return 'red';
+  switch (item.kind) {
     case 'user': return 'cyan';
     case 'reasoning': return 'gray';
     case 'assistant': return 'white';
@@ -865,11 +867,17 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       {state.transcript.map((item, index) => <Box
         key={`${index}-${item.text}`}
         flexDirection="column"
-        marginBottom={1}
+        marginBottom={item.compact === true ? 0 : 1}
       >
-        <Text color={entryColor(item.kind)} bold>{entryLabel(item)}</Text>
-        <Text>{item.text}</Text>
-        {item.detail === undefined ? null : <Text dimColor>{`参数  ${item.detail}`}</Text>}
+        {item.compact === true
+          ? <Text color={entryColor(item)}>
+            {`${entryLabel(item)} · ${item.text}${item.detail === undefined ? '' : ` · ${item.detail}`}`}
+          </Text>
+          : <>
+            <Text color={entryColor(item)} bold>{entryLabel(item)}</Text>
+            <Text>{item.text}</Text>
+            {item.detail === undefined ? null : <Text dimColor>{`参数  ${item.detail}`}</Text>}
+          </>}
       </Box>)}
     </Box>
     {state.liveReasoning.length === 0 ? null : <Box flexDirection="column" marginBottom={1}>

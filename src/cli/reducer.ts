@@ -256,7 +256,11 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       };
     }
     case 'assistant_message': {
-      const finalized = finalizeLiveRound(state);
+      const finalized = finalizeLiveRound({
+        ...state,
+        transcript: collapseCurrentTaskProcess(state),
+        liveReasoning: '',
+      });
       return append(finalized, entry('assistant', '浩宸', event.text), {
         phase: 'thinking',
         roundUsageTotal: undefined,
@@ -266,7 +270,11 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       });
     }
     case 'assistant_text': {
-      const finalized = finalizeLiveRound(state);
+      const finalized = finalizeLiveRound({
+        ...state,
+        transcript: collapseCurrentTaskProcess(state),
+        liveReasoning: '',
+      });
       return append(finalized, entry('assistant', '浩宸', event.text), {
         phase: 'idle',
         roundUsageTotal: undefined,

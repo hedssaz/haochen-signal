@@ -51,6 +51,23 @@ describe('uiReducer', () => {
   });
 
   it.each([
+    {type: 'assistant_message', text: '工具前回复'} as const,
+    {type: 'assistant_text', text: '最终回复'} as const,
+  ])('collapses the current task process on $type without prior deltas', (event) => {
+    const started = uiReducer(initialUiState, {type: 'task_started'});
+    const tool = uiReducer(started, {
+      type: 'tool_started',
+      name: 'read_file',
+      input: {path: 'README.md'},
+    });
+    const answered = uiReducer(tool, event);
+
+    expect(answered.transcript).toEqual([
+      {kind: 'assistant', title: '浩宸', text: event.text},
+    ]);
+  });
+
+  it.each([
     {
       label: 'success',
       result: {ok: true, summary: '已读取 README.md'} as const,
