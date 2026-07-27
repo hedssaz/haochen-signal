@@ -1116,6 +1116,40 @@ describe('App', () => {
     });
   });
 
+  it('truncates a long compact tool entry instead of wrapping it', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runTask = vi.fn(async function* (): AsyncIterable<AgentUiEvent> {
+      yield {
+        type: 'tool_started',
+        name: 'read_file',
+        input: {path: `long-${'segment-'.repeat(40)}.md`},
+      };
+      await blocked;
+    });
+    const app = render(<App
+      runTask={runTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="wolf-2"
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('读取长路径');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      const lines = (app.lastFrame() ?? '').split('\n');
+      const toolIndex = lines.findIndex(line => line.includes('工具 › read_file'));
+      expect(toolIndex).toBeGreaterThanOrEqual(0);
+      const nextNonEmpty = lines
+        .slice(toolIndex + 1)
+        .find(line => line.trim().length > 0);
+      expect(nextNonEmpty?.trimStart()).toMatch(/^↓ /);
+    });
+
+    release();
+  });
+
   it('shows a persistent running status until the task finishes', async () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });

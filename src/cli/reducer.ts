@@ -256,6 +256,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       };
     }
     case 'assistant_message': {
+      if (event.text.length === 0) return state;
       const finalized = finalizeLiveRound({
         ...state,
         transcript: collapseCurrentTaskProcess(state),
@@ -270,6 +271,7 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
       });
     }
     case 'assistant_text': {
+      if (event.text.length === 0) return state;
       const finalized = finalizeLiveRound({
         ...state,
         transcript: collapseCurrentTaskProcess(state),
@@ -317,18 +319,23 @@ export function uiReducer(state: UiState, event: UiEvent): UiState {
             : {error: event.result.error?.message ?? event.result.summary}),
         };
       }
-      if (!event.result.ok) {
-        return append(state, entry('error', event.name, failureDetails(event.result)), {
-          phase: 'thinking',
-          showPreviousRoundUsage: false,
-          activeTool: undefined,
-          error: event.result.error?.message ?? event.result.summary,
-        });
-      }
-      return append(state, entry('result', event.name, event.result.summary), {
+      const fallback: UiEntry = {
+        kind: 'tool',
+        title: event.name,
+        text: summary,
+        detail: event.result.ok
+          ? `✓ ${singleLine(event.result.summary)}`
+          : `✗ ${singleLine(failureDetails(event.result))}`,
+        compact: true,
+        toolStatus: event.result.ok ? 'success' : 'failure',
+      };
+      return append(state, fallback, {
         phase: 'thinking',
         showPreviousRoundUsage: false,
         activeTool: undefined,
+        ...(event.result.ok
+          ? {}
+          : {error: event.result.error?.message ?? event.result.summary}),
       });
     }
     case 'review':

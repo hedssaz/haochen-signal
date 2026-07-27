@@ -68,6 +68,60 @@ describe('uiReducer', () => {
   });
 
   it.each([
+    {type: 'assistant_message', text: ''} as const,
+    {type: 'assistant_text', text: ''} as const,
+  ])('does not collapse or append an empty $type', (event) => {
+    const started = uiReducer(initialUiState, {type: 'task_started'});
+    const reasoning = uiReducer(started, {
+      type: 'reasoning_delta',
+      text: '保留思考',
+    });
+    const unchanged = uiReducer(reasoning, event);
+
+    expect(unchanged.transcript).toEqual([]);
+    expect(unchanged.liveReasoning).toBe('保留思考');
+  });
+
+  it.each([
+    {
+      result: {ok: true, summary: '无开始事件成功'} as const,
+      toolStatus: 'success',
+    },
+    {
+      result: {
+        ok: false,
+        summary: '无开始事件失败',
+        error: {code: 'FAILED', message: '真实失败'},
+      } as const,
+      toolStatus: 'failure',
+    },
+  ])('keeps an unmatched $toolStatus tool result compact and collapsible', ({
+    result,
+    toolStatus,
+  }) => {
+    const started = uiReducer(initialUiState, {type: 'task_started'});
+    const finished = uiReducer(started, {
+      type: 'tool_finished',
+      name: 'run_command',
+      result,
+    });
+
+    expect(finished.transcript).toHaveLength(1);
+    expect(finished.transcript[0]).toMatchObject({
+      kind: 'tool',
+      title: 'run_command',
+      compact: true,
+      toolStatus,
+    });
+
+    const answered = uiReducer(finished, {
+      type: 'assistant_delta',
+      text: '继续回答',
+    });
+    expect(answered.transcript).toEqual([]);
+  });
+
+  it.each([
     {
       label: 'success',
       result: {ok: true, summary: '已读取 README.md'} as const,
@@ -303,7 +357,7 @@ describe('uiReducer', () => {
     expect(JSON.stringify(state)).not.toContain('private contents');
   });
 
-  it('renders a failed command without a completion mark', () => {
+  it('renders an unmatched failed command as one failed tool line', () => {
     const state = uiReducer(initialUiState, {
       type: 'tool_finished',
       name: 'run_command',
@@ -315,11 +369,14 @@ describe('uiReducer', () => {
     });
 
     expect(state.transcript.at(-1)).toMatchObject({
-      kind: 'error',
+      kind: 'tool',
       title: 'run_command',
-      text: expect.stringContaining('退出码 2'),
+      text: '执行验证',
+      compact: true,
+      toolStatus: 'failure',
+      detail: expect.stringContaining('退出码 2'),
     });
-    expect(state.transcript.at(-1)?.text).toContain('AssertionError');
+    expect(state.transcript.at(-1)?.detail).toContain('AssertionError');
   });
 
   it('keeps assistant text as a final success entry', () => {

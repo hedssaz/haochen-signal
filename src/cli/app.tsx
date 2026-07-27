@@ -870,7 +870,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         marginBottom={item.compact === true ? 0 : 1}
       >
         {item.compact === true
-          ? <Text color={entryColor(item)}>
+          ? <Text color={entryColor(item)} wrap="truncate-end">
             {`${entryLabel(item)} · ${item.text}${item.detail === undefined ? '' : ` · ${item.detail}`}`}
           </Text>
           : <>
