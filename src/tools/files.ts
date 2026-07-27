@@ -393,39 +393,47 @@ async function collectRegularFiles(
   }
 
   const files: string[] = [];
-  const walk = async (directory: ResolvedPath): Promise<boolean> => {
-    assertNotAborted(signal);
-    const entries = await readdir(directory.absolute, {withFileTypes: true});
-    entries.sort((left, right) => comparePaths(left.name, right.name));
-
-    for (const entry of entries) {
+  let directories = [root];
+  while (directories.length > 0) {
+    const nextDirectories: ResolvedPath[] = [];
+    directories.sort((left, right) => comparePaths(
+      left.relative,
+      right.relative,
+    ));
+    for (const directory of directories) {
       assertNotAborted(signal);
-      if (EXCLUDED_DIRECTORIES.has(entry.name) || entry.isSymbolicLink()) {
-        continue;
-      }
+      const entries = await readdir(directory.absolute, {withFileTypes: true});
+      entries.sort((left, right) => comparePaths(left.name, right.name));
 
-      const requested = directory.relative === '.'
-        ? entry.name
-        : join(directory.relative, entry.name);
-      const resolved = await resolveWorkspacePath(
-        context.workspace,
-        requested,
-        'existing',
-      );
-      const stat = await lstat(resolved.absolute);
-      if (stat.isDirectory()) {
-        if (await walk(resolved)) return true;
-      } else if (stat.isFile()) {
-        if (files.length >= maxFiles) return true;
-        files.push(toWorkspacePath(resolved.relative));
+      for (const entry of entries) {
+        assertNotAborted(signal);
+        if (EXCLUDED_DIRECTORIES.has(entry.name) || entry.isSymbolicLink()) {
+          continue;
+        }
+
+        const requested = directory.relative === '.'
+          ? entry.name
+          : join(directory.relative, entry.name);
+        const resolved = await resolveWorkspacePath(
+          context.workspace,
+          requested,
+          'existing',
+        );
+        const stat = await lstat(resolved.absolute);
+        if (stat.isDirectory()) {
+          nextDirectories.push(resolved);
+        } else if (stat.isFile()) {
+          if (files.length >= maxFiles) {
+            return {files, truncated: true};
+          }
+          files.push(toWorkspacePath(resolved.relative));
+        }
       }
     }
-    return false;
-  };
+    directories = nextDirectories;
+  }
 
-  const truncated = await walk(root);
-  files.sort(comparePaths);
-  return {files, truncated};
+  return {files, truncated: false};
 }
 
 async function openVerifiedRegularFile(

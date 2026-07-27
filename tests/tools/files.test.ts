@@ -83,7 +83,7 @@ describe('workspace file tools', () => {
 
     expect(result).toMatchObject({
       ok: true,
-      data: {files: ['B.txt', 'a.txt', 'src/a.txt', 'z.txt']},
+      data: {files: ['B.txt', 'a.txt', 'z.txt', 'src/a.txt']},
     });
     expect(explicitGit.data?.files).toEqual([]);
     expect(explicitDependency.data?.files).toEqual([]);
@@ -100,6 +100,51 @@ describe('workspace file tools', () => {
     expect(result.truncated).toBe(true);
     expect(result.data?.files).toHaveLength(500);
     expect(result.summary).toContain('已截断');
+  });
+
+  it('does not mark a listing of exactly 500 files as truncated', async () => {
+    await Promise.all(Array.from({length: 500}, (_, index) =>
+      writeFile(join(workspace, `${String(index).padStart(3, '0')}.txt`), 'x'),
+    ));
+
+    const result = await listFiles({}, context, signal);
+
+    expect(result.ok).toBe(true);
+    expect(result.truncated).toBeUndefined();
+    expect(result.data?.files).toHaveLength(500);
+  });
+
+  it('keeps shallow files when deep files exceed the listing limit', async () => {
+    await mkdir(join(workspace, 'deep', 'nested'), {recursive: true});
+    await writeFile(join(workspace, 'z-root.txt'), 'root');
+    await Promise.all(Array.from({length: 500}, (_, index) =>
+      writeFile(
+        join(
+          workspace,
+          'deep',
+          'nested',
+          `${String(index).padStart(3, '0')}.txt`,
+        ),
+        'x',
+      ),
+    ));
+
+    const result = await listFiles({}, context, signal);
+
+    expect(result.truncated).toBe(true);
+    expect(result.data?.files).toHaveLength(500);
+    expect(result.data?.files[0]).toBe('z-root.txt');
+  });
+
+  it('orders files at the same depth by complete relative path', async () => {
+    await mkdir(join(workspace, 'b'));
+    await mkdir(join(workspace, 'a'));
+    await writeFile(join(workspace, 'b', 'a.txt'), 'b');
+    await writeFile(join(workspace, 'a', 'z.txt'), 'a');
+
+    const result = await listFiles({}, context, signal);
+
+    expect(result.data?.files).toEqual(['a/z.txt', 'b/a.txt']);
   });
 
   it('searches text with one-based locations and skips binary and oversized files', async () => {
