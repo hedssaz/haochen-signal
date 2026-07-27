@@ -9,6 +9,7 @@ import type {ModelClient} from '../../src/providers/types.js';
 import type {SessionEvent} from '../../src/sessions/types.js';
 import type {ToolDefinitionSpec} from '../../src/tools/types.js';
 import type {ModelConfigSaveRequest} from '../../src/cli/model-config.js';
+import {saveConfig} from '../../src/config/load.js';
 
 interface ModelRuntime {
   client: ModelClient;
@@ -367,15 +368,36 @@ describe('CLI entrypoint', () => {
     const persistOrder: string[] = [];
     let diskConfig: HaochenConfig | undefined;
     let runtimeState: HaochenConfig | undefined;
-    const save = cli.createLatestModelConfigSaver({
-      persist: async request => {
-        const label = request.config.activeModelId === 'model-a' ? 'A' : 'B';
-        persistOrder.push(`start:${label}`);
+    let temporaryContents = '';
+    const files = {
+      mkdir: vi.fn(async () => undefined),
+      writeFile: vi.fn(async (
+        _path: string,
+        contents: string,
+      ) => {
+        temporaryContents = contents;
+      }),
+      rename: vi.fn(async () => {
+        const parsed = JSON.parse(temporaryContents) as HaochenConfig;
+        const label = parsed.activeModelId === 'model-a' ? 'A' : 'B';
         if (label === 'A') {
           markAStarted();
           await aGate;
         }
-        diskConfig = request.config;
+        diskConfig = parsed;
+      }),
+      unlink: vi.fn(async () => undefined),
+    };
+    const save = cli.createLatestModelConfigSaver({
+      persist: async request => {
+        const label = request.config.activeModelId === 'model-a' ? 'A' : 'B';
+        persistOrder.push(`start:${label}`);
+        await saveConfig(
+          '/virtual/config.json',
+          request.config,
+          files,
+          request.signal,
+        );
         persistOrder.push(`finish:${label}`);
       },
       commit: request => {
@@ -406,8 +428,67 @@ describe('CLI entrypoint', () => {
       'start:B',
       'finish:B',
     ]);
-    expect(diskConfig).toBe(configB);
+    expect(diskConfig).toEqual(configB);
     expect(runtimeState).toBe(configB);
+    expect(files.unlink).not.toHaveBeenCalled();
+  });
+
+  it('commits runtime state when cancellation arrives after config rename starts', async () => {
+    const cli = await importCliForTest();
+    expect(cli.createLatestModelConfigSaver).toBeTypeOf('function');
+    if (cli.createLatestModelConfigSaver === undefined) return;
+    const configA = runtimeConfig();
+    const controllerA = new AbortController();
+    let markRenameStarted!: () => void;
+    let releaseRename!: () => void;
+    const renameStarted = new Promise<void>(resolve => {
+      markRenameStarted = resolve;
+    });
+    const renameGate = new Promise<void>(resolve => {
+      releaseRename = resolve;
+    });
+    let diskConfig: HaochenConfig | undefined;
+    let runtimeState: HaochenConfig | undefined;
+    let temporaryContents = '';
+    const files = {
+      mkdir: vi.fn(async () => undefined),
+      writeFile: vi.fn(async (
+        _path: string,
+        contents: string,
+      ) => {
+        temporaryContents = contents;
+      }),
+      rename: vi.fn(async () => {
+        markRenameStarted();
+        await renameGate;
+        diskConfig = JSON.parse(temporaryContents) as HaochenConfig;
+      }),
+      unlink: vi.fn(async () => undefined),
+    };
+    const save = cli.createLatestModelConfigSaver({
+      persist: request => saveConfig(
+        '/virtual/config.json',
+        request.config,
+        files,
+        request.signal,
+      ),
+      commit: request => {
+        runtimeState = request.config;
+      },
+    });
+
+    const saving = save({
+      config: configA,
+      signal: controllerA.signal,
+    });
+    await renameStarted;
+    controllerA.abort(new DOMException('rename 已开始', 'AbortError'));
+    releaseRename();
+
+    await expect(saving).resolves.toBeUndefined();
+    expect(diskConfig).toEqual(configA);
+    expect(runtimeState).toBe(configA);
+    expect(files.unlink).not.toHaveBeenCalled();
   });
 
   it('exposes character pagination in the read_file model tool schema', async () => {

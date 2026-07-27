@@ -91,7 +91,6 @@ export function createLatestModelConfigSaver(
       request.signal.throwIfAborted();
       if (generation !== latestGeneration) throw supersededSave();
       await options.persist(request);
-      request.signal.throwIfAborted();
       if (generation !== latestGeneration) throw supersededSave();
       options.commit(request);
     });
@@ -859,7 +858,6 @@ function transitionSaveSucceeded(
   state: ModelConfigState,
   config: HaochenConfig,
 ): ModelConfigTransition {
-  if (state.screen !== 'saving') return {state};
   const parsed = parseConfig(config);
   const selectedId = state.pendingSave?.selectedModelId ?? parsed.activeModelId;
   const models = orderedModels(parsed);

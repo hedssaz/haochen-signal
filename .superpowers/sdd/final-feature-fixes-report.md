@@ -299,3 +299,59 @@ git diff --check
 - `git diff --check` 退出码 0。
 
 最终自审确认：配置保存的取消检查位于 `rename` 前，保存尾链保证最终磁盘顺序，代际检查保证运行时与 UI 只接受最新请求；文件发布后不存在任何目标路径回滚，变更工具中止顺序为真实工具结果、持久化工具事件、中断事件，且不会发起下一轮模型请求。无遗留 blocker。
+
+## 最后 P1：配置 rename 提交点
+
+### 根因与 RED
+
+`saveConfig` 已经把最后一次 signal 检查放在 `rename` 之前，重命名成功后会正常 resolve；但保存队列在 `persist` resolve 后再次执行 `signal.throwIfAborted()`，App 的成功分支也再次拒绝 aborted signal。结果是取消发生在 `rename` 调用之后时，磁盘已经提交 A，运行时与 UI 却仍停留在旧配置。
+
+新增受控 deferred rename 回归：
+
+- 无 B：A 进入 `rename` 后取消，随后 `rename` 成功；要求 disk/runtime/UI 全部接纳 A；
+- 有 B：A 进入 `rename` 后取消并提交，B 排队保存；要求最终 disk/runtime/UI 全部为 B。
+
+RED：
+
+```text
+npx vitest run tests/cli/index.test.ts tests/cli/app.test.tsx \
+  -t "commits runtime state when cancellation arrives after config rename starts|applies a save that commits after cancellation"
+```
+
+结果：退出码 1；2 项失败。保存队列以 `AbortError` 拒绝已经提交的 A，App 未调用 active-model 更新。
+
+### GREEN
+
+- 保存队列仅在持久化开始前响应 signal；`persist` 成功 resolve 后视为已越过提交点，不再以 aborted signal 否定提交；
+- 持久化成功后仍检查 generation，有 B 取代时 A 不更新运行时；
+- App 成功分支只检查操作 signal 是否仍为当前代际，不再把当前但 aborted 的已提交保存丢弃；
+- `save_succeeded` 可在 Ctrl+C 已把面板退回编辑页后重新协调 committed config，并回到模型列表。
+
+聚焦验证：
+
+```text
+npx vitest run tests/cli/index.test.ts tests/cli/app.test.tsx \
+  -t "commits runtime state when cancellation arrives after config rename starts|applies a save that commits after cancellation|serializes model config saves|ignores a canceled save"
+```
+
+结果：退出码 0；2 个文件、4 项全部通过。
+
+相关回归：
+
+```text
+npx vitest run tests/config/load.test.ts tests/cli/model-config.test.ts \
+  tests/cli/index.test.ts tests/cli/app.test.tsx
+```
+
+结果：退出码 0；4 个文件、129 项全部通过。
+
+最终验证：
+
+```text
+npm test
+npm run typecheck
+npm run build
+git diff --check
+```
+
+结果：全量测试退出码 0，41 个测试文件、709 项全部通过；typecheck 与 build 均退出码 0；最终差异检查通过。

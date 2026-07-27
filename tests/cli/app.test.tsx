@@ -645,6 +645,61 @@ describe('App', () => {
     await vi.waitFor(() => expect(onExit).toHaveBeenCalledOnce());
   });
 
+  it('applies a save that commits after cancellation when no newer save replaces it', async () => {
+    let releaseRename!: () => void;
+    const renameGate = new Promise<void>(resolve => {
+      releaseRename = resolve;
+    });
+    const save = vi.fn(async () => {
+      await renameGate;
+    });
+    const onActiveModelChange = vi.fn();
+    const app = render(<App
+      runTask={idleTask}
+      workspace="/workspace"
+      sessionId="signal-1"
+      model="deepseek-chat"
+      modelConfig={multiModelConfig}
+      modelConfigController={{
+        discover: vi.fn(async () => []),
+        save,
+      }}
+      onActiveModelChange={onActiveModelChange}
+    />);
+
+    await waitForInputListener();
+    app.stdin.write('/model');
+    app.stdin.write('\r');
+    await vi.waitFor(() => expect(app.lastFrame()).toContain('模型配置'));
+    app.stdin.write('\u001B[B');
+    app.stdin.write('\r');
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalledOnce();
+      expect(app.lastFrame()).toContain('正在保存模型配置');
+    });
+
+    app.stdin.write('\u0003');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).not.toContain('正在保存模型配置');
+      expect(app.lastFrame()).toContain('DeepSeek Reasoner');
+    });
+    releaseRename();
+
+    await vi.waitFor(() => {
+      expect(onActiveModelChange).toHaveBeenCalledOnce();
+      expect(onActiveModelChange).toHaveBeenCalledWith(
+        expect.objectContaining({id: 'deepseek-reasoner'}),
+        expect.objectContaining({activeModelId: 'deepseek-reasoner'}),
+      );
+      expect(app.lastFrame()).toContain('● DeepSeek Reasoner');
+    });
+
+    app.stdin.write('\u001B');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('上下文 0 / 256k');
+    });
+  });
+
   it('ignores a canceled save that resolves after a newer model save', async () => {
     let saveCount = 0;
     let releaseFirstSave!: () => void;

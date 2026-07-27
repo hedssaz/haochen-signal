@@ -337,10 +337,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
           signal,
         }).then(
           () => {
-            if (
-              signal.aborted
-              || !modelConfigOperationController.current.isCurrent(signal)
-            ) return;
+            if (!modelConfigOperationController.current.isCurrent(signal)) return;
             modelConfigurationRef.current = effect.config;
             setModelConfiguration(effect.config);
             const validModelIds = new Set(
