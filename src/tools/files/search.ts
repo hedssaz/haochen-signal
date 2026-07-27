@@ -6,6 +6,7 @@ import {
   failure,
   success,
 } from './common.js';
+import {isBinary} from './file-access.js';
 import {collectRegularFiles, readSearchFile} from './read.js';
 import type {
   SearchMatch,
@@ -13,46 +14,10 @@ import type {
   SearchTextOutput,
 } from './types.js';
 
+
 const MAX_SEARCH_MATCHES = 200;
 const MAX_SEARCH_PREVIEW_CHARACTERS = 240;
 
-function decodeUtf8Text(contents: Buffer): string {
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', {fatal: true}).decode(contents);
-  } catch {
-    throw new FileToolError('BINARY_FILE', '文件不是有效的 UTF-8 文本');
-  }
-
-  let controlBytes = 0;
-  for (const byte of contents) {
-    if ((byte < 0x20
-        && byte !== 0x09
-        && byte !== 0x0a
-        && byte !== 0x0c
-        && byte !== 0x0d)
-      || byte === 0x7f) {
-      controlBytes += 1;
-    }
-  }
-  if (contents.includes(0)
-    || (contents.length > 0 && controlBytes / contents.length > 0.1)) {
-    throw new FileToolError('BINARY_FILE', '文件包含二进制内容');
-  }
-  return text;
-}
-
-function isBinary(contents: Buffer): boolean {
-  try {
-    decodeUtf8Text(contents);
-    return false;
-  } catch (error) {
-    if (error instanceof FileToolError && error.code === 'BINARY_FILE') {
-      return true;
-    }
-    throw error;
-  }
-}
 
 interface TextLineState {
   pending: string;

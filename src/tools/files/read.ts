@@ -1,5 +1,5 @@
 import {constants} from 'node:fs';
-import {lstat, open, readdir} from 'node:fs/promises';
+import {lstat, readdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {
   resolveWorkspacePath,
@@ -11,12 +11,11 @@ import {
   assertNotAborted,
   comparePaths,
   failure,
-  fileIdentity,
   hasExcludedDirectory,
-  sameIdentity,
   success,
   toWorkspacePath,
 } from './common.js';
+import {openVerifiedRegularFile} from './file-access.js';
 import type {
   ListFilesInput,
   ListFilesOutput,
@@ -31,18 +30,6 @@ const MAX_READ_BYTES = 2 * 1024 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_READ_CHARACTERS = 65_536;
 const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules']);
-const NO_FOLLOW = constants.O_NOFOLLOW;
-// Darwin's open(2) exposes O_NOFOLLOW_ANY, but Node does not export it.
-// It rejects symlinks in every path component, not only the final component.
-const DARWIN_NO_FOLLOW_ANY = process.platform === 'darwin' ? 0x20000000 : 0;
-const SECURE_OPEN_FLAGS = DARWIN_NO_FOLLOW_ANY || NO_FOLLOW;
-
-type OpenFileHandle = Awaited<ReturnType<typeof open>>;
-
-interface FileIdentity {
-  dev: number;
-  ino: number;
-}
 
 export async function collectRegularFiles(
   inputPath: string,
@@ -109,56 +96,6 @@ export async function collectRegularFiles(
 
   return {files, truncated: false};
 }
-
-async function openVerifiedRegularFile(
-  resolved: ResolvedPath,
-  context: ToolContext,
-  flags: number,
-): Promise<{
-  file: OpenFileHandle;
-  identity: FileIdentity;
-  mode: number;
-}> {
-  const file = await open(resolved.absolute, flags | SECURE_OPEN_FLAGS);
-  try {
-    const verified = await verifyOpenedRegularFile(file, resolved, context);
-    return {file, ...verified};
-  } catch (error) {
-    await file.close();
-    throw error;
-  }
-}
-
-async function verifyOpenedRegularFile(
-  file: OpenFileHandle,
-  resolved: ResolvedPath,
-  context: ToolContext,
-): Promise<{identity: FileIdentity; mode: number}> {
-  const openedStat = await file.stat();
-  if (!openedStat.isFile()) {
-    throw new FileToolError('NOT_A_FILE', '请求路径不是常规文件');
-  }
-
-  const current = await resolveWorkspacePath(
-    context.workspace,
-    resolved.relative,
-    'existing',
-  );
-  if (current.absolute !== resolved.absolute) {
-    throw new FileToolError('FILE_CHANGED', '文件路径在操作前已变化');
-  }
-
-  const currentStat = await lstat(current.absolute);
-  const openedIdentity = fileIdentity(openedStat);
-  if (!sameIdentity(openedIdentity, fileIdentity(currentStat))) {
-    throw new FileToolError('FILE_CHANGED', '文件在操作前已被替换');
-  }
-  return {
-    identity: openedIdentity,
-    mode: openedStat.mode & 0o7777,
-  };
-}
-
 
 export async function readSearchFile(
   resolved: ResolvedPath,
@@ -340,7 +277,6 @@ export async function listFiles(
     return failure(error, signal);
   }
 }
-
 
 export async function readFileTool(
   input: ReadFileInput,
