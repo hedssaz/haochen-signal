@@ -497,7 +497,11 @@ describe('OpenAI-compatible chat completions client', () => {
 
   it('wraps and redacts fetch rejections', async () => {
     const fetchImpl = vi.fn(async () => {
-      throw new Error('socket failed for fetch-secret and auth-secret');
+      throw new TypeError('fetch failed', {
+        cause: new Error(
+          'getaddrinfo ENOTFOUND example.test for fetch-secret and auth-secret',
+        ),
+      });
     }) as typeof fetch;
     const client = createOpenAiCompatibleClient(endpointConfig({
       baseUrl: 'https://example.test/v1',
@@ -518,6 +522,7 @@ describe('OpenAI-compatible chat completions client', () => {
 
     expect(thrown).toBeInstanceOf(ModelProviderError);
     expect((thrown as Error).message).toContain('Model fetch failed');
+    expect((thrown as Error).message).toContain('ENOTFOUND example.test');
     expect((thrown as Error).message).toContain('[REDACTED]');
     expect((thrown as Error).message).not.toContain('fetch-secret');
     expect((thrown as Error).message).not.toContain('auth-secret');

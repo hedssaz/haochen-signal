@@ -144,8 +144,14 @@ function redactErrorMessage(rawMessage: string, secrets: string[]): string {
   return message;
 }
 
-function errorDescription(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
+function errorDescription(error: unknown, depth = 0): string {
+  if (error instanceof Error) {
+    const description = `${error.name}: ${error.message}`;
+    if (depth < 3 && error.cause !== undefined && error.cause !== error) {
+      return `${description}; cause: ${errorDescription(error.cause, depth + 1)}`;
+    }
+    return description;
+  }
   return String(error);
 }
 
