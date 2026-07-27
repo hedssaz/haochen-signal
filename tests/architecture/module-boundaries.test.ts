@@ -14,6 +14,11 @@ import {
 import {validatePatch} from '../../src/tools/files/patch-plan.js';
 import {prepareTempFile} from '../../src/tools/files/patch-files.js';
 import {executeAdd} from '../../src/tools/files/patch-execute.js';
+import * as commandFacade from '../../src/tools/command.js';
+import {runCommand} from '../../src/tools/command/run-command.js';
+import {
+  createWindowsProcessController,
+} from '../../src/tools/command/windows-process-tree.js';
 
 describe('tool module boundaries', () => {
   it('keeps the file tool facade compatible', () => {
@@ -30,5 +35,11 @@ describe('tool module boundaries', () => {
     expect(validatePatch).toBeTypeOf('function');
     expect(prepareTempFile).toBeTypeOf('function');
     expect(executeAdd).toBeTypeOf('function');
+  });
+
+  it('keeps the command tool facade compatible', () => {
+    expect(commandFacade.runCommand).toBe(runCommand);
+    expect(commandFacade.createWindowsProcessController)
+      .toBe(createWindowsProcessController);
   });
 });
