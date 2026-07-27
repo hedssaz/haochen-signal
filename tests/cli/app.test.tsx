@@ -536,7 +536,7 @@ describe('App', () => {
       model="deepseek-chat"
       modelConfig={modelConfig}
       modelConfigController={{
-        discover: vi.fn(async () => []),
+        discover: vi.fn(async () => ({modelIds: [], contextWindows: {}})),
         save: vi.fn(async () => undefined),
       }}
     />);
@@ -566,7 +566,7 @@ describe('App', () => {
     const discover = vi.fn(async (request: {signal: AbortSignal}) => {
       discoverySignal = request.signal;
       await new Promise<never>(() => undefined);
-      return [];
+      return {modelIds: [], contextWindows: {}};
     });
     const app = render(<App
       runTask={idleTask}
@@ -618,7 +618,7 @@ describe('App', () => {
       model="deepseek-chat"
       modelConfig={multiModelConfig}
       modelConfigController={{
-        discover: vi.fn(async () => []),
+        discover: vi.fn(async () => ({modelIds: [], contextWindows: {}})),
         save,
       }}
       onExit={onExit}
@@ -663,7 +663,7 @@ describe('App', () => {
       model="deepseek-chat"
       modelConfig={multiModelConfig}
       modelConfigController={{
-        discover: vi.fn(async () => []),
+        discover: vi.fn(async () => ({modelIds: [], contextWindows: {}})),
         save,
       }}
       onActiveModelChange={onActiveModelChange}
@@ -720,7 +720,7 @@ describe('App', () => {
       model="deepseek-chat"
       modelConfig={threeModelConfig}
       modelConfigController={{
-        discover: vi.fn(async () => []),
+        discover: vi.fn(async () => ({modelIds: [], contextWindows: {}})),
         save,
       }}
       onActiveModelChange={onActiveModelChange}
@@ -796,7 +796,7 @@ describe('App', () => {
       });
       const onActiveModelChange = vi.fn();
       const modelConfigController = {
-        discover: vi.fn(async () => []),
+        discover: vi.fn(async () => ({modelIds: [], contextWindows: {}})),
         save,
         getCommittedConfig: () => committedConfig,
       };
@@ -854,7 +854,7 @@ describe('App', () => {
       model="deepseek-chat"
       modelConfig={multiModelConfig}
       modelConfigController={{
-        discover: vi.fn(async () => []),
+        discover: vi.fn(async () => ({modelIds: [], contextWindows: {}})),
         save,
       }}
     />);
@@ -926,7 +926,7 @@ describe('App', () => {
       model="deepseek-chat"
       modelConfig={reusableIdConfig}
       modelConfigController={{
-        discover: vi.fn(async () => []),
+        discover: vi.fn(async () => ({modelIds: [], contextWindows: {}})),
         save,
       }}
     />);

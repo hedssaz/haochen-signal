@@ -2,14 +2,29 @@ import type {ProviderProfile} from '../config/schema.js';
 import {redactValue} from '../security/redact.js';
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_CATALOG_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MODEL_CATALOG_URL = 'https://models.dev/api.json';
+const MODEL_CATALOG_TIMEOUT_MS = 3_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 export interface DiscoverModelsOptions {
-  provider: Pick<ProviderProfile, 'baseUrl' | 'headers'>;
+  provider:
+    & Pick<ProviderProfile, 'baseUrl' | 'headers'>
+    & Partial<Pick<ProviderProfile, 'id' | 'name'>>;
   apiKey: string;
   timeoutMs: number;
   signal: AbortSignal;
   fetch?: typeof fetch;
+}
+
+export interface ModelDiscoveryResult {
+  modelIds: string[];
+  contextWindows: Record<string, number>;
+}
+
+interface DiscoveredProviderModel {
+  id: string;
+  contextWindow?: number;
 }
 
 interface OperationSignal {
@@ -213,7 +228,27 @@ function compareModelIds(left: string, right: string): number {
   return 0;
 }
 
-function validateModelList(payload: unknown): string[] {
+function validContextWindow(value: unknown): number | undefined {
+  return Number.isInteger(value) && Number(value) >= 8_000
+    ? Number(value)
+    : undefined;
+}
+
+function providerContextWindow(entry: Record<string, unknown>): number | undefined {
+  for (const field of [
+    'context_window',
+    'context_length',
+    'contextWindow',
+    'max_context_length',
+    'inputTokenLimit',
+  ]) {
+    const contextWindow = validContextWindow(entry[field]);
+    if (contextWindow !== undefined) return contextWindow;
+  }
+  return undefined;
+}
+
+function validateModelList(payload: unknown): DiscoveredProviderModel[] {
   if (
     typeof payload !== 'object'
     || payload === null
@@ -234,7 +269,7 @@ function validateModelList(payload: unknown): string[] {
     });
   }
 
-  const modelIds = new Set<string>();
+  const models = new Map<string, DiscoveredProviderModel>();
   for (const entry of data) {
     if (
       typeof entry !== 'object'
@@ -253,10 +288,20 @@ function validateModelList(payload: unknown): string[] {
         reason: 'INVALID_ID',
       });
     }
-    modelIds.add(id);
+    const current = models.get(id);
+    const contextWindow = providerContextWindow(
+      entry as Record<string, unknown>,
+    );
+    const resolvedContextWindow = contextWindow ?? current?.contextWindow;
+    models.set(id, resolvedContextWindow === undefined
+      ? {id}
+      : {id, contextWindow: resolvedContextWindow});
   }
 
-  return [...modelIds].sort(compareModelIds);
+  return [...models.values()].sort((left, right) => compareModelIds(
+    left.id,
+    right.id,
+  ));
 }
 
 function cancelBody(body: ReadableStream<Uint8Array> | null): void {
@@ -296,13 +341,14 @@ function waitForAbortable<T>(
 async function readBoundedResponse(
   response: Response,
   signal: AbortSignal,
+  maxBytes = MAX_RESPONSE_BYTES,
 ): Promise<string> {
   const contentLength = response.headers.get('content-length');
   if (contentLength !== null) {
     const parsedLength = Number(contentLength);
     if (
       Number.isFinite(parsedLength)
-      && parsedLength > MAX_RESPONSE_BYTES
+      && parsedLength > maxBytes
     ) {
       cancelBody(response.body);
       throw internalFailure({code: 'RESPONSE_TOO_LARGE'});
@@ -333,7 +379,7 @@ async function readBoundedResponse(
       signal.throwIfAborted();
       if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) {
+      if (bytes > maxBytes) {
         cancelReader(new Error('模型列表响应超过上限'));
         throw internalFailure({code: 'RESPONSE_TOO_LARGE'});
       }
@@ -347,9 +393,9 @@ async function readBoundedResponse(
   return Buffer.concat(chunks, bytes).toString('utf8');
 }
 
-export async function discoverModels(
+async function discoverProviderModels(
   options: DiscoverModelsOptions,
-): Promise<string[]> {
+): Promise<DiscoveredProviderModel[]> {
   let apiKey = '';
   let operation: OperationSignal | undefined;
   try {
@@ -409,4 +455,163 @@ export async function discoverModels(
   } finally {
     operation?.dispose();
   }
+}
+
+function normalizedProviderName(value: string): string {
+  return value.toLowerCase().replace(/^provider[-_]/, '').replace(/[^a-z0-9]/g, '');
+}
+
+function catalogProviderAliases(
+  provider: DiscoverModelsOptions['provider'],
+): Set<string> {
+  const aliases = new Set<string>();
+  for (const value of [provider.id, provider.name]) {
+    if (value === undefined) continue;
+    const normalized = normalizedProviderName(value);
+    if (normalized.length > 0) aliases.add(normalized);
+  }
+  try {
+    const hostname = new URL(provider.baseUrl).hostname;
+    for (const label of hostname.split('.')) {
+      const normalized = normalizedProviderName(label);
+      if (
+        normalized.length > 2
+        && !['api', 'www', 'com', 'net', 'org', 'ai'].includes(normalized)
+      ) {
+        aliases.add(normalized);
+      }
+    }
+  } catch {
+    // Provider URL validation is handled by the configuration flow.
+  }
+  return aliases;
+}
+
+function catalogContexts(
+  payload: unknown,
+  provider: DiscoverModelsOptions['provider'],
+  modelIds: ReadonlySet<string>,
+): Record<string, number> {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return {};
+  }
+  const aliases = catalogProviderAliases(provider);
+  const providers = Object.entries(payload as Record<string, unknown>);
+  const match = providers.find(([providerId, value]) => {
+    if (aliases.has(normalizedProviderName(providerId))) return true;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return false;
+    }
+    const name = (value as {name?: unknown}).name;
+    return typeof name === 'string'
+      && aliases.has(normalizedProviderName(name));
+  });
+  if (match === undefined) return {};
+  const value = match[1];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const models = (value as {models?: unknown}).models;
+  if (typeof models !== 'object' || models === null || Array.isArray(models)) {
+    return {};
+  }
+
+  const contexts: Record<string, number> = {};
+  for (const [catalogModelId, candidate] of Object.entries(
+    models as Record<string, unknown>,
+  )) {
+    if (!modelIds.has(catalogModelId)) continue;
+    if (
+      typeof candidate !== 'object'
+      || candidate === null
+      || Array.isArray(candidate)
+    ) {
+      continue;
+    }
+    const limit = (candidate as {limit?: unknown}).limit;
+    if (typeof limit !== 'object' || limit === null || Array.isArray(limit)) {
+      continue;
+    }
+    const contextWindow = validContextWindow(
+      (limit as {context?: unknown}).context,
+    );
+    if (contextWindow !== undefined) contexts[catalogModelId] = contextWindow;
+  }
+  return contexts;
+}
+
+async function discoverCatalogContexts(
+  options: DiscoverModelsOptions,
+  modelIds: ReadonlySet<string>,
+): Promise<Record<string, number>> {
+  if (modelIds.size === 0) return {};
+  const controller = new AbortController();
+  const onCallerAbort = () => controller.abort();
+  if (options.signal.aborted) {
+    throw new DOMException('已取消获取模型。', 'AbortError');
+  }
+  options.signal.addEventListener('abort', onCallerAbort, {once: true});
+  const timeout = setTimeout(
+    () => controller.abort(),
+    Math.min(options.timeoutMs, MODEL_CATALOG_TIMEOUT_MS),
+  );
+  let response: Response | undefined;
+  try {
+    response = await waitForAbortable(
+      (options.fetch ?? globalThis.fetch)(MODEL_CATALOG_URL, {
+        method: 'GET',
+        headers: {Accept: 'application/json'},
+        signal: controller.signal,
+      }),
+      controller.signal,
+    );
+    if (!response.ok) {
+      cancelBody(response.body);
+      return {};
+    }
+    const text = await readBoundedResponse(
+      response,
+      controller.signal,
+      MAX_CATALOG_RESPONSE_BYTES,
+    );
+    return catalogContexts(JSON.parse(text), options.provider, modelIds);
+  } catch {
+    cancelBody(response?.body ?? null);
+    if (options.signal.aborted) {
+      throw new DOMException('已取消获取模型。', 'AbortError');
+    }
+    return {};
+  } finally {
+    clearTimeout(timeout);
+    options.signal.removeEventListener('abort', onCallerAbort);
+  }
+}
+
+export async function discoverModels(
+  options: DiscoverModelsOptions,
+): Promise<string[]> {
+  return (await discoverProviderModels(options)).map(model => model.id);
+}
+
+export async function discoverModelsWithContext(
+  options: DiscoverModelsOptions,
+): Promise<ModelDiscoveryResult> {
+  const models = await discoverProviderModels(options);
+  const contextWindows: Record<string, number> = {};
+  const missing = new Set<string>();
+  for (const model of models) {
+    if (model.contextWindow === undefined) {
+      missing.add(model.id);
+    } else {
+      contextWindows[model.id] = model.contextWindow;
+    }
+  }
+  Object.assign(
+    contextWindows,
+    await discoverCatalogContexts(options, missing),
+  );
+  return {
+    modelIds: models.map(model => model.id),
+    contextWindows,
+  };
 }

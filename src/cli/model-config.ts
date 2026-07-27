@@ -42,6 +42,7 @@ export interface ModelConfigState {
   selectedActionIndex: number;
   targetProviderId?: string;
   discoveredModelIds: string[];
+  discoveredContextWindows: Record<string, number>;
   selectedDiscoveredIndex: number;
   form: ModelConfigForm;
   error?: string;
@@ -66,7 +67,12 @@ export interface ModelConfigSaveRequest {
 }
 
 export interface ModelConfigController {
-  discover: (request: ModelConfigDiscoverRequest) => Promise<readonly string[]>;
+  discover: (
+    request: ModelConfigDiscoverRequest,
+  ) => Promise<{
+    modelIds: readonly string[];
+    contextWindows: Readonly<Record<string, number>>;
+  }>;
   save: (request: ModelConfigSaveRequest) => Promise<void>;
   getCommittedConfig?: () => HaochenConfig | undefined;
 }
@@ -122,7 +128,11 @@ export type ModelConfigAction =
   | {type: 'delete'}
   | {type: 'abort'}
   | {type: 'escape'}
-  | {type: 'discovery_succeeded'; modelIds: readonly string[]}
+  | {
+    type: 'discovery_succeeded';
+    modelIds: readonly string[];
+    contextWindows?: Readonly<Record<string, number>>;
+  }
   | {type: 'discovery_failed'; message: string}
   | {type: 'save_succeeded'; config: HaochenConfig}
   | {type: 'reconcile_committed'; config: HaochenConfig; message?: string}
@@ -199,6 +209,7 @@ export function createModelConfigState(config: HaochenConfig): ModelConfigState 
     selectedModelIndex: activeIndex(parsed),
     selectedActionIndex: 0,
     discoveredModelIds: [],
+    discoveredContextWindows: {},
     selectedDiscoveredIndex: 0,
     form: emptyForm(),
   };
@@ -581,6 +592,7 @@ function submitAddAction(state: ModelConfigState): ModelConfigTransition {
 function beginModelDetails(
   state: ModelConfigState,
   modelId: string,
+  contextWindow = 128_000,
 ): ModelConfigTransition {
   const trimmedModelId = modelId.trim();
   if (trimmedModelId.length === 0) return withError(state, 'Model ID 不能为空。');
@@ -592,7 +604,7 @@ function beginModelDetails(
         ...state.form,
         modelId: trimmedModelId,
         displayName: trimmedModelId,
-        contextWindow: '128000',
+        contextWindow: String(contextWindow),
       },
     },
   };
@@ -675,7 +687,13 @@ function transitionSubmit(state: ModelConfigState): ModelConfigTransition {
       return submitProviderAction(state);
     case 'discovered_models': {
       const modelId = state.discoveredModelIds[state.selectedDiscoveredIndex];
-      return modelId === undefined ? {state} : beginModelDetails(state, modelId);
+      return modelId === undefined
+        ? {state}
+        : beginModelDetails(
+          state,
+          modelId,
+          state.discoveredContextWindows[modelId],
+        );
     }
     case 'manual_model_id':
       return beginModelDetails(state, state.form.modelId);
@@ -824,6 +842,7 @@ function transitionAbort(state: ModelConfigState): ModelConfigTransition {
 function transitionDiscoverySucceeded(
   state: ModelConfigState,
   modelIds: readonly string[],
+  contextWindows: Readonly<Record<string, number>> = {},
 ): ModelConfigTransition {
   if (state.screen !== 'discovering') return {state};
   const normalized = [...new Set(
@@ -838,11 +857,23 @@ function transitionDiscoverySucceeded(
       },
     };
   }
+  const normalizedContextWindows: Record<string, number> = {};
+  for (const modelId of normalized) {
+    const contextWindow = contextWindows[modelId];
+    if (
+      contextWindow !== undefined
+      && Number.isInteger(contextWindow)
+      && contextWindow >= 8_000
+    ) {
+      normalizedContextWindows[modelId] = contextWindow;
+    }
+  }
   return {
     state: {
       ...withoutError(state),
       screen: 'discovered_models',
       discoveredModelIds: normalized,
+      discoveredContextWindows: normalizedContextWindows,
       selectedDiscoveredIndex: 0,
     },
   };
@@ -892,7 +923,11 @@ export function transitionModelConfig(
     case 'escape':
       return transitionEscape(state);
     case 'discovery_succeeded':
-      return transitionDiscoverySucceeded(state, action.modelIds);
+      return transitionDiscoverySucceeded(
+        state,
+        action.modelIds,
+        action.contextWindows,
+      );
     case 'discovery_failed':
       return state.screen !== 'discovering'
         ? {state}

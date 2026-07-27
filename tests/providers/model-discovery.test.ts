@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {
   discoverModels,
+  discoverModelsWithContext,
   ModelDiscoveryError,
 } from '../../src/providers/model-discovery.js';
 
@@ -84,6 +85,81 @@ describe('discoverModels', () => {
       'beta',
       'zeta',
     ]);
+  });
+
+  it('uses context metadata returned directly by the provider', async () => {
+    const fetchImpl = mockFetch(async input => {
+      expect(String(input)).toBe('https://models.example.test/v1/models');
+      return new Response(JSON.stringify({
+        data: [
+          {id: 'deepseek-v4-pro', context_window: 1_000_000},
+          {id: 'plain-model', context_length: 64_000},
+        ],
+      }));
+    });
+
+    await expect(discoverModelsWithContext(options(fetchImpl))).resolves.toEqual({
+      modelIds: ['deepseek-v4-pro', 'plain-model'],
+      contextWindows: {
+        'deepseek-v4-pro': 1_000_000,
+        'plain-model': 64_000,
+      },
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it('fills missing context metadata from the matching models.dev provider', async () => {
+    const fetchImpl = mockFetch(async input => {
+      const url = String(input);
+      if (url.endsWith('/models')) {
+        return new Response(JSON.stringify({
+          data: [{id: 'deepseek-v4-pro'}],
+        }));
+      }
+      expect(url).toBe('https://models.dev/api.json');
+      return new Response(JSON.stringify({
+        deepseek: {
+          name: 'DeepSeek',
+          models: {
+            'deepseek-v4-pro': {
+              limit: {context: 1_000_000, output: 262_144},
+            },
+          },
+        },
+      }));
+    });
+
+    await expect(discoverModelsWithContext(options(fetchImpl, {
+      provider: {
+        ...provider,
+        id: 'provider-deepseek',
+        name: 'DeepSeek',
+      },
+    }))).resolves.toEqual({
+      modelIds: ['deepseek-v4-pro'],
+      contextWindows: {'deepseek-v4-pro': 1_000_000},
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const [, catalogInit] = (
+      fetchImpl as unknown as ReturnType<typeof vi.fn>
+    ).mock.calls[1] as [string, RequestInit];
+    expect(new Headers(catalogInit.headers).has('authorization')).toBe(false);
+  });
+
+  it('keeps discovered models when the metadata catalog is unavailable', async () => {
+    const fetchImpl = mockFetch(async input => {
+      if (String(input).endsWith('/models')) {
+        return new Response(JSON.stringify({
+          data: [{id: 'unknown-model'}],
+        }));
+      }
+      throw new TypeError('catalog offline');
+    });
+
+    await expect(discoverModelsWithContext(options(fetchImpl))).resolves.toEqual({
+      modelIds: ['unknown-model'],
+      contextWindows: {},
+    });
   });
 
   it.each([

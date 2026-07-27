@@ -320,12 +320,16 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
           apiKey: effect.apiKey,
           signal,
         }).then(
-          modelIds => {
+          result => {
             if (
               signal.aborted
               || !modelConfigOperationController.current.isCurrent(signal)
             ) return;
-            applyModelConfigAction({type: 'discovery_succeeded', modelIds});
+            applyModelConfigAction({
+              type: 'discovery_succeeded',
+              modelIds: result.modelIds,
+              contextWindows: result.contextWindows,
+            });
           },
           error => {
             if (

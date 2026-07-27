@@ -327,6 +327,22 @@ describe('model configuration state machine', () => {
     expect(state.form.contextWindow).toBe('128000');
   });
 
+  it('prefills the selected model context returned by discovery', () => {
+    let state = step(createModelConfigState(config), {type: 'add'});
+    state = step(state, {type: 'submit'});
+    state = step(state, {type: 'submit'});
+    state = step(state, {
+      type: 'discovery_succeeded',
+      modelIds: ['deepseek-v4-pro'],
+      contextWindows: {'deepseek-v4-pro': 1_000_000},
+    });
+    state = step(state, {type: 'submit'});
+
+    expect(state.screen).toBe('model_display_name');
+    expect(state.form.modelId).toBe('deepseek-v4-pro');
+    expect(state.form.contextWindow).toBe('1000000');
+  });
+
   it('supports manual Model ID and keeps the API key out of saved config', () => {
     let state = step(createModelConfigState(config), {type: 'add'});
     state = step(state, {type: 'move', delta: 1});

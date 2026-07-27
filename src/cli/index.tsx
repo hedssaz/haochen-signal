@@ -16,7 +16,7 @@ import type {
 import {getAppPaths} from '../config/paths.js';
 import {readMacOsKeychain, saveMacOsKeychain} from '../config/credentials.js';
 import {createOpenAiCompatibleClient} from '../providers/openai-compatible.js';
-import {discoverModels} from '../providers/model-discovery.js';
+import {discoverModelsWithContext} from '../providers/model-discovery.js';
 import {classifyOperation} from '../security/boundary.js';
 import {reviewOperation} from '../security/reviewer.js';
 import {AuditStore, workspaceId} from '../sessions/audit.js';
@@ -363,7 +363,7 @@ async function main(): Promise<void> {
           throw new Error(`未找到 ${request.provider.name} 的 API Key。`);
         }
         temporaryProviderKeys.set(request.provider.id, apiKey);
-        return discoverModels({
+        return discoverModelsWithContext({
           provider: request.provider,
           apiKey,
           timeoutMs: activeConfig.timeoutMs,
