@@ -19,6 +19,10 @@ import {runCommand} from '../../src/tools/command/run-command.js';
 import {
   createWindowsProcessController,
 } from '../../src/tools/command/windows-process-tree.js';
+import * as boundaryFacade from '../../src/security/boundary.js';
+import {
+  classifyOperation,
+} from '../../src/security/boundary/classify.js';
 
 describe('tool module boundaries', () => {
   it('keeps the file tool facade compatible', () => {
@@ -41,5 +45,9 @@ describe('tool module boundaries', () => {
     expect(commandFacade.runCommand).toBe(runCommand);
     expect(commandFacade.createWindowsProcessController)
       .toBe(createWindowsProcessController);
+  });
+
+  it('keeps the security boundary facade compatible', () => {
+    expect(boundaryFacade.classifyOperation).toBe(classifyOperation);
   });
 });
