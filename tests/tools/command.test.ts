@@ -380,11 +380,11 @@ describe('foreground command tool', () => {
           '-e',
           [
             'const fs = require("node:fs");',
-            'fs.writeFileSync(process.argv[1], String(process.pid));',
             'process.on("SIGTERM", () => {',
             '  fs.writeFileSync(process.argv[2], "term");',
             '  process.exit(0);',
             '});',
+            'fs.writeFileSync(process.argv[1], String(process.pid));',
             'setInterval(() => {}, 1000);',
           ].join('\n'),
           pidPath,
