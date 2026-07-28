@@ -770,14 +770,15 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
       return;
     }
     if (modelConfigState !== undefined) return;
-    if (resumePicker !== undefined) {
+    const activeResumePicker = resumePickerRef.current ?? resumePicker;
+    if (activeResumePicker !== undefined) {
       if (key.escape) {
         resumePickerRef.current = undefined;
         setResumePicker(undefined);
         return;
       }
       if (key.upArrow || key.downArrow) {
-        const currentPicker = resumePickerRef.current ?? resumePicker;
+        const currentPicker = resumePickerRef.current ?? activeResumePicker;
         const next = moveResumeSelection(
           currentPicker,
           key.upArrow ? -1 : 1,
@@ -788,7 +789,7 @@ export function App<Event extends AgentUiEvent = AgentUiEvent>(props: AppProps<E
         return;
       }
       if (key.return) {
-        const currentPicker = resumePickerRef.current ?? resumePicker;
+        const currentPicker = resumePickerRef.current ?? activeResumePicker;
         const selected = currentPicker.items[currentPicker.selectedIndex]?.session;
         if (selected !== undefined && props.resumeSession !== undefined) {
           void (async () => {
