@@ -8,6 +8,7 @@ import {
 } from './common.js';
 import {isBinary} from './file-access.js';
 import {collectRegularFiles, readSearchFile} from './read.js';
+import {consumeTextLines} from './text-lines.js';
 import type {
   SearchMatch,
   SearchTextInput,
@@ -17,44 +18,6 @@ import type {
 
 const MAX_SEARCH_MATCHES = 200;
 const MAX_SEARCH_PREVIEW_CHARACTERS = 240;
-
-
-interface TextLineState {
-  pending: string;
-}
-
-function consumeTextLines(
-  state: TextLineState,
-  text: string,
-  eof: boolean,
-  onLine: (line: string) => void,
-): void {
-  state.pending += text;
-  let start = 0;
-  let index = 0;
-  while (index < state.pending.length) {
-    const character = state.pending[index];
-    if (character !== '\r' && character !== '\n') {
-      index += 1;
-      continue;
-    }
-    if (character === '\r'
-      && index + 1 === state.pending.length
-      && !eof) {
-      break;
-    }
-
-    onLine(state.pending.slice(start, index));
-    index += character === '\r' && state.pending[index + 1] === '\n' ? 2 : 1;
-    start = index;
-  }
-
-  state.pending = state.pending.slice(start);
-  if (eof && state.pending.length > 0) {
-    onLine(state.pending);
-    state.pending = '';
-  }
-}
 
 function splitTextLines(text: string): string[] {
   const lines: string[] = [];

@@ -1,3 +1,4 @@
+import {existsSync, readFileSync} from 'node:fs';
 import {describe, expect, it} from 'vitest';
 import * as filesFacade from '../../src/tools/files.js';
 import {
@@ -31,6 +32,24 @@ import {
   normalizeWebTool,
 } from '../../src/security/boundary/other-tools.js';
 
+const fileToolsDirectory = new URL('../../src/tools/files/', import.meta.url);
+const commonSource = readFileSync(
+  new URL('common.ts', fileToolsDirectory),
+  'utf8',
+);
+const readSource = readFileSync(
+  new URL('read.ts', fileToolsDirectory),
+  'utf8',
+);
+const searchSource = readFileSync(
+  new URL('search.ts', fileToolsDirectory),
+  'utf8',
+);
+const textLinesUrl = new URL('text-lines.ts', fileToolsDirectory);
+const textLinesSource = existsSync(textLinesUrl)
+  ? readFileSync(textLinesUrl, 'utf8')
+  : '';
+
 describe('tool module boundaries', () => {
   it('keeps the file tool facade compatible', () => {
     expect(filesFacade.listFiles).toBe(listFiles);
@@ -46,6 +65,22 @@ describe('tool module boundaries', () => {
     expect(validatePatch).toBeTypeOf('function');
     expect(prepareTempFile).toBeTypeOf('function');
     expect(executeAdd).toBeTypeOf('function');
+  });
+
+  it('keeps directory exclusion policy in the shared file module', () => {
+    expect(commonSource).toContain('const EXCLUDED_DIRECTORIES');
+    expect(commonSource).toContain('function isExcludedDirectory');
+    expect(readSource).toContain('isExcludedDirectory(entry.name)');
+    expect(readSource).not.toContain('const EXCLUDED_DIRECTORIES');
+  });
+
+  it('keeps text line parsing in one shared internal module', () => {
+    expect(textLinesSource).toContain('interface TextLineState');
+    expect(textLinesSource).toContain('function consumeTextLines');
+    expect(readSource).toContain("from './text-lines.js';");
+    expect(searchSource).toContain("from './text-lines.js';");
+    expect(readSource).not.toContain('function consumeTextLines');
+    expect(searchSource).not.toContain('function consumeTextLines');
   });
 
   it('keeps the command tool facade compatible', () => {

@@ -12,10 +12,15 @@ import {
   comparePaths,
   failure,
   hasExcludedDirectory,
+  isExcludedDirectory,
   success,
   toWorkspacePath,
 } from './common.js';
 import {openVerifiedRegularFile} from './file-access.js';
+import {
+  consumeTextLines,
+  type TextLineState,
+} from './text-lines.js';
 import type {
   ListFilesInput,
   ListFilesOutput,
@@ -29,7 +34,6 @@ const MAX_READ_LINES = 400;
 const MAX_READ_BYTES = 2 * 1024 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_READ_CHARACTERS = 65_536;
-const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules']);
 
 export async function collectRegularFiles(
   inputPath: string,
@@ -68,7 +72,7 @@ export async function collectRegularFiles(
 
       for (const entry of entries) {
         assertNotAborted(signal);
-        if (EXCLUDED_DIRECTORIES.has(entry.name) || entry.isSymbolicLink()) {
+        if (isExcludedDirectory(entry.name) || entry.isSymbolicLink()) {
           continue;
         }
 
@@ -126,44 +130,6 @@ export async function readSearchFile(
     return buffer.subarray(0, offset);
   } finally {
     await file.close();
-  }
-}
-
-
-interface TextLineState {
-  pending: string;
-}
-
-function consumeTextLines(
-  state: TextLineState,
-  text: string,
-  eof: boolean,
-  onLine: (line: string) => void,
-): void {
-  state.pending += text;
-  let start = 0;
-  let index = 0;
-  while (index < state.pending.length) {
-    const character = state.pending[index];
-    if (character !== '\r' && character !== '\n') {
-      index += 1;
-      continue;
-    }
-    if (character === '\r'
-      && index + 1 === state.pending.length
-      && !eof) {
-      break;
-    }
-
-    onLine(state.pending.slice(start, index));
-    index += character === '\r' && state.pending[index + 1] === '\n' ? 2 : 1;
-    start = index;
-  }
-
-  state.pending = state.pending.slice(start);
-  if (eof && state.pending.length > 0) {
-    onLine(state.pending);
-    state.pending = '';
   }
 }
 

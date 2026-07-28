@@ -138,8 +138,12 @@ function hasExcludedDirectory(
   platformSeparator = sep,
 ): boolean {
   return path.split(platformSeparator).some(
-    segment => EXCLUDED_DIRECTORIES.has(segment),
+    segment => isExcludedDirectory(segment),
   );
+}
+
+function isExcludedDirectory(name: string): boolean {
+  return EXCLUDED_DIRECTORIES.has(name);
 }
 
 function comparePaths(left: string, right: string): number {
@@ -184,6 +188,7 @@ export {
   failure,
   fileIdentity,
   hasExcludedDirectory,
+  isExcludedDirectory,
   postCommitWarning,
   safeProperty,
   safeRedactedMessage,
