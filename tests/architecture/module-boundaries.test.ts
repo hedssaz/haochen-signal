@@ -23,6 +23,13 @@ import * as boundaryFacade from '../../src/security/boundary.js';
 import {
   classifyOperation,
 } from '../../src/security/boundary/classify.js';
+import {
+  unwrapCommand,
+} from '../../src/security/boundary/command-policy.js';
+import {
+  normalizeGitTool,
+  normalizeWebTool,
+} from '../../src/security/boundary/other-tools.js';
 
 describe('tool module boundaries', () => {
   it('keeps the file tool facade compatible', () => {
@@ -49,5 +56,14 @@ describe('tool module boundaries', () => {
 
   it('keeps the security boundary facade compatible', () => {
     expect(boundaryFacade.classifyOperation).toBe(classifyOperation);
+  });
+
+  it('keeps command unwrapping inside the command policy', () => {
+    expect(unwrapCommand).toBeTypeOf('function');
+  });
+
+  it('keeps every tool policy on the shared context contract', () => {
+    expect(normalizeGitTool).toHaveLength(3);
+    expect(normalizeWebTool).toHaveLength(3);
   });
 });

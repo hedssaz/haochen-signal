@@ -53,9 +53,9 @@ async function normalizeOperation(
     return normalizeCommand(operation.input, context);
   }
   if (['git_status', 'git_diff', 'git_log'].includes(operation.tool)) {
-    return normalizeGitTool(operation.tool, operation.input);
+    return normalizeGitTool(operation.tool, operation.input, context);
   }
-  return normalizeWebTool(operation.tool, operation.input);
+  return normalizeWebTool(operation.tool, operation.input, context);
 }
 
 export async function classifyOperation(

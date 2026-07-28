@@ -3,6 +3,7 @@ import {
   WEB_SEARCH_RESULT_LIMIT_DEFAULT,
   WEB_SEARCH_RESULT_LIMIT_MAX,
 } from '../../tools/web-contract.js';
+import type {BoundaryContext} from '../types.js';
 import {
   inputError,
   onlyKeys,
@@ -19,6 +20,7 @@ const DEFAULT_GIT_LOG_LIMIT = 20;
 export function normalizeGitTool(
   tool: string,
   value: unknown,
+  _context: BoundaryContext,
 ): NormalizedOperation {
   const input = record(value, `${tool} input`);
   if (tool === 'git_status') {
@@ -62,6 +64,7 @@ export function normalizeGitTool(
 export function normalizeWebTool(
   tool: string,
   value: unknown,
+  _context: BoundaryContext,
 ): NormalizedOperation {
   const input = record(value, `${tool} input`);
   if (tool === 'web_search') {

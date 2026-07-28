@@ -1,30 +1,13 @@
-import {
-  isAbsolute,
-  relative,
-  resolve,
-  sep,
-  win32,
-} from 'node:path';
+import {basename, isAbsolute, relative, resolve, sep} from 'node:path';
 import {resolveExecutableIdentity} from '../executable-identity.js';
 import type {BoundaryContext} from '../types.js';
 import {
-  cleanToken,
-  dequoteShellText,
-  inputError,
-  normalizePath,
-  normalizedExecutable,
-  onlyKeys,
-  optionalBoolean,
-  optionalInteger,
-  record,
-  sensitivePath,
-  stringArray,
-  unwrapCommand,
+  cleanToken, normalizePath, onlyKeys, optionalBoolean,
+  optionalInteger, record, sensitivePath, stringArray,
 } from './common.js';
+import {normalizeCommandTargets} from './command-targets.js';
 import {
-  normalizeCommandNetworkOverrides,
-  normalizeCurlFileTargets,
-  normalizePublicUrl,
+  normalizeCommandNetworkOverrides, normalizeCurlFileTargets,
 } from './network-policy.js';
 import type {NormalizedOperation} from './types.js';
 
@@ -32,16 +15,126 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const DEFAULT_COMMAND_OUTPUT_BYTES = 64 * 1024;
 
 const SHELL_EXECUTABLES = new Set([
-  'sh',
-  'bash',
-  'zsh',
-  'dash',
-  'ksh',
-  'fish',
-  'cmd',
-  'powershell',
-  'pwsh',
+  'sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'cmd', 'powershell', 'pwsh',
 ]);
+
+function normalizedExecutable(command: string): string {
+  const portable = command.replaceAll('\\', '/');
+  return basename(portable).replace(/\.(?:exe|cmd|bat)$/iu, '').toLowerCase();
+}
+
+export function unwrapCommand(
+  command: string,
+  args: string[],
+): {command: string; args: string[]; envSplitString: boolean; commands: string[]} {
+  let effectiveCommand = normalizedExecutable(command);
+  let effectiveArgs = [...args];
+  let envSplitString = false;
+  const commands = [effectiveCommand];
+
+  while (['env', 'command', 'exec', 'nice', 'nohup'].includes(effectiveCommand)
+    && effectiveArgs.length > 0) {
+    let index = 0;
+    if (effectiveCommand === 'env') {
+      while (index < effectiveArgs.length) {
+        const token = effectiveArgs[index] ?? '';
+        if (token === '--') {
+          index += 1;
+          break;
+        }
+        if (token === '-S'
+          || token === '--split-string'
+          || token.startsWith('--split-string=')
+          || (token.startsWith('-S') && token.length > 2)) {
+          envSplitString = true;
+          return {command: effectiveCommand, args: effectiveArgs, envSplitString, commands};
+        }
+        if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)
+          || token === '-i'
+          || token === '--ignore-environment') {
+          index += 1;
+          continue;
+        }
+        if (token === '-u' || token === '--unset') {
+          index += 2;
+          continue;
+        }
+        if (token.startsWith('--unset=')) {
+          index += 1;
+          continue;
+        }
+        break;
+      }
+    } else if (effectiveCommand === 'nice') {
+      while (index < effectiveArgs.length
+        && (effectiveArgs[index] ?? '').startsWith('-')) {
+        index += 1;
+      }
+    }
+
+    const next = effectiveArgs[index];
+    if (next === undefined) break;
+    effectiveCommand = normalizedExecutable(next);
+    commands.push(effectiveCommand);
+    effectiveArgs = effectiveArgs.slice(index + 1);
+  }
+  return {command: effectiveCommand, args: effectiveArgs, envSplitString, commands};
+}
+
+function dequoteShellText(script: string): string {
+  return script.replace(/\\([^\r\n])/gu, '$1').replace(/['"]/gu, '');
+}
+
+function shellCurlArguments(command: string, args: string[]): string[][] {
+  const sets: string[][] = [];
+  for (const value of [command, ...args]) {
+    const text = dequoteShellText(value);
+    if (/(?:^|[\s;&|])curl(?:\s|$)/u.test(text)) {
+      sets.push(text.split(/\s+/u));
+    }
+  }
+  return sets;
+}
+
+function envSplitCurlArguments(command: string, args: string[]): string[][] {
+  if (!unwrapCommand(command, args).commands.includes('env')) return [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index] ?? '';
+    let payload: string | undefined;
+    let remaining: string[];
+    if (argument === '-S' || argument === '--split-string') {
+      payload = args[index + 1];
+      remaining = args.slice(index + 2);
+    } else if (argument.startsWith('--split-string=')) {
+      payload = argument.slice('--split-string='.length);
+      remaining = args.slice(index + 1);
+    } else if (argument.startsWith('-S') && argument.length > 2) {
+      payload = argument.slice(2);
+      remaining = args.slice(index + 1);
+    } else {
+      continue;
+    }
+    if (payload === undefined) return [];
+
+    const tokens = [...dequoteShellText(payload).trim().split(/\s+/u), ...remaining];
+    if (normalizedExecutable(tokens[0] ?? '') === 'curl') {
+      return [tokens.slice(1)];
+    }
+    return [];
+  }
+  return [];
+}
+
+function curlArgumentSets(
+  command: string, args: string[], shellSemantics: boolean,
+): string[][] {
+  const effective = unwrapCommand(command, args);
+  const sets = effective.command === 'curl' ? [effective.args] : [];
+  if (shellSemantics) sets.push(...shellCurlArguments(command, args));
+  sets.push(...envSplitCurlArguments(command, args));
+  return sets;
+}
 
 function exactArgs(actual: string[], expected: readonly string[]): boolean {
   return actual.length === expected.length
@@ -49,10 +142,7 @@ function exactArgs(actual: string[], expected: readonly string[]): boolean {
 }
 
 function isWhitelistedCommand(
-  command: string,
-  args: string[],
-  argsWereExplicit: boolean,
-  shell: boolean,
+  command: string, args: string[], argsWereExplicit: boolean, shell: boolean,
   hasTrustedExecutableIdentity: boolean,
 ): boolean {
   if (!argsWereExplicit || shell || !hasTrustedExecutableIdentity) return false;
@@ -72,12 +162,7 @@ function isWhitelistedCommand(
 
 function gitSubcommand(args: string[]): {name?: string; rest: string[]} {
   const optionsWithValue = new Set([
-    '-C',
-    '-c',
-    '--git-dir',
-    '--work-tree',
-    '--namespace',
-    '--super-prefix',
+    '-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix',
     '--config-env',
   ]);
   let index = 0;
@@ -100,17 +185,13 @@ function containsShellHazard(script: string, pattern: RegExp): boolean {
 }
 
 function commandConfirmationReasons(
-  command: string,
-  args: string[],
-  shell: boolean,
+  command: string, args: string[], shell: boolean,
 ): string[] {
   const reasons: string[] = [];
   const effective = unwrapCommand(command, args);
   const rawText = [command, ...args].join(' ');
   const shellSemantics = usesShellInterpreter(command, args, shell);
-  const allText = shellSemantics
-    ? dequoteShellText(rawText)
-    : rawText;
+  const allText = shellSemantics ? dequoteShellText(rawText) : rawText;
   const lowerArgs = effective.args.map((argument) => argument.toLowerCase());
 
   if (shellSemantics) {
@@ -178,15 +259,8 @@ function commandConfirmationReasons(
   }
 
   const uploadFlags = new Set([
-    '--data',
-    '--data-ascii',
-    '--data-raw',
-    '--data-binary',
-    '--data-urlencode',
-    '--form',
-    '--form-string',
-    '--json',
-    '--upload-file',
+    '--data', '--data-ascii', '--data-raw', '--data-binary', '--data-urlencode',
+    '--form', '--form-string', '--json', '--upload-file',
   ]);
   if (effective.command === 'curl'
     && effective.args.some((argument) => (
@@ -226,10 +300,7 @@ function commandConfirmationReasons(
   return [...new Set(reasons)];
 }
 
-function dependencyInstall(
-  command: string,
-  args: string[],
-): boolean {
+function dependencyInstall(command: string, args: string[]): boolean {
   const effective = unwrapCommand(command, args);
   const lowerArgs = effective.args.map((argument) => argument.toLowerCase());
   if (['npm', 'pnpm', 'yarn', 'bun'].includes(effective.command)) {
@@ -250,10 +321,7 @@ function dependencyInstall(
 }
 
 function commandReviewReasons(
-  command: string,
-  args: string[],
-  argsWereExplicit: boolean,
-  shell: boolean,
+  command: string, args: string[], argsWereExplicit: boolean, shell: boolean,
   hasTrustedExecutableIdentity: boolean,
 ): string[] {
   const reasons: string[] = [];
@@ -296,9 +364,7 @@ function commandReviewReasons(
 }
 
 function usesShellInterpreter(
-  command: string,
-  args: string[],
-  shell: boolean,
+  command: string, args: string[], shell: boolean,
 ): boolean {
   const effective = unwrapCommand(command, args);
   return shell
@@ -306,54 +372,7 @@ function usesShellInterpreter(
     || SHELL_EXECUTABLES.has(effective.command);
 }
 
-function candidatePath(argument: string): string | undefined {
-  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(argument)) return undefined;
-  if (argument.startsWith('file:')) return argument.slice('file:'.length);
-  const equals = argument.indexOf('=');
-  const value = equals === -1 ? argument : argument.slice(equals + 1);
-  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)) return undefined;
-  if (value.startsWith('/')
-    || value.startsWith('./')
-    || value.startsWith('../')
-    || value.startsWith('.\\')
-    || value.startsWith('..\\')
-    || value.startsWith('~/')
-    || value.startsWith('~\\')
-    || /^[A-Za-z]:[\\/]/u.test(value)
-    || value.startsWith('\\\\')) {
-    return value;
-  }
-  if (!/\s/u.test(value)
-    && value.includes('/')
-    && !value.startsWith('@')) {
-    return value;
-  }
-  return undefined;
-}
-
-function embeddedPathCandidates(argument: string): string[] {
-  const candidates: string[] = [];
-  const pattern = /(?:^|[\s'"`;&|<>])((?:\.\.?[\\/]|~[\\/]|\/(?!\/)|[A-Za-z]:[\\/]|\\\\)[^\s'"`;&|<>]*)/gu;
-  let match = pattern.exec(argument);
-  while (match !== null) {
-    const candidate = match[1];
-    if (candidate !== undefined) candidates.push(candidate);
-    match = pattern.exec(argument);
-  }
-  return candidates;
-}
-
-function commandUrlCandidates(argument: string): string[] {
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(argument)) return [argument];
-  return argument.match(
-    /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s'"`;&|<>]+/gu,
-  ) ?? [];
-}
-
-function compactCommandPathCandidates(
-  command: string,
-  args: string[],
-): string[] {
+function compactCommandPathCandidates(command: string, args: string[]): string[] {
   const effective = unwrapCommand(command, args);
   const candidates: string[] = [];
   if (effective.commands.includes('env')) {
@@ -379,111 +398,28 @@ function compactCommandPathCandidates(
   return candidates;
 }
 
-async function normalizeCommandTargets(
-  command: string,
-  args: string[],
-  context: BoundaryContext,
-  shellSemantics: boolean,
-  includeCommandText: boolean,
-): Promise<string[]> {
-  const scope: string[] = [];
-  const seen = new Set<string>();
-  const targetArguments = includeCommandText ? [command, ...args] : args;
-  for (const argument of targetArguments) {
-    const texts = shellSemantics
-      ? [argument, dequoteShellText(argument)]
-      : [argument];
-    for (const text of texts) {
-      for (const rawUrl of commandUrlCandidates(text)) {
-        const url = normalizePublicUrl(rawUrl);
-        const target = `url:${url}`;
-        if (!seen.has(target)) {
-          seen.add(target);
-          scope.push(target);
-        }
-      }
-    }
-    const candidates = texts.flatMap((text) => {
-      const direct = candidatePath(text);
-      return direct === undefined ? embeddedPathCandidates(text) : [direct];
-    });
-    for (const candidate of candidates) {
-      if (candidate.startsWith('~/')
-        || candidate.startsWith('~\\')
-        || (win32.isAbsolute(candidate) && !isAbsolute(candidate))) {
-        inputError('命令参数包含工作区外路径');
-      }
-      const path = await normalizePath(
-        context,
-        candidate,
-        'new',
-        '命令参数路径',
-      );
-      const target = `path:${path}`;
-      if (!seen.has(target)) {
-        seen.add(target);
-        scope.push(target);
-      }
-    }
-  }
-  for (const candidate of compactCommandPathCandidates(command, args)) {
-    const path = await normalizePath(
-      context,
-      candidate,
-      'new',
-      '命令紧凑参数路径',
-    );
-    const target = `path:${path}`;
-    if (!seen.has(target)) {
-      seen.add(target);
-      scope.push(target);
-    }
-  }
-  return scope;
-}
-
 export async function normalizeCommand(
-  value: unknown,
-  context: BoundaryContext,
+  value: unknown, context: BoundaryContext,
 ): Promise<NormalizedOperation> {
   const input = record(value, 'run_command input');
-  onlyKeys(
-    input,
-    ['command', 'args', 'cwd', 'shell', 'timeoutMs', 'maxOutputBytes'],
-    'run_command input',
-  );
+  onlyKeys(input, [
+    'command', 'args', 'cwd', 'shell', 'timeoutMs', 'maxOutputBytes',
+  ], 'run_command input');
   const command = cleanToken(input.command, 'command');
   const argsWereExplicit = input.args !== undefined;
   const args = input.args === undefined ? [] : stringArray(input.args, 'args');
   const shell = optionalBoolean(input.shell, 'shell', false);
   const timeoutMs = optionalInteger(
-    input.timeoutMs,
-    'timeoutMs',
-    DEFAULT_COMMAND_TIMEOUT_MS,
-    0,
-    2_147_483_647,
+    input.timeoutMs, 'timeoutMs', DEFAULT_COMMAND_TIMEOUT_MS, 0, 2_147_483_647,
   );
   const maxOutputBytes = optionalInteger(
-    input.maxOutputBytes,
-    'maxOutputBytes',
-    DEFAULT_COMMAND_OUTPUT_BYTES,
-    0,
+    input.maxOutputBytes, 'maxOutputBytes', DEFAULT_COMMAND_OUTPUT_BYTES, 0,
   );
-  const cwd = await normalizePath(
-    context,
-    input.cwd ?? '.',
-    'existing',
-    'cwd',
-  );
+  const cwd = await normalizePath(context, input.cwd ?? '.', 'existing', 'cwd');
   const absoluteCwd = resolve(context.workspace, cwd);
   const executableIdentity = shell
     ? undefined
-    : await resolveExecutableIdentity(
-      command,
-      absoluteCwd,
-      process.env,
-      process.platform,
-    );
+    : await resolveExecutableIdentity(command, absoluteCwd, process.env, process.platform);
   const executableRelativeToWorkspace = executableIdentity === undefined
     ? undefined
     : relative(context.workspace, executableIdentity);
@@ -499,24 +435,18 @@ export async function normalizeCommand(
   const hasTrustedExecutableIdentity = executableIdentity !== undefined
     && !executableIsInsideWorkspace;
   const shellSemantics = usesShellInterpreter(command, args, shell);
+  const targetArguments = shell ? [command, ...args] : args;
+  const targetTexts = targetArguments.map((argument) => (
+    shellSemantics ? [argument, dequoteShellText(argument)] : [argument]
+  ));
   const targets = await normalizeCommandTargets(
-    command,
-    args,
+    targetTexts,
+    compactCommandPathCandidates(command, args),
     context,
-    shellSemantics,
-    shell,
   );
-  const curlFileTargets = await normalizeCurlFileTargets(
-    command,
-    args,
-    context,
-    shellSemantics,
-  );
-  const networkOverrides = normalizeCommandNetworkOverrides(
-    command,
-    args,
-    shellSemantics,
-  );
+  const curlArgs = curlArgumentSets(command, args, shellSemantics);
+  const curlFileTargets = await normalizeCurlFileTargets(curlArgs, context);
+  const networkOverrides = normalizeCommandNetworkOverrides(curlArgs);
 
   const confirmReasons = commandConfirmationReasons(command, args, shell);
   if (targets.some((target) => (
@@ -525,11 +455,7 @@ export async function normalizeCommand(
     confirmReasons.push('命令可能读取凭据或敏感配置');
   }
   const reviewReasons = commandReviewReasons(
-    command,
-    args,
-    argsWereExplicit,
-    shell,
-    hasTrustedExecutableIdentity,
+    command, args, argsWereExplicit, shell, hasTrustedExecutableIdentity,
   );
   return {
     input: {

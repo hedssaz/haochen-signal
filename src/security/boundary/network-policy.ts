@@ -2,11 +2,8 @@ import {isIP} from 'node:net';
 import type {BoundaryContext} from '../types.js';
 import {
   cleanToken,
-  dequoteShellText,
   inputError,
   normalizePath,
-  normalizedExecutable,
-  unwrapCommand,
 } from './common.js';
 
 function curlResolveAddresses(specification: string): string[] {
@@ -126,69 +123,11 @@ function curlOptionSpecifications(
   return values;
 }
 
-function shellCurlArguments(command: string, args: string[]): string[][] {
-  const sets: string[][] = [];
-  for (const value of [command, ...args]) {
-    const text = dequoteShellText(value);
-    if (/(?:^|[\s;&|])curl(?:\s|$)/u.test(text)) {
-      sets.push(text.split(/\s+/u));
-    }
-  }
-  return sets;
-}
-
-function envSplitCurlArguments(command: string, args: string[]): string[][] {
-  if (!unwrapCommand(command, args).commands.includes('env')) return [];
-
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index] ?? '';
-    let payload: string | undefined;
-    let remaining: string[];
-    if (argument === '-S' || argument === '--split-string') {
-      payload = args[index + 1];
-      remaining = args.slice(index + 2);
-    } else if (argument.startsWith('--split-string=')) {
-      payload = argument.slice('--split-string='.length);
-      remaining = args.slice(index + 1);
-    } else if (argument.startsWith('-S') && argument.length > 2) {
-      payload = argument.slice(2);
-      remaining = args.slice(index + 1);
-    } else {
-      continue;
-    }
-    if (payload === undefined) return [];
-
-    const tokens = [
-      ...dequoteShellText(payload).trim().split(/\s+/u),
-      ...remaining,
-    ];
-    if (normalizedExecutable(tokens[0] ?? '') === 'curl') {
-      return [tokens.slice(1)];
-    }
-    return [];
-  }
-  return [];
-}
-
-function curlArgumentSets(
-  command: string,
-  args: string[],
-  shellSemantics: boolean,
-): string[][] {
-  const effective = unwrapCommand(command, args);
-  const sets = effective.command === 'curl' ? [effective.args] : [];
-  if (shellSemantics) sets.push(...shellCurlArguments(command, args));
-  sets.push(...envSplitCurlArguments(command, args));
-  return sets;
-}
-
 function curlFilePathCandidates(
-  command: string,
-  args: string[],
-  shellSemantics: boolean,
+  curlArgumentSets: string[][],
 ): string[] {
   const candidates: string[] = [];
-  for (const curlArgs of curlArgumentSets(command, args, shellSemantics)) {
+  for (const curlArgs of curlArgumentSets) {
     for (let index = 0; index < curlArgs.length; index += 1) {
       const argument = curlArgs[index] ?? '';
       const uploadMatch = /^--upload-file=(.+)$/u.exec(argument)
@@ -215,17 +154,11 @@ function curlFilePathCandidates(
 }
 
 export async function normalizeCurlFileTargets(
-  command: string,
-  args: string[],
+  curlArgumentSets: string[][],
   context: BoundaryContext,
-  shellSemantics: boolean,
 ): Promise<string[]> {
   const targets: string[] = [];
-  for (const candidate of curlFilePathCandidates(
-    command,
-    args,
-    shellSemantics,
-  )) {
+  for (const candidate of curlFilePathCandidates(curlArgumentSets)) {
     const path = await normalizePath(
       context,
       candidate,
@@ -238,12 +171,10 @@ export async function normalizeCurlFileTargets(
 }
 
 export function normalizeCommandNetworkOverrides(
-  command: string,
-  args: string[],
-  shellSemantics: boolean,
+  curlArgumentSets: string[][],
 ): string[] {
   const scope: string[] = [];
-  for (const curlArgs of curlArgumentSets(command, args, shellSemantics)) {
+  for (const curlArgs of curlArgumentSets) {
     for (const specification of curlOptionSpecifications(curlArgs, '--resolve')) {
       for (const address of curlResolveAddresses(specification)) {
         const version = isIP(address);

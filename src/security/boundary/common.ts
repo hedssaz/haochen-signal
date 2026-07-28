@@ -1,5 +1,4 @@
 import {createHash} from 'node:crypto';
-import {basename} from 'node:path';
 import {
   resolveWorkspacePath,
   toPortableRelativePath,
@@ -287,83 +286,4 @@ export function sensitivePath(path: string): boolean {
     ].includes(leaf)
     || leaf.endsWith('.pem')
     || leaf.endsWith('.key');
-}
-
-export function normalizedExecutable(command: string): string {
-  const portable = command.replaceAll('\\', '/');
-  return basename(portable).replace(/\.(?:exe|cmd|bat)$/iu, '').toLowerCase();
-}
-
-export function unwrapCommand(
-  command: string,
-  args: string[],
-): {
-  command: string;
-  args: string[];
-  envSplitString: boolean;
-  commands: string[];
-} {
-  let effectiveCommand = normalizedExecutable(command);
-  let effectiveArgs = [...args];
-  let envSplitString = false;
-  const commands = [effectiveCommand];
-
-  while (['env', 'command', 'exec', 'nice', 'nohup'].includes(effectiveCommand)
-    && effectiveArgs.length > 0) {
-    let index = 0;
-    if (effectiveCommand === 'env') {
-      while (index < effectiveArgs.length) {
-        const token = effectiveArgs[index] ?? '';
-        if (token === '--') {
-          index += 1;
-          break;
-        }
-        if (token === '-S'
-          || token === '--split-string'
-          || token.startsWith('--split-string=')
-          || (token.startsWith('-S') && token.length > 2)) {
-          envSplitString = true;
-          return {
-            command: effectiveCommand,
-            args: effectiveArgs,
-            envSplitString,
-            commands,
-          };
-        }
-        if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(token)
-          || token === '-i'
-          || token === '--ignore-environment') {
-          index += 1;
-          continue;
-        }
-        if (token === '-u' || token === '--unset') {
-          index += 2;
-          continue;
-        }
-        if (token.startsWith('--unset=')) {
-          index += 1;
-          continue;
-        }
-        break;
-      }
-    } else if (effectiveCommand === 'nice') {
-      while (index < effectiveArgs.length
-        && (effectiveArgs[index] ?? '').startsWith('-')) {
-        index += 1;
-      }
-    }
-
-    const next = effectiveArgs[index];
-    if (next === undefined) break;
-    effectiveCommand = normalizedExecutable(next);
-    commands.push(effectiveCommand);
-    effectiveArgs = effectiveArgs.slice(index + 1);
-  }
-  return {command: effectiveCommand, args: effectiveArgs, envSplitString, commands};
-}
-
-export function dequoteShellText(script: string): string {
-  return script
-    .replace(/\\([^\r\n])/gu, '$1')
-    .replace(/['"]/gu, '');
 }
