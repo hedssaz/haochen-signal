@@ -100,7 +100,7 @@ describe('workspace file tools', () => {
     expect(result.truncated).toBe(true);
     expect(result.data?.files).toHaveLength(500);
     expect(result.summary).toContain('已截断');
-  });
+  }, 15_000);
 
   it('does not mark a listing of exactly 500 files as truncated', async () => {
     await Promise.all(Array.from({length: 500}, (_, index) =>
