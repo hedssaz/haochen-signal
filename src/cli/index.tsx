@@ -7,7 +7,11 @@ import {render} from 'ink';
 import {z} from 'zod';
 import {runAgentTask} from '../agent/loop.js';
 import {compactHistory} from '../agent/context.js';
-import {loadConfig, saveConfig} from '../config/load.js';
+import {
+  loadConfigDocument,
+  saveConfig,
+  type LoadedConfigDocument,
+} from '../config/load.js';
 import type {
   HaochenConfig,
   ModelProfile,
@@ -16,7 +20,10 @@ import type {
 import {getAppPaths} from '../config/paths.js';
 import {readMacOsKeychain, saveMacOsKeychain} from '../config/credentials.js';
 import {createOpenAiCompatibleClient} from '../providers/openai-compatible.js';
-import {discoverModelsWithContext} from '../providers/model-discovery.js';
+import {
+  discoverCatalogContextWindows,
+  discoverModelsWithContext,
+} from '../providers/model-discovery.js';
 import {classifyOperation} from '../security/boundary.js';
 import {reviewOperation} from '../security/reviewer.js';
 import {AuditStore, workspaceId} from '../sessions/audit.js';
@@ -90,13 +97,45 @@ export function toolDefinitions(): Map<string, ToolDefinitionSpec<unknown, unkno
 }
 
 export interface ConfigPersistence {
-  load: (path: string) => Promise<HaochenConfig | undefined>;
+  load: (path: string) => Promise<LoadedConfigDocument | undefined>;
   save: (path: string, config: HaochenConfig) => Promise<void>;
+  enrichLegacy: (config: HaochenConfig) => Promise<HaochenConfig>;
+}
+
+async function enrichLegacyConfig(config: HaochenConfig): Promise<HaochenConfig> {
+  const provider = config.providers[0];
+  if (provider === undefined) return config;
+  const candidates = config.models.filter(model => (
+    model.providerId === provider.id && model.contextWindow === 128_000
+  ));
+  if (candidates.length === 0) return config;
+  const contextWindows = await discoverCatalogContextWindows({
+    provider,
+    modelIds: candidates.map(model => model.modelId),
+    timeoutMs: config.timeoutMs,
+    signal: new AbortController().signal,
+  });
+  let changed = false;
+  const models = config.models.map(model => {
+    const contextWindow = contextWindows[model.modelId];
+    if (
+      model.providerId !== provider.id
+      || model.contextWindow !== 128_000
+      || contextWindow === undefined
+      || contextWindow === model.contextWindow
+    ) {
+      return model;
+    }
+    changed = true;
+    return {...model, contextWindow};
+  });
+  return changed ? {...config, models} : config;
 }
 
 const defaultConfigPersistence: ConfigPersistence = {
-  load: loadConfig,
+  load: loadConfigDocument,
   save: saveConfig,
+  enrichLegacy: enrichLegacyConfig,
 };
 
 export async function loadOrCreateConfig(
@@ -104,7 +143,12 @@ export async function loadOrCreateConfig(
   dependencies: ConfigPersistence = defaultConfigPersistence,
 ): Promise<HaochenConfig> {
   const loaded = await dependencies.load(path);
-  if (loaded !== undefined) return loaded;
+  if (loaded !== undefined) {
+    if (!loaded.migratedFromLegacy) return loaded.config;
+    const enriched = await dependencies.enrichLegacy(loaded.config);
+    await dependencies.save(path, enriched);
+    return enriched;
+  }
   const created = createFirstRunConfig();
   await dependencies.save(path, created);
   return created;

@@ -16,7 +16,14 @@ export interface SaveFileOperations {
 
 const defaultSaveFileOperations: SaveFileOperations = {mkdir, writeFile, rename, unlink};
 
-export async function loadConfig(path: string): Promise<HaochenConfig | undefined> {
+export interface LoadedConfigDocument {
+  config: HaochenConfig;
+  migratedFromLegacy: boolean;
+}
+
+export async function loadConfigDocument(
+  path: string,
+): Promise<LoadedConfigDocument | undefined> {
   let contents: string;
 
   try {
@@ -26,7 +33,20 @@ export async function loadConfig(path: string): Promise<HaochenConfig | undefine
     throw error;
   }
 
-  return parseConfig(JSON.parse(contents));
+  const input: unknown = JSON.parse(contents);
+  const migratedFromLegacy = !(
+    typeof input === 'object'
+    && input !== null
+    && Object.prototype.hasOwnProperty.call(input, 'version')
+  );
+  return {
+    config: parseConfig(input),
+    migratedFromLegacy,
+  };
+}
+
+export async function loadConfig(path: string): Promise<HaochenConfig | undefined> {
+  return (await loadConfigDocument(path))?.config;
 }
 
 export async function saveConfig(

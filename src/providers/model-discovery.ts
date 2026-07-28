@@ -27,6 +27,11 @@ interface DiscoveredProviderModel {
   contextWindow?: number;
 }
 
+type CatalogDiscoveryOptions = Pick<
+  DiscoverModelsOptions,
+  'fetch' | 'provider' | 'signal' | 'timeoutMs'
+>;
+
 interface OperationSignal {
   signal: AbortSignal;
   failure(): InternalFailure | undefined;
@@ -541,7 +546,7 @@ function catalogContexts(
 }
 
 async function discoverCatalogContexts(
-  options: DiscoverModelsOptions,
+  options: CatalogDiscoveryOptions,
   modelIds: ReadonlySet<string>,
 ): Promise<Record<string, number>> {
   if (modelIds.size === 0) return {};
@@ -585,6 +590,12 @@ async function discoverCatalogContexts(
     clearTimeout(timeout);
     options.signal.removeEventListener('abort', onCallerAbort);
   }
+}
+
+export async function discoverCatalogContextWindows(
+  options: CatalogDiscoveryOptions & {modelIds: readonly string[]},
+): Promise<Record<string, number>> {
+  return discoverCatalogContexts(options, new Set(options.modelIds));
 }
 
 export async function discoverModels(

@@ -51,7 +51,7 @@ API Key 按以下顺序读取：
 
 通过 `/model` 添加供应商时，API Key 使用隐藏输入且不会写入配置 JSON。macOS 会按供应商保存到 Keychain；Linux 和 Windows 只保留当前进程凭据。对于配置中已有、但当前进程尚未解析到凭据的供应商，第一次实际任务会在 Ink 界面内显示独立的圆点掩码输入；它与普通命令共用 Ink 已接管的 stdin，不会另建 readline、切换 raw mode 或把 Key 写入终端转录。提交后输入立即恢复，下一条本地命令可直接使用。旧配置迁移出的 `legacy-provider` 仍可回退读取 `HAOCHEN_API_KEY` 与旧 Keychain 条目；新供应商不会读取这两个全局旧来源。
 
-添加供应商或向现有供应商追加模型时，可向规范化后的 `{baseUrl}/models` 发起 OpenAI-compatible `GET` 请求。现有供应商会复用原 provider、API 地址和已经解析的临时凭据、专属环境变量或 Keychain 条目，不会创建重复 provider；也可直接手动填写 Model ID。响应体最多为 2 MiB，只接受对象中的非空 `data[].id`；模型 ID 会去重并按确定性字典序排列。选择模型后，最大上下文会优先采用供应商返回的 `context_window`、`context_length` 等元数据；缺失时用不携带 API Key 的公开 `models.dev` 目录补全，目录不可用或仍查不到时才回退到可手动修改的 128000。请求支持取消和超时，响应正文、认证头与 API Key 不会进入界面错误。错误边界不会对未知抛出值执行 `instanceof`；只在 `typeof` 证明可作为 WeakMap 键时查询内部错误，恶意 Proxy 的原型 trap 不会绕过 total 脱敏。
+添加供应商或向现有供应商追加模型时，可向规范化后的 `{baseUrl}/models` 发起 OpenAI-compatible `GET` 请求。现有供应商会复用原 provider、API 地址和已经解析的临时凭据、专属环境变量或 Keychain 条目，不会创建重复 provider；也可直接手动填写 Model ID。响应体最多为 2 MiB，只接受对象中的非空 `data[].id`；模型 ID 会去重并按确定性字典序排列。选择模型后，最大上下文会优先采用供应商返回的 `context_window`、`context_length` 等元数据；缺失时用不携带 API Key 的公开 `models.dev` 目录补全，目录不可用或仍查不到时才回退到可手动修改的 128000。旧版单模型配置首次升级时也会通过同一公开目录补全仍为 128000 默认值的上下文并立即保存成 v2，后续启动不重复刷新。请求支持取消和超时，响应正文、认证头与 API Key 不会进入界面错误。错误边界不会对未知抛出值执行 `instanceof`；只在 `typeof` 证明可作为 WeakMap 键时查询内部错误，恶意 Proxy 的原型 trap 不会绕过 total 脱敏。
 
 最直接的启动方式是：
 

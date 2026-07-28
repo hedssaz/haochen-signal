@@ -21,8 +21,12 @@ interface CliTestExports {
   loadOrCreateConfig?: (
     path: string,
     dependencies: {
-      load: (path: string) => Promise<HaochenConfig | undefined>;
+      load: (path: string) => Promise<{
+        config: HaochenConfig;
+        migratedFromLegacy: boolean;
+      } | undefined>;
       save: (path: string, config: HaochenConfig) => Promise<void>;
+      enrichLegacy: (config: HaochenConfig) => Promise<HaochenConfig>;
     },
   ) => Promise<HaochenConfig>;
   createModelRuntimeResolver?: (options: {
@@ -124,6 +128,7 @@ describe('CLI entrypoint', () => {
     await expect(cli.loadOrCreateConfig('/config.json', {
       load,
       save,
+      enrichLegacy: vi.fn(),
     })).resolves.toEqual({
       version: 2,
       providers: [],
@@ -138,6 +143,56 @@ describe('CLI entrypoint', () => {
       models: [],
       timeoutMs: 60_000,
     });
+  });
+
+  it('enriches and persists a legacy config exactly once during migration', async () => {
+    const cli = await importCliForTest();
+    expect(cli.loadOrCreateConfig).toBeTypeOf('function');
+    if (cli.loadOrCreateConfig === undefined) return;
+    const legacyConfig = runtimeConfig();
+    const enrichedConfig = {
+      ...legacyConfig,
+      models: legacyConfig.models.map(model => (
+        model.id === legacyConfig.activeModelId
+          ? {...model, contextWindow: 1_000_000}
+          : model
+      )),
+    };
+    const save = vi.fn(async () => undefined);
+    const enrichLegacy = vi.fn(async () => enrichedConfig);
+
+    await expect(cli.loadOrCreateConfig('/config.json', {
+      load: vi.fn(async () => ({
+        config: legacyConfig,
+        migratedFromLegacy: true,
+      })),
+      save,
+      enrichLegacy,
+    })).resolves.toEqual(enrichedConfig);
+
+    expect(enrichLegacy).toHaveBeenCalledWith(legacyConfig);
+    expect(save).toHaveBeenCalledWith('/config.json', enrichedConfig);
+  });
+
+  it('does not refresh or rewrite an existing v2 config during startup', async () => {
+    const cli = await importCliForTest();
+    expect(cli.loadOrCreateConfig).toBeTypeOf('function');
+    if (cli.loadOrCreateConfig === undefined) return;
+    const config = runtimeConfig();
+    const save = vi.fn(async () => undefined);
+    const enrichLegacy = vi.fn(async () => config);
+
+    await expect(cli.loadOrCreateConfig('/config.json', {
+      load: vi.fn(async () => ({
+        config,
+        migratedFromLegacy: false,
+      })),
+      save,
+      enrichLegacy,
+    })).resolves.toEqual(config);
+
+    expect(enrichLegacy).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
   });
 
   it('reads the active provider for every task and reuses clients by provider config and credential', async () => {

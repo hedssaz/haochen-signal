@@ -2,7 +2,11 @@ import {describe, expect, it, vi} from 'vitest';
 import {mkdtemp, readFile, readdir, rm, stat, utimes, writeFile} from 'node:fs/promises';
 import {basename, dirname, join, resolve} from 'node:path';
 import {tmpdir} from 'node:os';
-import {loadConfig, saveConfig} from '../../src/config/load.js';
+import {
+  loadConfig,
+  loadConfigDocument,
+  saveConfig,
+} from '../../src/config/load.js';
 import {parseConfig} from '../../src/config/schema.js';
 import {getAppPaths} from '../../src/config/paths.js';
 
@@ -433,6 +437,34 @@ describe('config files', () => {
           modelId: 'wolf-1',
         }],
         activeModelId: 'legacy-primary-model',
+      });
+    } finally {
+      await rm(directory, {recursive: true, force: true});
+    }
+  });
+
+  it('reports whether a loaded config needs legacy migration', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'haochen-config-'));
+    const legacyPath = join(directory, 'legacy.json');
+    const currentPath = join(directory, 'current.json');
+    await writeFile(legacyPath, JSON.stringify({
+      baseUrl: 'https://example.test/v1',
+      model: 'wolf-1',
+    }));
+    await writeFile(currentPath, JSON.stringify({
+      version: 2,
+      providers: [],
+      models: [],
+    }));
+
+    try {
+      await expect(loadConfigDocument(legacyPath)).resolves.toMatchObject({
+        migratedFromLegacy: true,
+        config: {version: 2},
+      });
+      await expect(loadConfigDocument(currentPath)).resolves.toMatchObject({
+        migratedFromLegacy: false,
+        config: {version: 2},
       });
     } finally {
       await rm(directory, {recursive: true, force: true});
