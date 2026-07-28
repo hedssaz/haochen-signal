@@ -674,6 +674,9 @@ describe('App', () => {
     app.stdin.write('\r');
     await vi.waitFor(() => expect(app.lastFrame()).toContain('模型配置'));
     app.stdin.write('\u001B[B');
+    await vi.waitFor(() => {
+      expect(app.lastFrame()).toContain('› ○ DeepSeek Reasoner');
+    });
     app.stdin.write('\r');
     await vi.waitFor(() => {
       expect(save).toHaveBeenCalledOnce();
