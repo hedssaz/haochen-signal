@@ -225,6 +225,14 @@ npm pack --dry-run
 
 `npm pack --dry-run` 的发布白名单只包含 `package.json`、中文 README、CHANGELOG 和两个构建产物。`prepack` 会重新执行双构建，避免发布过期文件。
 
+### 核心模块结构
+
+以下三个文件保留既有导入路径，作为兼容门面；实现按职责放在同名内部目录，新增功能应优先落入对应职责模块：
+
+- `src/tools/files.ts` → `src/tools/files/`：文件访问、读取、搜索、写入与补丁计划/执行；
+- `src/tools/command.ts` → `src/tools/command/`：命令运行、进程控制、输出日志与平台进程树处理；
+- `src/security/boundary.ts` → `src/security/boundary/`：文件、命令、网络及其他工具的确定性边界分类。
+
 ## 设计文档
 
 - [设计规格](docs/superpowers/specs/2026-07-25-haochen-signal-design.md)
