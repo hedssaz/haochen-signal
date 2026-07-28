@@ -64,6 +64,27 @@ describe.sequential('发布构建', () => {
     }
   });
 
+  it('两个构建都内置完整浩宸宇宙设定', async () => {
+    const escapedForBuild = (value: string) => value.replace(
+      /[^\x20-\x7e]/gu,
+      character => `\\u${character
+        .charCodeAt(0)
+        .toString(16)
+        .toUpperCase()
+        .padStart(4, '0')}`,
+    );
+    const title = escapedForBuild('浩宸宇宙：狼王与信号场设定集');
+    const summary = escapedForBuild(
+      '苏浩宸从一只躲进纸箱、害怕龙卷风的奶龙开始',
+    );
+
+    for (const file of buildFiles) {
+      const source = await readFile(new URL(file, root), 'utf8');
+      expect(source, file).toContain(title);
+      expect(source, file).toContain(summary);
+    }
+  });
+
   it('单文件构建不压缩并包含全部运行依赖', async () => {
     const [standardSource, oneFileSource, packageSource] = await Promise.all([
       readFile(new URL('dist/cli.mjs', root), 'utf8'),

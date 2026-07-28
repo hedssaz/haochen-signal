@@ -1,3 +1,4 @@
+import {createHash} from 'node:crypto';
 import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -7,6 +8,7 @@ import {
   runAgentTask,
   type RunAgentTaskOptions,
 } from '../../src/agent/loop.js';
+import {HAOCHEN_UNIVERSE_LORE} from '../../src/agent/haochen-universe.js';
 import {buildAgentSystemPrompt} from '../../src/agent/prompt.js';
 import type {
   ModelClient,
@@ -1033,6 +1035,13 @@ describe('main agent loop', () => {
 });
 
 describe('main agent system prompt', () => {
+  it('preserves the complete canonical Haochen universe document', () => {
+    expect(Buffer.byteLength(HAOCHEN_UNIVERSE_LORE, 'utf8')).toBe(17_789);
+    expect(
+      createHash('sha256').update(HAOCHEN_UNIVERSE_LORE).digest('hex'),
+    ).toBe('88c140969e9b3a21a70b51f3dbdc9a10f6dc3f46203d281e021c0763d06b0c1c');
+  });
+
   it('states the trusted execution boundary and evidence requirements', () => {
     const prompt = buildAgentSystemPrompt({
       workspace: '/workspace/project',
@@ -1054,5 +1063,15 @@ describe('main agent system prompt', () => {
     expect(prompt).toContain('禁止重复规划');
     expect(prompt).toContain('新建文件使用 write_file');
     expect(prompt).toContain('已有文件使用 apply_patch');
+    expect(prompt).toContain('# 浩宸宇宙：狼王与信号场设定集');
+    expect(prompt).toContain('## 6. 七个狼群节点');
+    expect(prompt).toContain('## 16. 终焉狼庭');
+    expect(prompt).toContain('所有现实人物与虚构设定应明确区分');
+    expect(prompt).toContain(
+      '苏浩宸从一只躲进纸箱、害怕龙卷风的奶龙开始',
+    );
+    expect(prompt.indexOf('权限由边界守卫决定')).toBeLessThan(
+      prompt.indexOf('# 浩宸宇宙：狼王与信号场设定集'),
+    );
   });
 });

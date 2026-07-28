@@ -32,13 +32,13 @@
 - Consumes: `buildAgentSystemPrompt(input: AgentPromptInput): string`
 - Produces: `HAOCHEN_UNIVERSE_LORE: string`
 
-- [ ] **Step 1: 写提示词失败测试**
+- [x] **Step 1: 写提示词失败测试**
 
 在 `main agent system prompt` 测试组新增断言，要求提示词包含：
 
 ```ts
 expect(prompt).toContain('# 浩宸宇宙：狼王与信号场设定集');
-expect(prompt).toContain('七个节点共同构成完整狼王信号');
+expect(prompt).toContain('## 6. 七个狼群节点');
 expect(prompt).toContain('## 16. 终焉狼庭');
 expect(prompt).toContain('所有现实人物与虚构设定应明确区分');
 expect(prompt).toContain('苏浩宸从一只躲进纸箱、害怕龙卷风的奶龙开始');
@@ -47,7 +47,7 @@ expect(prompt.indexOf('权限由边界守卫决定')).toBeLessThan(
 );
 ```
 
-- [ ] **Step 2: 运行测试并确认按预期失败**
+- [x] **Step 2: 运行测试并确认按预期失败**
 
 Run:
 
@@ -57,7 +57,7 @@ npx vitest run tests/agent/loop.test.ts
 
 Expected: FAIL，缺少世界观标题和代表性原文。
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 读取 `/Users/hedssaz/Documents/Project/浩宸小游戏/浩宸宇宙_狼王与信号场设定集.md`，先确认 SHA-256 为 `88c140969e9b3a21a70b51f3dbdc9a10f6dc3f46203d281e021c0763d06b0c1c`，再用下面的确定性转换生成模块正文；把输出作为注册 `apply_patch` 工具的新增文件内容，不用命令行写文件：
 
@@ -87,7 +87,7 @@ HAOCHEN_UNIVERSE_LORE,
 '--- 浩宸宇宙完整设定结束 ---',
 ```
 
-- [ ] **Step 4: 运行提示词测试并确认通过**
+- [x] **Step 4: 运行提示词测试并确认通过**
 
 Run:
 
@@ -97,7 +97,7 @@ npx vitest run tests/agent/loop.test.ts
 
 Expected: PASS。
 
-- [ ] **Step 5: 写构建失败测试**
+- [x] **Step 5: 写构建失败测试**
 
 在 `tests/integration/builds.test.ts` 新增测试，读取两个构建并断言：
 
@@ -109,7 +109,7 @@ for (const file of buildFiles) {
 }
 ```
 
-- [ ] **Step 6: 先确认旧构建失败，再重新构建并确认通过**
+- [x] **Step 6: 先确认旧构建失败，再重新构建并确认通过**
 
 Run:
 
@@ -117,13 +117,13 @@ Run:
 npx vitest run tests/integration/builds.test.ts
 ```
 
-Expected: 首次针对旧产物 FAIL；测试的 `beforeAll` 重新构建接入实现后 PASS。
+Expected: 旧产物检查确认缺少设定；重新构建后测试 PASS。测试按 esbuild 的 `\uXXXX` 转义形式匹配中文内容。
 
-- [ ] **Step 7: 更新文档**
+- [x] **Step 7: 更新文档**
 
 README 在产品介绍后明确说明：完整世界观随主代理提示词内置，固定占用输入上下文；权限和技术证据规则优先；红眼审查器不加载世界观。CHANGELOG 把设计项更新为已实现功能。
 
-- [ ] **Step 8: 完整验证**
+- [x] **Step 8: 完整验证**
 
 Run:
 
@@ -136,7 +136,7 @@ git diff --check
 
 Expected: 全部退出码为 0。
 
-- [ ] **Step 9: 提交**
+- [x] **Step 9: 提交**
 
 ```bash
 git add src/agent/haochen-universe.ts src/agent/prompt.ts tests/agent/loop.test.ts tests/integration/builds.test.ts README.md CHANGELOG.md
